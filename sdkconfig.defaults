@@ -1,0 +1,104 @@
+# ESP32-S3 N16R8 configuration
+
+# Flash: 16 MB
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# PSRAM: 8 MB Octal SPI
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# malloc() routing between the two heaps. ALWAYSINTERNAL is the max request size
+# that is preferentially served from internal DRAM; anything larger goes to PSRAM
+# first. The Rust global allocator routes through malloc(), and the incoming-message
+# path makes thousands of small (<4KB) allocations, and at 4096 they ALL landed in
+# internal DRAM and drained it mid-burst below what a FreeRTOS mutex/semaphore needs
+# (which MUST be internal), surfacing as `xSemaphoreCreateMutex -> EAGAIN` panics.
+# Lowered to 256 so the bulk of those allocations go to PSRAM, leaving the internal
+# pool for objects that can only live there. FreeRTOS objects use an explicit
+# INTERNAL cap (not this heuristic), so they keep getting internal DRAM.
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+# Allow FreeRTOS task stacks in PSRAM (needed for large thread stacks)
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# Move instructions to PSRAM to avoid cache crashes during heavy PSRAM allocation
+# (flash and octal PSRAM share the SPI bus on N16R8)
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+# Use 32KB instruction cache to reduce PSRAM consumption from instruction fetch
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+
+# CPU at full speed (default is 160 MHz)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Keep main task small - async work runs on spawned threads
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Task watchdog stays enabled with a generous 30 s timeout (protocol init is slow)
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=32768
+
+# WiFi
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+# Allocate WiFi/lwIP dynamic buffers from PSRAM, not scarce internal DRAM. One of
+# several knobs (with ALWAYSINTERNAL above) that keep internal DRAM free for the
+# FreeRTOS objects that can only live there.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# esp-tls: allow skipping server certificate verification. The mock server mints a
+# fresh ephemeral self-signed cert on every start, so verifying against any pinned CA
+# is impossible. With these enabled AND no CA configured in esp_tls_cfg_t (see
+# transport.rs when SKIP_TLS_VERIFY=true), esp-tls applies MBEDTLS_SSL_VERIFY_NONE.
+# For the real WhatsApp gateway set SKIP_TLS_VERIFY=false in main.rs (uses the cert
+# bundle and ignores these); these flags are inert unless the CA source is left unset.
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# mbedTLS: needed for TLS to WhatsApp servers
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384
+# Do AES in software (mbedTLS heap = PSRAM via EXTERNAL_MEM_ALLOC) instead of the
+# hardware accelerator, whose DMA buffers need internal DRAM and OOM during the
+# post-pairing prekey upload ("esp-aes: Failed to allocate memory").
+CONFIG_MBEDTLS_HARDWARE_AES=n
+
+# NVS: for credential storage
+CONFIG_NVS_ENCRYPTION=n
+
+# SNTP: needed for correct timestamps
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# Partition table: our custom partitions.csv (one large factory app). The ~4.3 MB
+# firmware does NOT fit the built-in 1500K factory, so a custom table is required.
+# esp-idf-sys builds in a generated cmake project at target/<triple>/<profile>/build/
+# esp-idf-sys-<hash>/out, and ESP-IDF resolves CUSTOM_FILENAME relative to THAT dir,
+# so we climb 6 levels back to the crate root. Works with the default target dir;
+# a custom CARGO_TARGET_DIR would need this depth adjusted.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../partitions.csv"
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Crash core dump → flash (ELF format). Captures Rust panics AND hardware exceptions
+# (LoadProhibited, etc.) to the coredump partition; read at boot via
+# esp_core_dump_get_summary. NOT capturing DRAM keeps the dump small (<64 KB).
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=32
+CONFIG_ESP_COREDUMP_STACK_SIZE=1024
+
+# Binary size reduction
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_NEWLIB_NANO_FORMAT=y
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_LWIP_IPV6=n
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y

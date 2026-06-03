@@ -1,0 +1,333 @@
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use async_channel::Sender;
+use async_trait::async_trait;
+use bytes::Bytes;
+use tungstenite::Message;
+use wacore::net::{DisconnectReason, Transport, TransportEvent, TransportFactory};
+
+/// TLS stream backed by ESP-IDF's mbedTLS.
+pub struct EspTlsStream {
+    tls: *mut esp_idf_svc::sys::esp_tls_t,
+}
+
+unsafe impl Send for EspTlsStream {}
+
+impl EspTlsStream {
+    pub fn connect(host: &str, port: u16, skip_tls_verify: bool) -> Result<Self> {
+        let mut cfg: esp_idf_svc::sys::esp_tls_cfg_t = Default::default();
+
+        if skip_tls_verify {
+            // Mock server: it mints a fresh ephemeral self-signed cert on every start,
+            // so pinning a bundled CA is pointless (and was the cause of the -0x2700
+            // "Failed to verify peer certificate"). We leave cfg WITHOUT any CA source
+            // (cacert_buf / crt_bundle_attach / use_global_ca_store all unset), which
+            // makes esp-tls fall through to MBEDTLS_SSL_VERIFY_NONE, but only when
+            // CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y (see sdkconfig.defaults).
+            // skip_common_name also avoids SNI/CN matching against the IP we dial.
+            cfg.skip_common_name = true;
+        } else {
+            cfg.crt_bundle_attach = Some(esp_idf_svc::sys::esp_crt_bundle_attach);
+        }
+
+        let tls = unsafe { esp_idf_svc::sys::esp_tls_init() };
+        if tls.is_null() {
+            return Err(anyhow!("esp_tls_init failed"));
+        }
+
+        let host_cstr = std::ffi::CString::new(host)?;
+        let ret = unsafe {
+            esp_idf_svc::sys::esp_tls_conn_new_sync(
+                host_cstr.as_ptr(),
+                host.len() as i32,
+                port as i32,
+                &cfg,
+                tls,
+            )
+        };
+
+        if ret != 1 {
+            unsafe { esp_idf_svc::sys::esp_tls_conn_destroy(tls) };
+            return Err(anyhow!("TLS connection failed (ret={})", ret));
+        }
+
+        Ok(Self { tls })
+    }
+
+    pub fn set_read_timeout_ms(&self, ms: u32) -> Result<()> {
+        let mut sockfd: i32 = 0;
+        let err = unsafe { esp_idf_svc::sys::esp_tls_get_conn_sockfd(self.tls, &mut sockfd) };
+        if err != 0 {
+            return Err(anyhow!("esp_tls_get_conn_sockfd failed: {}", err));
+        }
+
+        let tv = esp_idf_svc::sys::timeval {
+            tv_sec: (ms / 1000) as _,
+            tv_usec: ((ms % 1000) * 1000) as _,
+        };
+        let ret = unsafe {
+            esp_idf_svc::sys::lwip_setsockopt(
+                sockfd,
+                esp_idf_svc::sys::SOL_SOCKET as i32,
+                esp_idf_svc::sys::SO_RCVTIMEO as i32,
+                &tv as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&tv) as u32,
+            )
+        };
+        if ret != 0 {
+            return Err(anyhow!("setsockopt SO_RCVTIMEO failed"));
+        }
+        Ok(())
+    }
+}
+
+impl Read for EspTlsStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let ret = unsafe {
+            esp_idf_svc::sys::esp_tls_conn_read(self.tls, buf.as_mut_ptr() as _, buf.len())
+        };
+        if ret < 0 {
+            let esp_err = -ret;
+            if esp_err == 11 || esp_err == 0x6900 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            Err(std::io::Error::other(format!(
+                "esp_tls_conn_read error: {}",
+                esp_err
+            )))
+        } else {
+            Ok(ret as usize)
+        }
+    }
+}
+
+impl Write for EspTlsStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let ret =
+            unsafe { esp_idf_svc::sys::esp_tls_conn_write(self.tls, buf.as_ptr() as _, buf.len()) };
+        if ret < 0 {
+            Err(std::io::Error::other(format!(
+                "esp_tls_conn_write error: {}",
+                -ret
+            )))
+        } else {
+            Ok(ret as usize)
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for EspTlsStream {
+    fn drop(&mut self) {
+        unsafe {
+            esp_idf_svc::sys::esp_tls_conn_destroy(self.tls);
+        }
+    }
+}
+
+/// Transport implementation using ESP-IDF TLS + tungstenite WebSocket.
+pub struct Esp32Transport {
+    data_tx: std::sync::mpsc::Sender<Bytes>,
+    shutdown: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Transport for Esp32Transport {
+    async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
+        // Move the Bytes through the channel (refcount bump, no copy); tungstenite
+        // 0.29's Message::Binary takes Bytes directly, so no realloc on either end.
+        self.data_tx
+            .send(data)
+            .map_err(|_| anyhow!("Transport channel closed"))
+    }
+
+    async fn disconnect(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+pub struct Esp32TransportFactory {
+    ws_url: String,
+    skip_tls_verify: bool,
+}
+
+impl Esp32TransportFactory {
+    pub fn new(ws_url: impl Into<String>, skip_tls_verify: bool) -> Self {
+        Self {
+            ws_url: ws_url.into(),
+            skip_tls_verify,
+        }
+    }
+}
+
+#[async_trait]
+impl TransportFactory for Esp32TransportFactory {
+    async fn create_transport(
+        &self,
+    ) -> Result<(Arc<dyn Transport>, async_channel::Receiver<TransportEvent>), anyhow::Error> {
+        let (event_tx, event_rx) = async_channel::unbounded();
+        let (data_tx, data_rx) = std::sync::mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let shutdown_clone = shutdown.clone();
+        let ws_url = self.ws_url.clone();
+        let skip_tls = self.skip_tls_verify;
+        // Put this thread's 16 KB stack in PSRAM (not scarce internal DRAM). The
+        // c"ws-transport" name also lets /metrics report its stack high-water mark.
+        // Configures the next spawn from this thread; harmless to re-set per reconnect.
+        esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
+            name: Some(c"ws-transport"),
+            stack_size: 16_384,
+            priority: 5,
+            inherit: false,
+            pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
+            stack_alloc_caps: enumset::enum_set!(
+                esp_idf_svc::hal::task::thread::MallocCap::Spiram
+                    | esp_idf_svc::hal::task::thread::MallocCap::Cap8bit
+            ),
+        }
+        .set()?;
+        std::thread::Builder::new()
+            .name("ws-transport".into())
+            .stack_size(16_384)
+            .spawn(move || {
+                ws_thread(event_tx, data_rx, shutdown_clone, &ws_url, skip_tls);
+            })?;
+
+        let transport = Arc::new(Esp32Transport { data_tx, shutdown });
+        Ok((transport, event_rx))
+    }
+}
+
+fn ws_thread(
+    event_tx: Sender<TransportEvent>,
+    data_rx: std::sync::mpsc::Receiver<Bytes>,
+    shutdown: Arc<AtomicBool>,
+    ws_url: &str,
+    skip_tls_verify: bool,
+) {
+    let (host, port, _path, _tls) = match crate::http_client::parse_url(ws_url) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("Invalid WS URL: {}", e);
+            let _ = event_tx.send_blocking(TransportEvent::Disconnected(
+                DisconnectReason::ReadError(format!("invalid WS URL: {e}")),
+            ));
+            return;
+        }
+    };
+
+    log::info!("WS thread: connecting to {}:{}...", host, port);
+
+    let stream = match EspTlsStream::connect(&host, port, skip_tls_verify) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("TLS connect failed: {}", e);
+            let _ = event_tx.send_blocking(TransportEvent::Disconnected(
+                DisconnectReason::ReadError(format!("TLS connect failed: {e}")),
+            ));
+            return;
+        }
+    };
+
+    log::info!("WS thread: TLS connected, starting WebSocket handshake...");
+
+    let request = tungstenite::http::Request::builder()
+        .uri(ws_url)
+        .header("Origin", format!("https://{}", host))
+        .header("Host", &host)
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap();
+
+    let (mut ws, _response) = match tungstenite::client(request, stream) {
+        Ok(ws) => ws,
+        Err(e) => {
+            log::error!("WebSocket handshake failed: {}", e);
+            let _ = event_tx.send_blocking(TransportEvent::Disconnected(
+                DisconnectReason::ReadError(format!("WebSocket handshake failed: {e}")),
+            ));
+            return;
+        }
+    };
+
+    if let Err(e) = ws.get_mut().set_read_timeout_ms(100) {
+        log::warn!("Could not set read timeout: {}", e);
+    }
+
+    log::info!("WS thread: WebSocket connected!");
+    let _ = event_tx.send_blocking(TransportEvent::Connected);
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            let _ = ws.close(None);
+            break;
+        }
+
+        while let Ok(data) = data_rx.try_recv() {
+            log::debug!("--> WS send {} bytes", data.len());
+            if let Err(e) = ws.send(Message::Binary(data)) {
+                log::error!("WS send error: {}", e);
+                let _ = event_tx.send_blocking(TransportEvent::Disconnected(
+                    DisconnectReason::ReadError(format!("WS send error: {e}")),
+                ));
+                return;
+            }
+        }
+
+        match ws.read() {
+            Ok(msg) => match msg {
+                Message::Binary(data) => {
+                    log::debug!("<-- WS recv {} bytes", data.len());
+                    let _ = event_tx.send_blocking(TransportEvent::DataReceived(data));
+                }
+                Message::Ping(data) => {
+                    let _ = ws.send(Message::Pong(data));
+                }
+                Message::Close(frame) => {
+                    log::info!("WS thread: server sent close");
+                    let reason = frame
+                        .map(|f| DisconnectReason::ServerClose {
+                            code: Some(u16::from(f.code)),
+                            reason: f.reason.to_string(),
+                        })
+                        .unwrap_or(DisconnectReason::ServerClose {
+                            code: None,
+                            reason: String::new(),
+                        });
+                    let _ = event_tx.send_blocking(TransportEvent::Disconnected(reason));
+                    return;
+                }
+                _ => {}
+            },
+            Err(tungstenite::Error::Io(ref e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Read timeout, normal
+            }
+            Err(e) => {
+                log::error!("WS read error: {}", e);
+                let _ = event_tx.send_blocking(TransportEvent::Disconnected(
+                    DisconnectReason::ReadError(format!("WS read error: {e}")),
+                ));
+                return;
+            }
+        }
+    }
+
+    let _ = event_tx.send_blocking(TransportEvent::Disconnected(DisconnectReason::Unknown));
+    log::info!("WS thread: exiting");
+}

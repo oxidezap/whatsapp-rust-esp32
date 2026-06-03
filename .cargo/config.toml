@@ -1,0 +1,15 @@
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+# Tokio on ESP32 needs poll-based I/O through lwIP BSD sockets
+rustflags = ["--cfg", "mio_unsupported_force_poll_poll"]
+
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+# Use ESP-IDF v5.4
+ESP_IDF_VERSION = "v5.4"

@@ -1,0 +1,18 @@
+# Rust build output
+/target
+
+# ESP-IDF managed install + generated artifacts (the .embuild dir is multiple GB)
+/.embuild
+/managed_components
+/dependencies.lock
+
+# Generated sdkconfig (derived from sdkconfig.defaults at build time).
+# Keep sdkconfig.defaults and components_esp32s3.lock checked in.
+/sdkconfig
+/sdkconfig.old
+
+# WiFi credentials consumed by build.rs at compile time. Keep local only.
+.env
+
+# Local build logs / scratch
+*.log

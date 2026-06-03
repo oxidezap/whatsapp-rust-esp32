@@ -1,0 +1,10 @@
+# Name,     Type, SubType, Offset,   Size,     Flags
+# 16 MB flash: one large factory app, no OTA. The firmware is ~4.3 MB. The old
+# 256 KB SPIFFS "storage" partition was unused (no spiffs mount in src/), so it is
+# folded into the app to widen the flash margin. Needs CONFIG_PARTITION_TABLE_CUSTOM=y.
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xF000,   0x1000,
+factory,    app,  factory, 0x10000,  0x4C0000,
+# 64 KB crash core dump (ELF), right after factory (ends at 0x4D0000). Read at boot
+# via esp_core_dump_get_summary; survives power-off. Of 16 MB flash, plenty spare.
+coredump,   data, coredump, 0x4D0000, 0x10000,
