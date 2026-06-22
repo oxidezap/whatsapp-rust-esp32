@@ -288,8 +288,8 @@ async fn run_whatsapp_inner(
     // One-shot guard so dev auto-pair POSTs the QR only once per bot session.
     let scanned = Arc::new(AtomicBool::new(false));
 
-    let mut bot = Bot::builder()
-        .with_backend(backend)
+    let bot = Bot::builder()
+        .with_backend_arc(backend)
         .with_transport_factory(transport_factory)
         .with_http_client(http_client)
         .with_runtime(runtime)
@@ -321,8 +321,8 @@ async fn run_whatsapp_inner(
                         // demoted on disconnect), so setting it once per connect is enough.
                         client.set_force_active_delivery_receipts(true);
 
-                        let pn = client.get_pn().await.map(|j| j.to_string());
-                        let lid = client.get_lid().await.map(|j| j.to_string());
+                        let pn = client.get_pn().map(|j| j.to_string());
+                        let lid = client.get_lid().map(|j| j.to_string());
                         ds.set_connected(pn, lid);
                         info!("Connected to WhatsApp!");
                         info!("Free heap: {} bytes", unsafe {
@@ -361,10 +361,7 @@ async fn run_whatsapp_inner(
         .await?;
 
     info!("Bot built, starting run loop...");
-    let handle = bot.run().await?;
-    if let Err(e) = handle.await {
-        error!("Bot run loop error: {:?}", e);
-    }
+    bot.run().await;
     Ok(())
 }
 
@@ -389,7 +386,7 @@ async fn auto_scan_qr(code: &str) {
         url,
         method: "POST".into(),
         headers: std::collections::HashMap::new(),
-        body: Some(code.as_bytes().to_vec()),
+        body: Some(bytes::Bytes::copy_from_slice(code.as_bytes())),
     };
     match http.execute(req).await {
         Ok(r) if (200..300).contains(&r.status_code) => {
@@ -418,7 +415,7 @@ async fn handle_message(ctx: &MessageContext) {
             .then(|| ctx.info.source.sender.to_string()),
     };
     let reaction = wa::Message {
-        reaction_message: Some(wa::message::ReactionMessage {
+        reaction_message: Some(Box::new(wa::message::ReactionMessage {
             key: Some(key),
             text: Some(REACTION_EMOJI.to_string()),
             sender_timestamp_ms: Some(
@@ -428,7 +425,7 @@ async fn handle_message(ctx: &MessageContext) {
                     .as_millis() as i64,
             ),
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     };
     info!("Sending reaction...");

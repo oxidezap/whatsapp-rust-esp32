@@ -234,6 +234,10 @@ impl SignalStore for MemoryStore {
         Ok(self.lock().prekeys.keys().copied().max().unwrap_or(0))
     }
 
+    async fn mark_prekeys_uploaded(&self, _ids: &[u32]) -> Result<()> {
+        Ok(()) // in-memory store does not track prekey upload status
+    }
+
     async fn store_signed_prekey(&self, id: u32, record: &[u8]) -> Result<()> {
         self.lock().signed_prekeys.insert(id, record.to_vec());
         Ok(())
@@ -325,6 +329,11 @@ impl AppSyncStore for MemoryStore {
                 map.remove(mac);
             }
         }
+        Ok(())
+    }
+
+    async fn clear_mutation_macs(&self, name: &str) -> Result<()> {
+        self.lock().mutation_macs.remove(name);
         Ok(())
     }
 
