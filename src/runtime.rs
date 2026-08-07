@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use esp_idf_svc::timer::EspTaskTimerService;
-use wacore::runtime::{AbortHandle, Runtime};
+use whatsapp_rust::async_channel;
+use whatsapp_rust::async_trait;
+use whatsapp_rust::wacore::runtime::{AbortHandle, Runtime};
 
 /// Returns Pending once to give other ready tasks a turn, then Ready.
 ///
@@ -108,6 +109,15 @@ impl Runtime for Esp32Runtime {
         }
     }
 
+    /// Runs `f` INLINE on the executor thread. There is no thread pool to offload
+    /// to: the chip has one usable core for this workload and each FreeRTOS thread
+    /// costs a fixed stack, so a pool would trade a stall for permanent RAM.
+    ///
+    /// The consequence is that every upstream `spawn_blocking` (prekey batch
+    /// generation, history-sync blob decode, appstate mutation decode) blocks the
+    /// whole executor for its duration. That is why `with_wanted_pre_key_count`
+    /// is lowered and `skip_history_sync()` is set in main.rs — both are there to
+    /// keep the inline work short enough for the task watchdog.
     fn spawn_blocking(
         &self,
         f: Box<dyn FnOnce() + Send + 'static>,

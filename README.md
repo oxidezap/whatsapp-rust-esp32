@@ -54,14 +54,24 @@ of its runtime traits:
 | `src/admin.rs` | `start_admin_server` | HTTP admin dashboard on port 8081. |
 | `src/main.rs` | firmware entry | WiFi + SNTP + mDNS bringup, executor loop, the ping/pong bot. |
 
-The protocol crates are pulled straight from git, with `default-features = false`
-so the desktop-only features (tokio, SQLite, moka, SIMD) are dropped:
+Since `whatsapp-rust` 0.7.0 a single dependency is enough: the crate re-exports
+`wacore`, `waproto`, `buffa` and the shared support crates, so they can never
+resolve to a different version than the one it was built against. It is pulled
+from crates.io with `default-features = false`, which drops the desktop-only
+features (tokio, SQLite, ureq, SIMD):
 
 ```toml
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", branch = "main", default-features = false }
-wacore        = { git = "https://github.com/oxidezap/whatsapp-rust", branch = "main", default-features = false }
-waproto       = { git = "https://github.com/oxidezap/whatsapp-rust", branch = "main" }
+whatsapp-rust = { version = "0.7.0", default-features = false }
 ```
+
+Everything is then reached through it — `whatsapp_rust::wacore::net`,
+`whatsapp_rust::prelude::{wa, MessageField, ...}`, `whatsapp_rust::async_trait`,
+and so on. `anyhow` and `futures` remain direct dependencies because this crate
+needs feature flags (`anyhow/std`, `futures/executor`) that `whatsapp-rust` does
+not enable.
+
+Requires a Rust toolchain of at least **1.94** (the 0.7.0 workspace MSRV; its
+crates are edition 2024). The Xtensa `esp` channel is well past that.
 
 ## Prerequisites
 

@@ -1,13 +1,16 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
-use bytes::Bytes;
-use wacore::appstate::hash::HashState;
-use wacore::appstate::processor::AppStateMutationMAC;
-use wacore::store::error::Result;
-use wacore::store::traits::*;
-use wacore::store::Device;
+use whatsapp_rust::async_trait;
+use whatsapp_rust::bytes::Bytes;
+use whatsapp_rust::serde_json;
+
+use whatsapp_rust::wacore::appstate::hash::HashState;
+use whatsapp_rust::wacore::appstate::processor::AppStateMutationMAC;
+use whatsapp_rust::wacore::store::Device;
+use whatsapp_rust::wacore::store::error::Result;
+use whatsapp_rust::wacore::store::traits::*;
 
 /// In-memory storage backend for ESP32.
 ///
@@ -18,8 +21,14 @@ pub struct MemoryStore {
 }
 
 /// `MsgSecretStore` key (chat, sender, msg_id) and value (secret, expires_at, message_ts).
-type MsgSecretKey = (String, String, String);
-type MsgSecretValue = (Vec<u8>, i64, i64);
+///
+/// The key parts are `Arc<str>` so a batch of history-sync entries — which share
+/// one `chat`/`sender` allocation across every row — stores refcount clones
+/// instead of re-allocating both JID strings per message.
+type MsgSecretKey = (Arc<str>, Arc<str>, Arc<str>);
+/// `secret` is the protocol-sized [`MessageSecret`] array (32 bytes) since 0.7.0,
+/// so a row costs no separate heap allocation for the secret itself.
+type MsgSecretValue = (MessageSecret, i64, i64);
 
 #[derive(Default)]
 struct StoreInner {
@@ -68,6 +77,15 @@ fn recover_poisoned<T>(
 /// A divergence would silently turn every lookup into a miss.
 fn composite_key(a: &str, b: &str) -> String {
     format!("{a}:{b}")
+}
+
+/// Owned lookup key for `msg_secrets`. `std`'s `HashMap` cannot borrow a
+/// `(&str, &str, &str)` as a `(Arc<str>, Arc<str>, Arc<str>)`, so a read builds
+/// three short-lived `Arc<str>`s. Only add-on decryption (reactions, poll votes,
+/// edits) reads this map, so the cost is off the hot receive path — the write
+/// side, which does run per history-sync message, keeps the shared allocations.
+fn msg_secret_key(chat: &str, sender: &str, msg_id: &str) -> MsgSecretKey {
+    (Arc::from(chat), Arc::from(sender), Arc::from(msg_id))
 }
 
 impl MemoryStore {
@@ -164,6 +182,21 @@ impl DeviceStatus {
         s.lid = lid;
     }
 
+    /// Socket dropped. Keeps pn/lid: the device is still paired, just offline,
+    /// and the dashboard should keep showing which account it is.
+    pub fn set_disconnected(&self) {
+        self.lock().connected = false;
+    }
+
+    /// Unpaired by the server (or locally). The identity is gone, so clear it —
+    /// otherwise the dashboard would show a stale account next to the new QR.
+    pub fn set_logged_out(&self) {
+        let mut s = self.lock();
+        s.connected = false;
+        s.pn = None;
+        s.lid = None;
+    }
+
     pub fn to_json(&self) -> String {
         let s = self.lock();
         serde_json::json!({
@@ -212,6 +245,23 @@ impl SignalStore for MemoryStore {
     async fn delete_session(&self, address: &str) -> Result<()> {
         self.lock().sessions.remove(address);
         Ok(())
+    }
+
+    /// The trait default answers a conservative `true`, which makes the client
+    /// run a full per-device PN->LID migration scan for every user it has never
+    /// exchanged Signal state with. Both maps are small here, so answering for
+    /// real is cheap and skips that scan outright.
+    async fn has_signal_state_for_user(&self, user: &str) -> Result<bool> {
+        // Addresses are `user@server` (device 0) or `user:dev@server`, so a bare
+        // `starts_with` would also match a longer user id with the same prefix.
+        fn matches(address: &str, user: &str) -> bool {
+            address
+                .strip_prefix(user)
+                .is_some_and(|rest| rest.starts_with('@') || rest.starts_with(':'))
+        }
+        let s = self.lock();
+        Ok(s.sessions.keys().any(|k| matches(k, user))
+            || s.identities.keys().any(|k| matches(k, user)))
     }
 
     async fn store_prekey(&self, id: u32, record: &[u8], _uploaded: bool) -> Result<()> {
@@ -427,7 +477,7 @@ impl ProtocolStore for MemoryStore {
             .lock()
             .base_keys
             .get(&key)
-            .map_or(false, |k| k == current_base_key))
+            .is_some_and(|k| k == current_base_key))
     }
 
     async fn delete_base_key(&self, address: &str, message_id: &str) -> Result<()> {
@@ -468,12 +518,91 @@ impl ProtocolStore for MemoryStore {
         Ok(self.lock().tc_tokens.keys().cloned().collect())
     }
 
-    async fn delete_expired_tc_tokens(&self, cutoff_timestamp: i64) -> Result<u32> {
+    /// 0.7.0 split the single cutoff in two: a row now also carries a
+    /// `sender_timestamp` bucket (the last token WE issued to that contact),
+    /// which lives on its own retention clock. Drop a row only when BOTH sides
+    /// are stale — pruning on the received token alone would throw away recent
+    /// sender state and make us re-issue tokens we already sent.
+    async fn delete_expired_tc_tokens(&self, token_cutoff: i64, sender_cutoff: i64) -> Result<u32> {
         let mut s = self.lock();
         let before = s.tc_tokens.len();
-        s.tc_tokens
-            .retain(|_, v| v.token_timestamp >= cutoff_timestamp);
+        s.tc_tokens.retain(|_, v| {
+            // An empty `token` is a placeholder row written by the sender path;
+            // it never counts as live received state whatever its timestamp.
+            let token_live = !v.token.is_empty() && v.token_timestamp >= token_cutoff;
+            let sender_live = v.sender_timestamp.is_some_and(|ts| ts >= sender_cutoff);
+            token_live || sender_live
+        });
         Ok((before - s.tc_tokens.len()) as u32)
+    }
+
+    /// Overridden for atomicity. The trait default is a read-modify-write across
+    /// two awaits, so a concurrent `put_tc_token` from the notification path can
+    /// land in between and be clobbered by the placeholder this writes. Holding
+    /// the store mutex for the whole update makes the upsert indivisible, which
+    /// is what the trait asks backends to provide.
+    async fn touch_tc_token_sender_timestamp(
+        &self,
+        jid: &str,
+        sender_timestamp: i64,
+    ) -> Result<()> {
+        let mut s = self.lock();
+        match s.tc_tokens.get_mut(jid) {
+            // Monotonic: the bucket only ever moves forward, so post-send
+            // issuance and history sync converge whatever order they arrive in.
+            Some(entry) => {
+                entry.sender_timestamp = Some(
+                    entry
+                        .sender_timestamp
+                        .map_or(sender_timestamp, |e| e.max(sender_timestamp)),
+                );
+            }
+            None => {
+                s.tc_tokens.insert(
+                    jid.to_string(),
+                    TcTokenEntry {
+                        token: Vec::new(),
+                        token_timestamp: sender_timestamp,
+                        sender_timestamp: Some(sender_timestamp),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Symmetric counterpart of [`touch_tc_token_sender_timestamp`]: each writer
+    /// owns one field, so the notification path never drops a sender bucket the
+    /// issuance path wrote. Newer-wins — a stale token must not clobber a fresher
+    /// one, but a byte-less placeholder never blocks the first real token.
+    /// Overridden for the same atomicity reason as above.
+    async fn store_received_tc_token(
+        &self,
+        jid: &str,
+        token: &[u8],
+        token_timestamp: i64,
+    ) -> Result<()> {
+        let mut s = self.lock();
+        match s.tc_tokens.get_mut(jid) {
+            Some(entry) => {
+                if !entry.token.is_empty() && token_timestamp < entry.token_timestamp {
+                    return Ok(());
+                }
+                entry.token = token.to_vec();
+                entry.token_timestamp = token_timestamp;
+            }
+            None => {
+                s.tc_tokens.insert(
+                    jid.to_string(),
+                    TcTokenEntry {
+                        token: token.to_vec(),
+                        token_timestamp,
+                        sender_timestamp: None,
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn store_sent_message(
@@ -534,7 +663,9 @@ impl MsgSecretStore for MemoryStore {
         let mut s = self.lock();
         let count = entries.len();
         for e in entries {
-            let key = (e.chat, e.sender, e.msg_id);
+            // Moves the entry's Arc<str> parts into the key: no re-allocation,
+            // and a history batch keeps sharing one chat/sender string.
+            let key: MsgSecretKey = (e.chat, e.sender, e.msg_id);
             match s.msg_secrets.get_mut(&key) {
                 // On conflict, never shrink the retention window nor clobber a known parent ts.
                 Some(existing) => {
@@ -557,12 +688,12 @@ impl MsgSecretStore for MemoryStore {
         sender: &str,
         msg_id: &str,
     ) -> Result<Option<Vec<u8>>> {
-        let key = (chat.to_string(), sender.to_string(), msg_id.to_string());
+        let key = msg_secret_key(chat, sender, msg_id);
         Ok(self
             .lock()
             .msg_secrets
             .get(&key)
-            .map(|(secret, _, _)| secret.clone()))
+            .map(|(secret, _, _)| secret.to_vec()))
     }
 
     async fn get_msg_secret_with_ts(
@@ -571,12 +702,12 @@ impl MsgSecretStore for MemoryStore {
         sender: &str,
         msg_id: &str,
     ) -> Result<Option<(Vec<u8>, i64)>> {
-        let key = (chat.to_string(), sender.to_string(), msg_id.to_string());
+        let key = msg_secret_key(chat, sender, msg_id);
         Ok(self
             .lock()
             .msg_secrets
             .get(&key)
-            .map(|(secret, _, ts)| (secret.clone(), *ts)))
+            .map(|(secret, _, ts)| (secret.to_vec(), *ts)))
     }
 
     async fn delete_expired_msg_secrets(&self, cutoff_timestamp: i64) -> Result<u32> {

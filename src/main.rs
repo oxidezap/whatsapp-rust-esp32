@@ -21,11 +21,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use wacore::net::{HttpClient as _, HttpRequest};
-use wacore::proto_helpers::MessageExt;
-use wacore::types::events::Event;
-use waproto::whatsapp as wa;
-use whatsapp_rust::bot::{Bot, MessageContext};
+// Single upstream dependency: whatsapp-rust re-exports wacore/waproto/buffa and
+// the shared support crates, so there is no way for them to drift out of sync.
+use whatsapp_rust::async_channel;
+use whatsapp_rust::bytes;
+use whatsapp_rust::prelude::{Bot, Event, MessageContext, MessageExt as _, MessageField, wa};
+use whatsapp_rust::wacore::net::{HttpClient as _, HttpRequest};
 
 use crate::http_client::EspHttpClient;
 use crate::runtime::Esp32Runtime;
@@ -299,16 +300,26 @@ async fn run_whatsapp_inner(
         // login blocks the single-core executor ~8s and exhausts internal DRAM.
         // Configurable upstream as of whatsapp-rust PR #695, so no fork needed.
         .with_wanted_pre_key_count(50)
+        // The store is in-memory and wiped on every reboot, so a history sync
+        // buys this firmware nothing and costs it a lot: upstream measures the
+        // drain at ~14 MB of allocation churn (more than the whole PSRAM), and
+        // `Esp32Runtime::spawn_blocking` runs the per-blob protobuf decode
+        // INLINE on the single executor thread, so each one is a multi-second
+        // stall with the task watchdog running. Drop this line if you later add
+        // a flash-backed store and actually want the history.
+        .skip_history_sync()
         .on_event(move |event, client| {
             let ds = device_status.clone();
             let scanned = scanned.clone();
             async move {
                 match &*event {
-                    Event::PairingQrCode { code, timeout } => {
-                        info!("QR CODE (valid for {}s)", timeout.as_secs());
-                        ds.set_qr_code(code.clone());
+                    // 0.7.0 sealed the event payloads into `#[non_exhaustive]`
+                    // structs, so this is a tuple variant now, not `{ code, timeout }`.
+                    Event::PairingQrCode(qr) => {
+                        info!("QR CODE (valid for {}s)", qr.timeout.as_secs());
+                        ds.set_qr_code(qr.code.clone());
                         if MOCK_AUTOPAIR && !scanned.swap(true, Ordering::Relaxed) {
-                            auto_scan_qr(code).await;
+                            auto_scan_qr(&qr.code).await;
                         }
                     }
                     Event::Connected(_) => {
@@ -321,22 +332,34 @@ async fn run_whatsapp_inner(
                         // demoted on disconnect), so setting it once per connect is enough.
                         client.set_force_active_delivery_receipts(true);
 
-                        let pn = client.get_pn().map(|j| j.to_string());
-                        let lid = client.get_lid().map(|j| j.to_string());
+                        let pn = client.pn().map(|j| j.to_string());
+                        let lid = client.lid().map(|j| j.to_string());
                         ds.set_connected(pn, lid);
                         info!("Connected to WhatsApp!");
                         info!("Free heap: {} bytes", unsafe {
                             esp_idf_svc::sys::esp_get_free_heap_size()
                         });
                     }
-                    Event::LoggedOut(reason) => {
-                        info!("Logged out: {:?}", reason);
+                    // The dashboard used to keep showing "Connected" forever after
+                    // the socket dropped, because nothing ever cleared the flag.
+                    Event::Disconnected(d) => {
+                        warn!("Disconnected: {}", d.reason);
+                        ds.set_disconnected();
                     }
-                    Event::Message(msg, info) => {
-                        let text = msg.text_content().unwrap_or("<no text>");
-                        info!("Message from {}: {:?}", info.source.sender, text);
-                        if text == PING_TRIGGER {
-                            if let Some(ctx) = MessageContext::from_event(&event, client) {
+                    Event::LoggedOut(l) => {
+                        info!("Logged out: {:?}", l.reason);
+                        ds.set_logged_out();
+                    }
+                    // `Event::Message(msg, info)` became `Event::Messages(batch)`:
+                    // an offline drain now delivers one batch per durable commit
+                    // instead of one event per message, so this iterates.
+                    Event::Messages(batch) => {
+                        for inbound in batch {
+                            let text = inbound.message.text_content().unwrap_or("<no text>");
+                            info!("Message from {}: {:?}", inbound.info.source.sender, text);
+                            if text == PING_TRIGGER {
+                                let ctx =
+                                    MessageContext::from_inbound(inbound, Arc::clone(&client));
                                 handle_message(&ctx).await;
                             }
                         }
@@ -402,50 +425,18 @@ async fn auto_scan_qr(code: &str) {
 }
 
 async fn handle_message(ctx: &MessageContext) {
-    info!("Building reaction message...");
-
-    let key = wa::MessageKey {
-        remote_jid: Some(ctx.info.source.chat.to_string()),
-        id: Some(ctx.info.id.clone()),
-        from_me: Some(ctx.info.source.is_from_me),
-        participant: ctx
-            .info
-            .source
-            .is_group
-            .then(|| ctx.info.source.sender.to_string()),
-    };
-    let reaction = wa::Message {
-        reaction_message: Some(Box::new(wa::message::ReactionMessage {
-            key: Some(key),
-            text: Some(REACTION_EMOJI.to_string()),
-            sender_timestamp_ms: Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64,
-            ),
-            ..Default::default()
-        })),
-        ..Default::default()
-    };
+    // `ctx.react` builds the referential MessageKey itself (including the
+    // group/status participant, which the hand-rolled key here used to get wrong
+    // for status broadcasts) and allocates no JID strings on this path.
     info!("Sending reaction...");
-    if let Err(e) = ctx.send_message(reaction).await {
+    if let Err(e) = ctx.react(REACTION_EMOJI).await {
         error!("Failed to send reaction: {}", e);
     }
     info!("Reaction sent! Building pong reply...");
 
     let start = std::time::Instant::now();
-    let context_info = ctx.build_quote_context();
-    let reply = wa::Message {
-        extended_text_message: Some(Box::new(wa::message::ExtendedTextMessage {
-            text: Some(PONG_TEXT.to_string()),
-            context_info: Some(Box::new(context_info)),
-            ..Default::default()
-        })),
-        ..Default::default()
-    };
-
-    let sent = match ctx.send_message(reply).await {
+    // Equivalent to the old build_quote_context + ExtendedTextMessage literal.
+    let sent = match ctx.reply_quoting(PONG_TEXT).await {
         Ok(r) => r,
         Err(e) => {
             error!("Failed to send pong: {}", e);
@@ -459,11 +450,13 @@ async fn handle_message(ctx: &MessageContext) {
         duration, &sent.message_id
     );
 
+    // buffa (the prost replacement in 0.7.0) wraps sub-messages in
+    // `MessageField<T>` instead of `Option<Box<T>>`.
     let edit = wa::Message {
-        extended_text_message: Some(Box::new(wa::message::ExtendedTextMessage {
+        extended_text_message: MessageField::some(wa::message::ExtendedTextMessage {
             text: Some(format!("{PONG_TEXT}\n`{duration}`")),
             ..Default::default()
-        })),
+        }),
         ..Default::default()
     };
     if let Err(e) = ctx.edit_message(sent.message_id.clone(), edit).await {

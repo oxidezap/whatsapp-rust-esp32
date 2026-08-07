@@ -1,8 +1,8 @@
 use std::io::{Read, Write};
 
 use anyhow::Result;
-use async_trait::async_trait;
-use wacore::net::{HttpClient, HttpRequest, HttpResponse, StreamingHttpResponse};
+use whatsapp_rust::async_trait;
+use whatsapp_rust::wacore::net::{HttpClient, HttpRequest, HttpResponse, StreamingHttpResponse};
 
 use crate::transport::EspTlsStream;
 

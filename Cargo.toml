@@ -2,7 +2,9 @@
 name = "whatsapp-esp32"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# Tracks whatsapp-rust 0.7.0's declared MSRV (its workspace pins 1.94 and the
+# crates are edition 2024). The Xtensa `esp` toolchain must be at least this new.
+rust-version = "1.94"
 authors = ["João Lucas <jlucaso@hotmail.com>"]
 license = "MIT"
 description = "A full, end-to-end-encrypted WhatsApp client running on an ESP32-S3 microcontroller, built on whatsapp-rust."
@@ -16,13 +18,13 @@ esp-idf-svc = { version = "0.52", features = ["binstart"] }
 esp-idf-hal = "0.46"
 
 log = "0.4"
+# anyhow stays a direct dependency: esp-idf-svc errors are converted with `?`,
+# which needs anyhow's `std` feature. whatsapp-rust pulls anyhow with
+# default-features = false, so relying on its re-export alone would lose that.
 anyhow = "1"
-async-trait = "0.1"
-async-channel = "2"
+# `futures::executor::block_on` lives behind the `executor` feature, which
+# whatsapp-rust does not enable, so this one is also declared directly.
 futures = "0.3"
-bytes = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 # Lightweight async executor for ESP32. `unbounded` backs the run-queue with a
 # growable SegQueue (infallible push) instead of a fixed 64-slot ArrayQueue whose
@@ -33,18 +35,21 @@ enumset = "1"
 # WebSocket framing (no TLS features - we use ESP-IDF mbedTLS)
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
-# WhatsApp protocol, pulled from the upstream repo (no local checkout needed).
-# default-features = false drops tokio/sqlite/moka/simd so the crate builds for ESP32.
-# wacore exposes the appstate crate via `pub use wacore_appstate as appstate`, so we
-# don't list wacore-appstate directly.
+# WhatsApp protocol. Single dependency: since 0.7.0 the crate re-exports
+# everything a consumer needs (`whatsapp_rust::{wacore, waproto, buffa,
+# async_trait, async_channel, bytes, serde_json, ...}`), so wacore/waproto are no
+# longer listed separately and can never drift to a different version than the
+# one whatsapp-rust was built against.
+#
+# default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
 #
 # DANGER: `danger-skip-cert-chain-verify` disables Noise server-certificate (XEdDSA)
 # verification. Needed to connect to the local mock server (its cert isn't signed by
 # WhatsApp's production key). REMOVE this feature before connecting to the real
 # WhatsApp gateway. Without it the server cert chain is unverified (MITM risk).
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", branch = "main", default-features = false, features = ["danger-skip-cert-chain-verify"] }
-wacore = { git = "https://github.com/oxidezap/whatsapp-rust", branch = "main", default-features = false }
-waproto = { git = "https://github.com/oxidezap/whatsapp-rust", branch = "main" }
+whatsapp-rust = { version = "0.7.0", default-features = false, features = [
+    "danger-skip-cert-chain-verify",
+] }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing

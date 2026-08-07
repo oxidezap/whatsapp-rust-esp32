@@ -1,6 +1,7 @@
 use esp_idf_svc::http::server::{Configuration, EspHttpServer};
 use log::info;
 use std::sync::Arc;
+use whatsapp_rust::serde_json;
 
 const ADMIN_PORT: u16 = 8081;
 

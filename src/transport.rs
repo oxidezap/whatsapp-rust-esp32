@@ -3,11 +3,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use async_channel::Sender;
-use async_trait::async_trait;
-use bytes::Bytes;
 use tungstenite::Message;
-use wacore::net::{DisconnectReason, Transport, TransportEvent, TransportFactory};
+// Re-exported through whatsapp-rust so the `async_channel::Receiver` handed back
+// by `create_transport` is provably the same type the client expects.
+use whatsapp_rust::async_channel::{self, Sender};
+use whatsapp_rust::async_trait;
+use whatsapp_rust::bytes::Bytes;
+use whatsapp_rust::wacore::net::{DisconnectReason, Transport, TransportEvent, TransportFactory};
 
 /// TLS stream backed by ESP-IDF's mbedTLS.
 pub struct EspTlsStream {

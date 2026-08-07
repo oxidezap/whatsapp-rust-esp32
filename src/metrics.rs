@@ -4,6 +4,7 @@
 use std::sync::OnceLock;
 
 use esp_idf_svc::hal::reset::ResetReason;
+use whatsapp_rust::serde_json;
 use esp_idf_svc::sys;
 
 /// The reset reason captured once at boot (why the PREVIOUS run ended).
