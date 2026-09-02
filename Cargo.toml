@@ -70,6 +70,14 @@ codegen-units = 1
 strip = false
 panic = "abort"
 
+[features]
+# Run inside Espressif's QEMU instead of on a board: brings the network up over the
+# emulated OpenCores Ethernet MAC instead of WiFi, and points the default server URL
+# at the QEMU host (10.0.2.2). Build with `scripts/qemu.sh build`, which also layers
+# `sdkconfig.qemu` on top of `sdkconfig.defaults`; the feature alone is not enough,
+# because `peripherals.mac` only exists once `CONFIG_ETH_USE_OPENETH=y` is set.
+qemu = []
+
 [build-dependencies]
 embuild = "0.33"
 dotenvy = "0.15"

@@ -8,13 +8,12 @@ mod storage;
 mod transport;
 
 use anyhow::Result;
+#[cfg(not(feature = "qemu"))]
+use esp_idf_svc::wifi::{
+    AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi, PmfConfiguration,
+};
 use esp_idf_svc::{
-    eventloop::EspSystemEventLoop,
-    hal::peripherals::Peripherals,
-    nvs::EspDefaultNvsPartition,
-    wifi::{
-        AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi, PmfConfiguration,
-    },
+    eventloop::EspSystemEventLoop, hal::peripherals::Peripherals, nvs::EspDefaultNvsPartition,
 };
 use log::{error, info, warn};
 use std::future::Future;
@@ -35,18 +34,24 @@ use crate::transport::Esp32TransportFactory;
 
 // WiFi + server come from .env at build time (see .env.example). option_env! keeps
 // a fresh clone with no .env compiling; the firmware reports missing WiFi at runtime.
+#[cfg(not(feature = "qemu"))]
 const WIFI_SSID: &str = match option_env!("WIFI_SSID") {
     Some(s) => s,
     None => "",
 };
+#[cfg(not(feature = "qemu"))]
 const WIFI_PASS: &str = match option_env!("WIFI_PASS") {
     Some(s) => s,
     None => "",
 };
 
 // WebSocket URL of the mock server or WhatsApp gateway. Override via WHATSAPP_WS_URL in .env.
+// Under the `qemu` feature the default is the emulator's view of the host: QEMU's user-mode
+// network hands the guest 10.0.2.15 and exposes the host as 10.0.2.2, so a mock server
+// listening on the host's port 8080 is reachable without any forwarding rule.
 const MOCK_SERVER_WS: &str = match option_env!("WHATSAPP_WS_URL") {
     Some(u) => u,
+    None if cfg!(feature = "qemu") => "wss://10.0.2.2:8080/ws/chat",
     None => "wss://192.168.0.4:8080/ws/chat",
 };
 // Accept the bundled self-signed CA (mock server). Set false for the real WhatsApp gateway.
@@ -106,60 +111,16 @@ fn main() -> Result<()> {
     let last_panic = metrics::last_panic_str();
     info!("whatsapp-esp32 starting... (last reset: {last_reset:?}{last_panic})");
 
-    // WIFI_SSID is injected at build time via option_env!; it is legitimately empty
-    // in a clone-and-run build with no .env, so this guard is intentional (clippy
-    // only sees this build's baked-in value).
-    #[allow(clippy::const_is_empty)]
-    if WIFI_SSID.is_empty() {
-        error!(
-            "WiFi is not configured. Copy .env.example to .env, set WIFI_SSID / WIFI_PASS, and reflash."
-        );
-        return Err(anyhow::anyhow!("WIFI_SSID is empty"));
-    }
-
     let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
-    let mut wifi = BlockingWifi::wrap(
-        EspWifi::new(peripherals.modem, sysloop.clone(), Some(nvs))?,
-        sysloop,
-    )?;
-
-    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: WIFI_SSID.try_into().unwrap(),
-        password: WIFI_PASS.try_into().unwrap(),
-        auth_method: AuthMethod::WPA2Personal,
-        // Advertise PMF support (but don't require it). The embedded-svc default is
-        // NotCapable, which modern WPA2/WPA3-mixed APs (mesh / ISP routers) often
-        // reject at the association stage. The symptom is auth OK then
-        // `assoc -> init` after ~1s, retried forever. capable+!required is the
-        // ESP-IDF station example default and is backward-compatible with plain WPA2.
-        pmf_cfg: PmfConfiguration::Capable { required: false },
-        ..Default::default()
-    }))?;
-
-    wifi.start()?;
-    // Association can fail transiently (congested 2.4 GHz, AP busy). Retry instead
-    // of letting the `?` propagate and return from main() (which halts the chip).
-    info!("Connecting to '{}'...", WIFI_SSID);
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        let r = wifi.connect();
-        let r = r.and_then(|()| wifi.wait_netif_up());
-        match r {
-            Ok(()) => break,
-            Err(e) => {
-                warn!("WiFi connect attempt {attempt} failed: {e}; retrying in 3s");
-                let _ = wifi.disconnect();
-                std::thread::sleep(std::time::Duration::from_secs(3));
-            }
-        }
-    }
-
-    let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
-    info!("WiFi connected! IP: {}", ip_info.ip);
+    // The network handle must stay alive for the rest of main(): dropping it tears
+    // the interface down. Which interface that is depends on where the firmware runs.
+    #[cfg(not(feature = "qemu"))]
+    let (_net, ip) = bring_up_wifi(peripherals.modem, sysloop.clone(), nvs)?;
+    #[cfg(feature = "qemu")]
+    let (_net, ip) = bring_up_ethernet(peripherals.mac, sysloop.clone(), nvs)?;
 
     let _sntp = esp_idf_svc::sntp::EspSntp::new_default()?;
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -177,7 +138,7 @@ fn main() -> Result<()> {
     let device_status = std::sync::Arc::new(storage::DeviceStatus::new());
     let _admin_server = admin::start_admin_server(store.clone(), device_status.clone())?;
     info!("Admin: http://esp32-whatsapp.local:8081/dashboard");
-    info!("Admin: http://{}:8081/dashboard", ip_info.ip);
+    info!("Admin: http://{}:8081/dashboard", ip);
 
     info!(
         "Free heap: {} bytes (internal: {} bytes)",
@@ -214,6 +175,96 @@ fn main() -> Result<()> {
         error!("Executor thread panicked: {:?}", e);
     }
     Ok(())
+}
+
+/// Station-mode WiFi: the real board. Blocks until the interface has an address.
+///
+/// Returns the handle the caller must keep alive, plus the address for the log.
+#[cfg(not(feature = "qemu"))]
+fn bring_up_wifi(
+    modem: esp_idf_svc::hal::modem::Modem<'static>,
+    sysloop: EspSystemEventLoop,
+    nvs: EspDefaultNvsPartition,
+) -> Result<(BlockingWifi<EspWifi<'static>>, std::net::Ipv4Addr)> {
+    // WIFI_SSID is injected at build time via option_env!; it is legitimately empty
+    // in a clone-and-run build with no .env. `black_box` hides the constant from the
+    // optimizer: without it, an empty SSID makes this `return` provably always
+    // taken, and LTO then drops everything after it, the whole WhatsApp client
+    // included, leaving a 260 KB stub image that says nothing about whether the
+    // real firmware still builds or fits.
+    if std::hint::black_box(WIFI_SSID).is_empty() {
+        error!(
+            "WiFi is not configured. Copy .env.example to .env, set WIFI_SSID / WIFI_PASS, and reflash."
+        );
+        return Err(anyhow::anyhow!("WIFI_SSID is empty"));
+    }
+
+    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(nvs))?, sysloop)?;
+
+    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+        ssid: WIFI_SSID.try_into().unwrap(),
+        password: WIFI_PASS.try_into().unwrap(),
+        auth_method: AuthMethod::WPA2Personal,
+        // Advertise PMF support (but don't require it). The embedded-svc default is
+        // NotCapable, which modern WPA2/WPA3-mixed APs (mesh / ISP routers) often
+        // reject at the association stage. The symptom is auth OK then
+        // `assoc -> init` after ~1s, retried forever. capable+!required is the
+        // ESP-IDF station example default and is backward-compatible with plain WPA2.
+        pmf_cfg: PmfConfiguration::Capable { required: false },
+        ..Default::default()
+    }))?;
+
+    wifi.start()?;
+    // Association can fail transiently (congested 2.4 GHz, AP busy). Retry instead
+    // of letting the `?` propagate and return from main() (which halts the chip).
+    info!("Connecting to '{}'...", WIFI_SSID);
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let r = wifi.connect();
+        let r = r.and_then(|()| wifi.wait_netif_up());
+        match r {
+            Ok(()) => break,
+            Err(e) => {
+                warn!("WiFi connect attempt {attempt} failed: {e}; retrying in 3s");
+                let _ = wifi.disconnect();
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+        }
+    }
+
+    let ip = wifi.wifi().sta_netif().get_ip_info()?.ip;
+    info!("WiFi connected! IP: {ip}");
+    Ok((wifi, ip))
+}
+
+/// OpenCores Ethernet: the interface Espressif's QEMU attaches to the emulated
+/// ESP32-S3 (`-nic user,model=open_eth`). There is no radio to emulate, so this is
+/// the only way the firmware gets on the network under QEMU; it needs
+/// `CONFIG_ETH_USE_OPENETH=y` from `sdkconfig.qemu`, which is also what makes
+/// `peripherals.mac` exist on this chip. Blocks until DHCP has handed out an address.
+///
+/// The NVS handle is unused here (WiFi keeps its calibration data in NVS, Ethernet
+/// has none), but taking it keeps the two bring-ups the same shape for `main`.
+#[cfg(feature = "qemu")]
+fn bring_up_ethernet(
+    mac: esp_idf_svc::hal::mac::MAC<'static>,
+    sysloop: EspSystemEventLoop,
+    _nvs: EspDefaultNvsPartition,
+) -> Result<(
+    esp_idf_svc::eth::BlockingEth<esp_idf_svc::eth::EspEth<'static, esp_idf_svc::eth::OpenEth>>,
+    std::net::Ipv4Addr,
+)> {
+    use esp_idf_svc::eth::{BlockingEth, EspEth, EthDriver};
+
+    let driver = EthDriver::new_openeth(mac, sysloop.clone())?;
+    let mut eth = BlockingEth::wrap(EspEth::wrap(driver)?, sysloop)?;
+    eth.start()?;
+    info!("Ethernet (OpenCores/QEMU) started, waiting for DHCP...");
+    eth.wait_netif_up()?;
+    let ip = eth.eth().netif().get_ip_info()?.ip;
+    info!("Ethernet connected! IP: {ip}");
+    Ok((eth, ip))
 }
 
 fn run_executor(

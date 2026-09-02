@@ -127,6 +127,66 @@ The target (`xtensa-esp32s3-espidf`), `build-std`, and the `MCU` / `ESP_IDF_VERS
 environment variables all come from `.cargo/config.toml`, so a bare `cargo build`
 is enough.
 
+## Test without hardware
+
+Two layers stand in for a board, and both run in CI (`.github/workflows/ci.yml`)
+on every push and pull request:
+
+1. **Build for the real target.** The `build` job compiles the firmware for
+   `xtensa-esp32s3-espidf` with the pinned `esp` toolchain in two flavors, the
+   board build and the QEMU build, and fails when the app image no longer fits
+   the factory partition (`scripts/check-app-size.sh`). Both ELFs are uploaded
+   as artifacts.
+2. **Boot and pair on QEMU.** The `qemu-e2e` job boots the QEMU flavor on
+   [Espressif's QEMU](https://github.com/espressif/esp-toolchain-docs/tree/main/qemu/esp32s3)
+   (an ESP32-S3 with 8 MB PSRAM and an OpenCores Ethernet MAC), pairs it against
+   the same mock server `whatsapp-rust`'s E2E suite uses, waits for
+   `Connected to WhatsApp!` on the serial console, and then asks the firmware's
+   own dashboard whether the session is live. Nothing in that path is a stub:
+   the instruction stream, the ESP-IDF build, mbedTLS, the Noise handshake and
+   the Signal key generation all run as they would on the chip.
+
+The same flow runs locally with `scripts/qemu.sh`:
+
+```bash
+# once: Espressif's QEMU (the esp32s3 machine is not in upstream QEMU) and esptool
+curl -sSfL -o qemu.tar.xz https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-xtensa-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz
+mkdir -p ~/qemu && tar -xJf qemu.tar.xz -C ~/qemu     # needs libsdl2, libslirp, glib, pixman at runtime
+export QEMU_XTENSA=~/qemu/qemu/bin/qemu-system-xtensa
+pip install esptool
+
+scripts/qemu.sh build    # release build with --features qemu and sdkconfig.qemu, into target/qemu/
+scripts/qemu.sh image    # 16 MB flash image: bootloader + partition table + app
+scripts/qemu.sh run      # interactive: serial console on the terminal, Ctrl-A X quits
+scripts/qemu.sh test     # headless: boot, pair against the mock server, check /device
+```
+
+What the `qemu` feature changes, and nothing else: the network comes up over the
+emulated Ethernet MAC instead of WiFi (QEMU has no radio), so no `.env` is needed,
+and the default server URL becomes `wss://10.0.2.2:8080/ws/chat`, the host as seen
+from QEMU's user-mode network. `WHATSAPP_WS_URL` still overrides it. The dashboard
+is forwarded to `http://localhost:8081`. The overlay `sdkconfig.qemu` enables the
+OpenCores driver, switches the PSRAM probe to quad mode (what QEMU's generic SPI
+PSRAM answers), and moves mbedTLS's AES and SHA to software, because the emulated
+AES block never completes a DMA transfer and every TLS connect would spin forever
+in `aes_hal_wait_done()`. The heap routing, the 256 KB PSRAM stack and every
+other setting stay as on the board, so what the emulator exercises is the same
+firmware minus the radio and the crypto accelerators.
+
+`QEMU_GDB=1 scripts/qemu.sh run` starts QEMU with a gdb stub on port 1234 and the
+CPUs halted; `xtensa-esp32s3-elf-gdb` (from Espressif's binutils-gdb releases)
+with `target remote :1234` then shows every FreeRTOS task's backtrace, which is a
+far better view of a hang than the serial console.
+
+For `test` and `run` the mock server has to be listening on the host's port 8080,
+which is where the `whatsapp-rust` E2E setup puts it (see its
+`agent_docs/e2e_testing.md`). On a fork, CI skips `qemu-e2e` because the mock
+server image is private; the build job still runs.
+
+What this cannot tell you: anything about the radio (WiFi association, RF
+calibration, PMF), timing that depends on real flash and PSRAM latency, and power.
+Those still need the board.
+
 ## Flash and monitor
 
 Install `cargo install espflash`. On Arch your user must be in the `uucp` group to

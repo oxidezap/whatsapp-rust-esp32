@@ -1,0 +1,27 @@
+# Overlay for running under Espressif's QEMU (`scripts/qemu.sh`). Layered on top of
+# sdkconfig.defaults via ESP_IDF_SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu",
+# so only what differs from the board build belongs here.
+
+# QEMU has no radio. It attaches an OpenCores Ethernet MAC (DP83848 PHY) to the
+# emulated ESP32-S3, and the firmware's `qemu` feature brings the network up on it.
+# This is also what makes `peripherals.mac` exist on the S3 in esp-idf-hal.
+CONFIG_ETH_ENABLED=y
+CONFIG_ETH_USE_OPENETH=y
+
+# QEMU emulates the PSRAM as a generic SPI device: it answers the quad-mode ID
+# probe, not the octal one the N16R8 board uses. Same size, same heap routing.
+CONFIG_SPIRAM_MODE_OCT=n
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# scripts/qemu.sh builds into target/qemu/, one directory deeper than the default
+# target dir, so the climb from esp-idf-sys's build dir back to partitions.csv is
+# one level longer than the one in sdkconfig.defaults.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../../partitions.csv"
+
+# QEMU's AES block does not complete DMA transfers: mbedTLS's first CTR-DRBG seed
+# spins forever in aes_hal_wait_done() inside esp_aes_process_dma, and every TLS
+# connect hangs there before a single byte is sent (found with gdb on the stalled
+# ws-transport task). The S3 SHA driver takes the same DMA path for larger inputs,
+# so both go to the software implementations here. The board keeps the accelerators.
+CONFIG_MBEDTLS_HARDWARE_AES=n
+CONFIG_MBEDTLS_HARDWARE_SHA=n
