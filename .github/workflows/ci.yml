@@ -104,11 +104,31 @@ jobs:
             ${{ matrix.out }}/bootloader.bin
             ${{ matrix.out }}/partition-table.bin
 
+  # An empty `password:` under `services.*.credentials` is a template error that
+  # GitHub reports as "Unexpected value ''" with no hint about which secret, so
+  # check the secret first and say so. Skipped on fork PRs, which get no secrets;
+  # a same-repo run without it is a misconfiguration and fails here, loudly.
+  mock-server-secret:
+    name: Mock server credentials
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: BARTENDER_GHCR_TOKEN is available to this repository
+        env:
+          TOKEN: ${{ secrets.BARTENDER_GHCR_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::BARTENDER_GHCR_TOKEN is empty. It must be a repository secret, or an organization secret whose repository access includes this (public) repository."
+            exit 1
+          fi
+          echo "secret present"
+
   qemu-e2e:
     name: Boot and pair on QEMU (ESP32-S3)
-    needs: build
-    # Fork PRs get no secrets, so they cannot pull the private mock-server image.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Runs only when the build passed and the credentials check ran and passed;
+    # inherits the fork-PR skip from `mock-server-secret`.
+    needs: [build, mock-server-secret]
     runs-on: ubuntu-latest
     # scripts/qemu.sh test caps the boot-to-connected wait at 10 min; this bounds
     # the rest (image download, QEMU install, a mock server that never answers).
