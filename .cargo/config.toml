@@ -15,7 +15,6 @@ target = "xtensa-esp32s3-espidf"
 build-std = ["std", "panic_abort"]
 
 [env]
-# Defaults for the ESP32-S3. The C5 needs ESP-IDF v5.5 (v5.4 predates the chip);
-# scripts/build.sh sets MCU=esp32c5 and ESP_IDF_VERSION=v5.5.5 for it.
+# Shared ESP-IDF version for every supported board (ESP32-S3 and ESP32-C5).
 MCU = "esp32s3"
-ESP_IDF_VERSION = "v5.4"
+ESP_IDF_VERSION = "v5.5.5"

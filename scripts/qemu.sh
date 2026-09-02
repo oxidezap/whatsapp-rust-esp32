@@ -97,6 +97,9 @@ key,type,encoding,value
 wa,namespace,,
 push_name,data,string,esp32-qemu-$name
 CSV
+    if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+        echo "admin_token,data,string,$ADMIN_TOKEN" >> "$csv"
+    fi
     "$(nvs_python)" -m esp_idf_nvs_partition_gen generate "$csv" "$out" 0x6000 >&2
     echo "$out"
 }
@@ -215,7 +218,15 @@ wait_markers() {
     done
 }
 
-admin_get() { curl -sS --max-time 10 "http://127.0.0.1:$1$2"; }
+admin_curl() {
+    local auth_header=()
+    if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+        auth_header=(-H "X-Admin-Token: $ADMIN_TOKEN")
+    fi
+    curl -sS "${auth_header[@]}" "$@"
+}
+
+admin_get() { admin_curl --max-time 10 "http://127.0.0.1:$1$2"; }
 
 # json_field JSON EXPR: evaluate a python expression over the parsed document.
 json_field() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))' "$2" <<<"$1"; }
@@ -305,7 +316,7 @@ cmd_test() {
         return 1
     fi
     log "board a -> board b ($to_b): ping"
-    sent="$(curl -sS --max-time 60 -H 'Content-Type: application/json' \
+    sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
         -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")"
     log "POST /send -> $sent"
     [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || { log "send failed"; return 1; }

@@ -30,14 +30,9 @@ fi
 case "$BOARD" in
     esp32s3)
         TARGET=xtensa-esp32s3-espidf
-        IDF=v5.4
         ;;
     esp32c5)
         TARGET=riscv32imac-esp-espidf
-        # The C5 is not in v5.4; v5.5.5 also carries the USB Serial/JTAG reset
-        # workaround the Waveshare board needs (earlier v5.5.x lose the console
-        # after a reset).
-        IDF=v5.5.5
         ;;
     *)
         echo "unknown board '$BOARD' (esp32s3 or esp32c5)" >&2
@@ -46,6 +41,6 @@ case "$BOARD" in
 esac
 
 # Process environment beats .cargo/config.toml's [env] block, so this is the
-# whole board switch. Both ESP-IDF versions install side by side under .embuild.
-export MCU="$BOARD" ESP_IDF_VERSION="$IDF"
+# whole board switch. Both boards share ESP-IDF v5.5.5 under .embuild.
+export MCU="$BOARD" ESP_IDF_VERSION="v5.5.5"
 exec cargo "${CARGO_CMD:-build}" --target "$TARGET" "$@"

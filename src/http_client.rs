@@ -13,6 +13,8 @@ use crate::transport::EspTlsStream;
 const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// A response header block past this is not a WhatsApp CDN answering.
 const MAX_RESPONSE_HEADER_BYTES: usize = 8 * 1024;
+/// Maximum response size for non-streaming buffered HTTP requests.
+const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
 /// Parse a URL into (host, port, path, use_tls).
 /// Supports http://, https://, ws://, wss:// schemes.
@@ -297,7 +299,14 @@ fn do_request(
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => response_buf.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                if response_buf.len() + n > MAX_RESPONSE_BODY_BYTES {
+                    anyhow::bail!(
+                        "HTTP response body exceeds size limit of {MAX_RESPONSE_BODY_BYTES} bytes"
+                    );
+                }
+                response_buf.extend_from_slice(&buf[..n]);
+            }
             Err(e)
                 if matches!(
                     e.kind(),
@@ -311,6 +320,35 @@ fn do_request(
     }
 
     parse_http_response(&response_buf)
+}
+
+/// A reader wrapper that enforces an exact byte count: if the underlying stream
+/// ends before `remaining` bytes are read, it returns `UnexpectedEof` rather than
+/// a truncated successful `Ok(0)`.
+struct ExactLengthReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> Read for ExactLengthReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Ok(0);
+        }
+        let max_to_read = self.remaining.min(buf.len() as u64) as usize;
+        let n = self.inner.read(&mut buf[..max_to_read])?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "Connection closed prematurely: {} bytes remaining",
+                    self.remaining
+                ),
+            ));
+        }
+        self.remaining -= n as u64;
+        Ok(n)
+    }
 }
 
 fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
@@ -350,7 +388,10 @@ fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
     let overflow = header_buf.split_off(header_end);
     let rest = std::io::Cursor::new(overflow).chain(stream);
     let body: Box<dyn std::io::Read + Send> = match content_length {
-        Some(length) => Box::new(rest.take(length)),
+        Some(length) => Box::new(ExactLengthReader {
+            inner: rest,
+            remaining: length,
+        }),
         None => Box::new(rest),
     };
 

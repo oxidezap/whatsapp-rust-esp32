@@ -388,6 +388,12 @@ impl FlashNamespaces {
     }
 
     fn save_latest_sync_key_id(&self, key_id: &[u8]) -> Result<()> {
+        if key_id.len() > MAX_LOGICAL_KEY_LEN {
+            return Err(StoreError::Validation(format!(
+                "sync key id is too long: {} bytes",
+                key_id.len()
+            )));
+        }
         let record = encode_record(b"latestsync", key_id)?;
         set_blob(&self.control, "latestsync", &record)
     }
@@ -698,9 +704,16 @@ impl NvsStore {
                     anyhow::bail!("duplicate sync-key record in WhatsApp NVS");
                 }
             }
-            // Only trust a recorded id that names a key actually present.
-            inner.latest_sync_key_id = flash
-                .load_latest_sync_key_id()?
+            // Only trust a recorded id that names a key actually present. If the
+            // marker is unreadable or corrupted, fall back to timestamp_latest.
+            let recorded = match flash.load_latest_sync_key_id() {
+                Ok(recorded) => recorded,
+                Err(error) => {
+                    log::warn!("Ignoring unreadable latest sync-key marker: {error}");
+                    None
+                }
+            };
+            inner.latest_sync_key_id = recorded
                 .filter(|id| inner.sync_keys.contains_key(id))
                 .or(timestamp_latest);
         } else if flash.has_signal_records()? {
@@ -1093,29 +1106,38 @@ impl DeviceStatus {
         s.messages.push_back(entry);
     }
 
+    #[allow(dead_code)]
     pub fn to_json(&self) -> String {
+        self.to_json_authenticated(true)
+    }
+
+    pub fn to_json_authenticated(&self, authenticated: bool) -> String {
         let s = self.lock();
-        let pair_code = match &s.pair_code {
-            PairCodeState::Idle => serde_json::json!({ "state": "idle" }),
-            PairCodeState::Pending { .. } => serde_json::json!({ "state": "pending" }),
-            PairCodeState::Ready { code, expires_at } => {
-                let remaining = expires_at.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    serde_json::json!({ "state": "expired" })
-                } else {
-                    serde_json::json!({
-                        "state": "ready",
-                        "code": code,
-                        "expires_in_seconds": remaining.as_secs(),
-                    })
+        let pair_code = if !authenticated {
+            serde_json::json!({ "state": "redacted" })
+        } else {
+            match &s.pair_code {
+                PairCodeState::Idle => serde_json::json!({ "state": "idle" }),
+                PairCodeState::Pending { .. } => serde_json::json!({ "state": "pending" }),
+                PairCodeState::Ready { code, expires_at } => {
+                    let remaining = expires_at.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        serde_json::json!({ "state": "expired" })
+                    } else {
+                        serde_json::json!({
+                            "state": "ready",
+                            "code": code,
+                            "expires_in_seconds": remaining.as_secs(),
+                        })
+                    }
                 }
-            }
-            PairCodeState::Error { message } => {
-                serde_json::json!({ "state": "error", "message": message })
+                PairCodeState::Error { message } => {
+                    serde_json::json!({ "state": "error", "message": message })
+                }
             }
         };
         serde_json::json!({
-            "qr_code": s.qr_code,
+            "qr_code": if authenticated { s.qr_code.as_deref() } else { None },
             "connected": s.connected,
             "pn": s.pn,
             "lid": s.lid,

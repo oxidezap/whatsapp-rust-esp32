@@ -468,13 +468,19 @@ pub fn start_admin_server(
         })?;
     }
 
-    // GET /device: Device status (QR code, connection, PN/LID, pairing code)
+    // GET /device: Device status (QR code, connection, PN/LID, pairing code).
+    // Sensitive pairing fields (qr_code, pair_code) are redacted when an admin token
+    // is configured and the request does not present it.
     {
+        let auth = auth.clone();
         let ds = device_status.clone();
         server.fn_handler::<anyhow::Error, _>(
             "/device",
             esp_idf_svc::http::Method::Get,
-            move |req| json_response(req, &ds.to_json()),
+            move |req| {
+                let authenticated = auth.check(&req).is_ok();
+                json_response(req, &ds.to_json_authenticated(authenticated))
+            },
         )?;
     }
 

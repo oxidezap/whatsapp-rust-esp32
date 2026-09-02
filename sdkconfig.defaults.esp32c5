@@ -4,10 +4,6 @@
 
 # PSRAM: 8 MB quad SPI (the C5 has no octal mode)
 CONFIG_SPIRAM_MODE_QUAD=y
-# Allow FreeRTOS task stacks in PSRAM (the v5.5 name of the S3's
-# CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY). Rust's ESP-IDF thread implementation
-# uses this path for the explicitly SPIRAM-capable stacks in src/.
-CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 
 # The board exposes the chip's native USB Serial/JTAG endpoint, not a UART
 # bridge. It must be the primary console for bidirectional command input; a

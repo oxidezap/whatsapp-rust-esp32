@@ -9,6 +9,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 # PSRAM: 8 MB. The mode (octal on the S3, quad on the C5) is per-chip.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_80M=y
+# Allow FreeRTOS task stacks in PSRAM (needed for large thread stacks).
+# Rust's ESP-IDF thread implementation uses this path for the explicitly
+# SPIRAM-capable stacks in src/.
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 
 # malloc() routing between the two heaps. ALWAYSINTERNAL is the max request size
 # that is preferentially served from internal DRAM; anything larger goes to PSRAM

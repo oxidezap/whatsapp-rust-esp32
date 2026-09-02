@@ -163,7 +163,8 @@ With one set, `/send`, `/messages`, `/pair-code`, `/reset`, `/reboot`, and
 `/sessions` (both GET and DELETE) answer `401` unless the request carries
 `X-Admin-Token`. The dashboard has a field for it and keeps it in that browser's
 session storage. The status routes (`/`, `/device`, `/metrics`, `/health`) stay
-open so the page can render before you type it in.
+open so the page can render before you type it in; sensitive pairing fields
+(`qr_code`, `pair_code`) on `/device` are redacted until the token is provided.
 
 Leave it unset and the device behaves as it always has, with a warning in the
 boot log naming what is exposed. Like the push name, it can also be provisioned
@@ -360,7 +361,7 @@ itself pulls `qrcode.min.js` from a CDN, so the browser needs internet access):
 |--------|------|---------|
 | GET | `/dashboard` | The HTML dashboard. |
 | GET | `/` | JSON store stats (heap, sessions, identities, prekeys, paired). |
-| GET | `/device` | Pairing status: QR code, connection, PN/LID, linking-code state. |
+| GET | `/device` | Pairing status: QR code, connection, PN/LID, linking-code state (pairing credentials redacted without token). |
 | GET | `/messages` | The last 16 inbound messages (id, chat, sender, truncated text, timestamp). Needs the token. |
 | POST | `/send` | `{"to":"<jid>","text":"..."}`: send a text and wait for the outcome (`message_id` on success). Needs the token. |
 | POST | `/pair-code` | `{"phone_number":"+15551234567"}`: request a linking code; poll `/device` for it. Needs the token. |

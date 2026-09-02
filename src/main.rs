@@ -522,10 +522,12 @@ async fn feed_task_watchdog() {
     /// Well inside `CONFIG_ESP_TASK_WDT_TIMEOUT_S` (30 s in sdkconfig.defaults).
     const FEED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
     /// Delay between retries when timer creation or wait fails.
-    const ERROR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+    const ERROR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
     /// About a minute of consecutive failures before giving the watchdog up.
     const MAX_CONSECUTIVE_FAILURES: u32 = 12;
 
+    let timer_service = esp_idf_svc::timer::EspTaskTimerService::new().ok();
+    let mut timer = timer_service.as_ref().and_then(|s| s.timer_async().ok());
     let mut failures = 0u32;
     loop {
         // Feed first: the point of this task is that the watchdog gets fed even
@@ -536,22 +538,27 @@ async fn feed_task_watchdog() {
             error!("Failed to feed the wa-main task watchdog: ESP error {result}");
         }
 
-        let feed_cycle_ok =
-            match esp_idf_svc::timer::EspTaskTimerService::new().and_then(|s| s.timer_async()) {
-                Ok(mut timer) => match timer.after(FEED_INTERVAL).await {
-                    Ok(()) => true,
-                    Err(error) => {
-                        failures += 1;
-                        error!("Task-watchdog feed timer failed: {error}");
-                        false
-                    }
-                },
+        // Re-arm or allocate timer if needed
+        if timer.is_none() {
+            if let Some(ref s) = timer_service {
+                timer = s.timer_async().ok();
+            }
+        }
+
+        let feed_cycle_ok = if let Some(ref mut t) = timer {
+            match t.after(FEED_INTERVAL).await {
+                Ok(()) => true,
                 Err(error) => {
                     failures += 1;
-                    error!("Could not arm the task-watchdog feed timer: {error}");
+                    error!("Task-watchdog feed timer failed: {error}");
                     false
                 }
-            };
+            }
+        } else {
+            failures += 1;
+            error!("Could not arm the task-watchdog feed timer");
+            false
+        };
 
         if feed_cycle_ok && result == esp_idf_svc::sys::ESP_OK {
             failures = 0;
@@ -567,9 +574,14 @@ async fn feed_task_watchdog() {
             unsafe { esp_idf_svc::sys::esp_task_wdt_delete(core::ptr::null_mut()) };
             return;
         }
-        // The timer is unusable this round; back off with a real delay so transient
-        // timer-allocation failures do not busy-spin and starve the executor.
+        // The timer is unusable this round; back off briefly and yield to executor
+        // so transient timer failures do not spin or permanently starve wa-main.
         std::thread::sleep(ERROR_RETRY_DELAY);
+        futures::future::poll_fn(|cx| {
+            cx.waker().wake_by_ref();
+            std::task::Poll::Ready(())
+        })
+        .await;
     }
 }
 
@@ -654,10 +666,20 @@ async fn run_whatsapp(
                 5
             }
         };
-        if let Ok(mut t) = timer_service.timer_async() {
-            let _ = t.after(std::time::Duration::from_secs(delay)).await;
-        } else {
-            std::thread::sleep(std::time::Duration::from_secs(delay));
+        let delay_dur = std::time::Duration::from_secs(delay);
+        let start = std::time::Instant::now();
+        while start.elapsed() < delay_dur {
+            let remaining = delay_dur.saturating_sub(start.elapsed());
+            if let Ok(mut t) = timer_service.timer_async() {
+                let _ = t.after(remaining).await;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            futures::future::poll_fn(|cx| {
+                cx.waker().wake_by_ref();
+                std::task::Poll::Ready(())
+            })
+            .await;
         }
     }
 }
