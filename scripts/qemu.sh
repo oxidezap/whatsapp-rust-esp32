@@ -21,7 +21,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROFILE="${PROFILE:-release}"
-TARGET_DIR="${QEMU_TARGET_DIR:-target/qemu}"
+# Fixed, not overridable: sdkconfig.qemu points ESP-IDF back at partitions.csv
+# with a relative path whose depth assumes exactly this location (see the
+# comment there), so a different or absolute target dir would silently lose
+# the custom partition table.
+TARGET_DIR="target/qemu"
 OUT_DIR="$TARGET_DIR/xtensa-esp32s3-espidf/$PROFILE"
 ELF="$OUT_DIR/whatsapp-esp32"
 FLASH_IMAGE="$OUT_DIR/flash_image.bin"
@@ -73,7 +77,7 @@ cmd_image() {
 }
 
 # Fills QEMU_CMD, the invocation as an array, so a path with whitespace in
-# QEMU_XTENSA, QEMU_TARGET_DIR or PROFILE stays one argument.
+# QEMU_XTENSA or PROFILE stays one argument.
 #
 # -m sets the emulated PSRAM size (the board has 8 MB). `open_eth` is the only
 # NIC model the esp32s3 machine wires up. The serial console is the stdio.

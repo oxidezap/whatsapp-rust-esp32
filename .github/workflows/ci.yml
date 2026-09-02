@@ -28,6 +28,8 @@ jobs:
   build:
     name: Build (${{ matrix.flavor }})
     runs-on: ubuntu-latest
+    # A cold ESP-IDF build is ~20 min; a cached one a few. Anything past this is stuck.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +104,9 @@ jobs:
     # Fork PRs get no secrets, so they cannot pull the private mock-server image.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
+    # scripts/qemu.sh test caps the boot-to-connected wait at 10 min; this bounds
+    # the rest (image download, QEMU install, a mock server that never answers).
+    timeout-minutes: 30
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
@@ -138,7 +143,7 @@ jobs:
       - name: Wait for mock server
         run: |
           for i in $(seq 1 30); do
-            if curl -sk https://localhost:8080/ > /dev/null 2>&1; then
+            if curl -sk --max-time 5 https://localhost:8080/ > /dev/null 2>&1; then
               echo "Mock server is ready"; exit 0
             fi
             sleep 1
