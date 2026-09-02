@@ -437,11 +437,16 @@ pub fn start_admin_server(
     auth.log_exposure(port);
     let config = Configuration {
         http_port: port,
-        // Put the httpd worker stack in PSRAM (Default is internal DRAM). Handlers
-        // serve static HTML + small JSON and hand real work to the executor, so
-        // 6 KB from PSRAM is plenty; JSON parsing of a POST body is the deepest.
+        // Put the httpd worker stack in PSRAM where there is any (the default is
+        // internal DRAM). Handlers serve static HTML + small JSON and hand real
+        // work to the executor, so 6 KB is plenty either way; JSON parsing of a
+        // POST body is the deepest frame.
         stack_size: 6144,
-        task_caps: esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT,
+        task_caps: if crate::runtime::HAS_PSRAM {
+            esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT
+        } else {
+            esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT
+        },
         ..Default::default()
     };
 

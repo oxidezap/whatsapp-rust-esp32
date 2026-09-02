@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # Run cargo for one of the supported boards.
 #
-#   scripts/build.sh [--board esp32s3|esp32c5] [cargo build args...]
+#   scripts/build.sh [--board esp32s3|esp32c5|esp32c3] [cargo build args...]
 #   BOARD=esp32c5 scripts/build.sh --release
-#   CARGO_CMD=clippy scripts/build.sh --board esp32c5 -- -D warnings
+#   CARGO_CMD=clippy scripts/build.sh --board esp32c3 -- -D warnings
 #
-# A board is a target triple plus the ESP-IDF version and MCU name esp-idf-sys
-# builds against; everything else (sdkconfig, partitions, source) is shared, with
-# the chip-specific sdkconfig picked up automatically from sdkconfig.defaults.<mcu>.
+# A board is a target triple, whether the chip has PSRAM, and the ESP-IDF version
+# and MCU name esp-idf-sys builds against -- all of it in scripts/boards.sh, which
+# scripts/qemu.sh shares. Everything else (partitions, source) is common, with the
+# chip's own sdkconfig.defaults.<mcu> picked up by ESP-IDF itself.
 # `cargo build` with no wrapper is the esp32s3 case (see .cargo/config.toml).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source scripts/boards.sh
 
 usage() {
-    echo "usage: $0 [--board esp32s3|esp32c5] [cargo args...]" >&2
+    echo "usage: $0 [--board ${BOARD_NAMES[*]}] [cargo args...]" >&2
     exit 2
 }
 
@@ -27,20 +29,10 @@ if [[ "${1:-}" == "--board" ]]; then
     shift 2
 fi
 
-case "$BOARD" in
-    esp32s3)
-        TARGET=xtensa-esp32s3-espidf
-        ;;
-    esp32c5)
-        TARGET=riscv32imac-esp-espidf
-        ;;
-    *)
-        echo "unknown board '$BOARD' (esp32s3 or esp32c5)" >&2
-        usage
-        ;;
-esac
+board_select "$BOARD" || usage
 
 # Process environment beats .cargo/config.toml's [env] block, so this is the
-# whole board switch. Both boards share ESP-IDF v5.5.5 under .embuild.
-export MCU="$BOARD" ESP_IDF_VERSION="v5.5.5"
-exec cargo "${CARGO_CMD:-build}" --target "$TARGET" "$@"
+# whole board switch.
+export MCU="$BOARD" ESP_IDF_VERSION="$BOARD_ESP_IDF_VERSION"
+export ESP_IDF_SDKCONFIG_DEFAULTS="$(board_sdkconfig_defaults)"
+exec cargo "${CARGO_CMD:-build}" --target "$BOARD_TARGET" "$@"

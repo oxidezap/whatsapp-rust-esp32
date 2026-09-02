@@ -48,7 +48,7 @@ against ESP-IDF `latest`.
 | **ESP32-C61** | RISC-V ×1, 160 MHz | 320 KB | quad, 2/8 MB | Wi-Fi 6 + BLE | `riscv32imac-esp-espidf` (as the C5) | no | plausible — the cheap C5 |
 | **ESP32-P4** | RISC-V ×2, 360–400 MHz | 768 KB | up to **32 MB** | **none** (Ethernet MAC; Wi-Fi via ESP-Hosted) | `riscv32imafc-esp-espidf` | no | special case, see §4 |
 | ESP32-C6 | RISC-V ×1, 160 MHz | 512 KB | **none** | Wi-Fi 6 + BLE + 802.15.4 | `riscv32imac-esp-espidf` | no | **blocked**: no PSRAM in the memory map |
-| ESP32-C3 | RISC-V ×1, 160 MHz | 400 KB | **none** | Wi-Fi 4 + BLE | `riscv32imc-esp-espidf` | **yes** | **blocked**, but see §5 |
+| **ESP32-C3** | RISC-V ×1, 160 MHz | 400 KB | **none** | Wi-Fi 4 + BLE | `riscv32imc-esp-espidf` | **yes** | **shipping** — see §5 and [docs/esp32c3.md](esp32c3.md) |
 | ESP32-C2 | RISC-V ×1, 120 MHz | 272 KB | **none** | Wi-Fi 4 + BLE | `riscv32imc-esp-espidf` | no | blocked |
 | ESP32-H2 | RISC-V ×1, 96 MHz | 320 KB | **none** | BLE + 802.15.4, **no Wi-Fi** | `riscv32imac-esp-espidf` | no | blocked twice over |
 
@@ -141,32 +141,42 @@ companion C6, which is a much larger integration and not worth it here.
 Worth doing only if a P4 board is actually on hand; as a CI target it is behind
 Tier 1 and 2.
 
-## 5. Deliberately weaker: what would it take to reach a no-PSRAM chip
+## 5. Deliberately weaker: the ESP32-C3, which now runs
 
-The user-facing question ("how far down the hardware ladder can this go?") points
-at the C3: 400 KB of SRAM, no PSRAM, and — uniquely among the no-PSRAM parts —
-**first-class Espressif QEMU support**. It is the cheapest possible emulated CI
-target, and today it is unreachable. What stands in the way, quantified:
+This section used to be a cost estimate. It is now a report, because the port was
+built and booted; the full account is [docs/esp32c3.md](esp32c3.md).
 
-| Blocker | Today | Would have to become | Difficulty |
-| --- | --- | --- | --- |
-| Global allocator | whole Rust heap in PSRAM (`src/psram_alloc.rs`) | delete the allocator, live in ~300 KB of DRAM | mechanical, then everything else gets harder |
-| `wa-main` stack | 256 KB, PSRAM | ~32–48 KB — means flattening the deep send path (reaction + quoted reply + edit) and boxing futures | **hard**, and the comment on `MAIN_TASK_STACK_SIZE` says the depth is real |
-| Other stacks | 342 KB PSRAM + 64 KB internal | ~100 KB total | moderate |
-| Identity/session store | replayed into a RAM cache at boot (`src/storage.rs`) | read-through from NVS, no full cache | moderate, and slower |
-| mbedTLS buffers | `MBEDTLS_SSL_MAX_CONTENT_LEN=16384`, `MBEDTLS_EXTERNAL_MEM_ALLOC=y` | 4–8 KB content length, internal alloc | risky: WhatsApp frames may exceed it |
-| App image | 4.5 MB | fits fine — C3 supports 16 MB flash | none |
+The C3 was the obvious target for the question the README opens with: 400 KB of
+SRAM, no PSRAM, and — uniquely among the no-PSRAM parts — **first-class Espressif
+QEMU support**, so it is both the smallest chip that could plausibly hold this
+and the cheapest one to keep honest in CI.
 
-*Estimated*: a no-PSRAM port is a **different firmware**, not a build flavor —
-call it 300–400 KB of RAM budget against a stack that currently wants over 700 KB.
-Flash is not the problem; RAM is. The honest intermediate step is not the C3 but
-a **small-PSRAM** run: build for the S3 with `-m 2M` in QEMU, and separately with
-`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` raised, and find where it actually breaks.
-That experiment costs one CI matrix entry and tells you the real floor before
-anyone buys a board.
+What the estimate got right, and what it got wrong:
 
-The C2 (272 KB, 120 MHz) and the H2 (no Wi-Fi at all) are below the floor in every
-version of this.
+| Blocker | Estimated | What it actually took |
+| --- | --- | --- |
+| Global allocator | "delete the allocator" | One `#[cfg(esp_idf_spiram)]`. The library already only *defined* `PsramAllocator`; the firmware installs it. |
+| `wa-main` stack | "~32–48 KB, means flattening the send path" | **64 KB, no restructuring.** The estimate was pessimistic. |
+| Other stacks | "~100 KB total" | 20 KB blocking + 12 KB transport + 6 KB httpd, plus the unchanged 32 KB internal `wa-nvs`. |
+| Identity/session store | "read-through from NVS, no full cache" | **Not needed.** The RAM cache fits. |
+| mbedTLS buffers | "4–8 KB content length, risky" | **Not needed.** `CONFIG_MBEDTLS_DYNAMIC_BUFFER` plus asymmetric records (16 KB in / 4 KB out) was enough, so a full-size record is still accepted. |
+| App image | "4.5 MB, fits fine" | 4.11 MB, 82.6% of the factory partition. |
+| — | not foreseen | **`tungstenite`'s default 128 KB read *and* write buffers.** A single 128 KB allocation, invisible on 8 MB of PSRAM, is most of the C3's free heap; it killed the firmware after a *successful* TLS and WebSocket handshake. |
+
+So the conclusion — "a no-PSRAM port is a different firmware, not a build
+flavor" — was wrong, and instructively so. It is a build flavor. What made that
+true was not cleverness in this port but the library split that landed first: the
+allocator was already opt-in and every thread config already had a `_with`
+variant, so there was nothing to restructure, only sizes to choose. The one real
+bug was in a dependency's defaults, and no amount of reading would have found it.
+Booting it did.
+
+Free heap on the emulated C3 with the network up, the dashboard bound, the `Bot`
+built and the transport connected: **173,880 bytes**, of which 166,396 internal.
+That is the number to watch, and the honest caveat is that QEMU has no radio, so
+it does not include what the Wi-Fi driver holds on a real board.
+
+The C2 (272 KB, 120 MHz) and the H2 (no Wi-Fi at all) remain below the floor.
 
 ## 6. Emulators, and what each can actually cover
 
@@ -177,6 +187,8 @@ version of this.
 | **espressif/esp-emulator** | C3, C6, H2, P4 | Wi-Fi SoftAP (WPA2-PSK), OpenCores + Synopsys Ethernet, NAT/TAP | present, but "zero-initialized RAM rather than fully modeled" | interesting for a P4 lane; the loose PSRAM model makes it weak evidence for exactly the thing this firmware stresses |
 
 ### Suggested order of work
+
+The ESP32-C3 lane is done (§5); what is left, in order:
 
 1. **ESP32 classic on QEMU.** One `sdkconfig.defaults.esp32`, one `build.sh` arm,
    one `qemu-e2e` matrix axis over `-M esp32 -m 4M`. Reuses the whole existing

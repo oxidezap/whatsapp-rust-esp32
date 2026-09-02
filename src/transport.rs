@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
+use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use tungstenite::Message;
 // Re-exported through whatsapp-rust so the `async_channel::Receiver` handed back
 // by `create_transport` is provably the same type the client expects.
@@ -201,16 +201,18 @@ impl Esp32TransportFactory {
         }
     }
 
-    /// The thread each connection's socket is driven on: 16 KB of PSRAM stack
-    /// on core 0, at the same priority as the executor.
+    /// The thread each connection's socket is driven on: 16 KB of stack on
+    /// core 0, at the same priority as the executor. Without PSRAM the stack is
+    /// internal DRAM and 12 KB; the frames here are mbedTLS record handling and
+    /// `tungstenite` framing, neither of which recurses.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"ws-transport"),
-            stack_size: 16_384,
+            stack_size: crate::runtime::by_ram(16 * 1024, 12 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
-            stack_alloc_caps: enumset::enum_set!(MallocCap::Spiram | MallocCap::Cap8bit),
+            stack_alloc_caps: crate::runtime::stack_caps(),
         }
     }
 
@@ -300,7 +302,22 @@ fn ws_thread(
         .body(())
         .unwrap();
 
-    let (mut ws, _response) = match tungstenite::client(request, stream) {
+    // tungstenite defaults to a 128 KB read buffer AND a 128 KB write buffer.
+    // On a PSRAM board those come out of the 8 MB external heap and nobody pays
+    // attention; on the ESP32-C3 a single 128 KB request is most of the free heap
+    // and aborts the firmware ("memory allocation of 131072 bytes failed") right
+    // after the handshake succeeds. Neither buffer caps message size -- the read
+    // one is the chunk size reads are issued in, and the write one is the
+    // threshold past which tungstenite stops coalescing -- so a smaller pair
+    // costs syscalls, not capability, and WhatsApp's frames are nowhere near
+    // either figure. The default is kept where there is PSRAM to spend, so the
+    // boards this was tuned on keep the behaviour they were tested with.
+    let ws_config = tungstenite::protocol::WebSocketConfig::default()
+        .read_buffer_size(crate::runtime::by_ram(128 * 1024, 8 * 1024))
+        .write_buffer_size(crate::runtime::by_ram(128 * 1024, 8 * 1024));
+
+    let (mut ws, _response) = match tungstenite::client::client_with_config(request, stream, Some(ws_config))
+    {
         Ok(ws) => ws,
         Err(e) => {
             log::error!("WebSocket handshake failed: {}", e);

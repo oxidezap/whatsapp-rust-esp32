@@ -43,19 +43,29 @@ demo bot, and serves a status dashboard over HTTP. See
 |-------|------|---------------|---------|-------|
 | ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release --features mock-server` |
 | [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release --features mock-server` |
+| ESP32-C3, 16 MB flash | RISC-V, single core | 16 MB / **none** | v5.5.5 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
 
-The PSRAM is required on both: the main async task runs on a 256 KB stack
-allocated from PSRAM, which is far larger than internal SRAM can provide. The
-source is the same for both boards; both share ESP-IDF v5.5.5. What differs is
-the target triple and one chip-specific `sdkconfig.defaults.<chip>` overlay (PSRAM
-mode, console, cache layout), which `esp-idf-sys` picks up from the `MCU` it is
-building for. Adding a board is adding that one file.
+The source is the same for every board, and so is ESP-IDF v5.5.5. What differs is
+the target triple, whether the chip has PSRAM, and one chip-specific
+`sdkconfig.defaults.<chip>` overlay -- all of it in
+[`scripts/boards.sh`](scripts/boards.sh), the one table `scripts/build.sh`,
+`scripts/qemu.sh` and CI read. Adding a board is a row there plus that one file.
+
+PSRAM is not required, but its absence is the interesting case. On the S3 and the
+C5 the whole Rust heap, the 256 KB executor stack and every worker stack live in
+8 MB of external RAM. The **ESP32-C3 has none**: ~400 KB of on-chip SRAM is the
+entire memory system, ESP-IDF hands about 314 KB of it to the heap, and the
+firmware adapts by reading `CONFIG_SPIRAM` -- no chip name appears anywhere in
+`src/`. What that changes, what it cost, and what is and is not verified:
+[docs/esp32c3.md](docs/esp32c3.md).
+
+Flash is the one hard floor: the app image is 4.1--4.5 MB and `partitions.csv`
+also wants 1 MB for the store, so a board needs **at least 8 MB** and the table as
+written assumes 16 MB. The common 4 MB C3 devkits cannot hold it.
 
 Which other Espressif parts could host this firmware, what each would cost, and
-which emulator can stand in for it in CI: [docs/board-support-map.md](docs/board-support-map.md).
-There is a hard floor: the chip needs PSRAM (the Rust heap and the 256 KB
-executor stack live there) and at least 8 MB of flash (the app image alone is
-4.5 MB), which rules out the whole C2/C3/C6/H2 line.
+which emulator can stand in for it in CI:
+[docs/board-support-map.md](docs/board-support-map.md).
 
 ## How it works
 

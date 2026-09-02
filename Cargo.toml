@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.94"
 authors = ["João Lucas <jlucaso@hotmail.com>"]
 license = "MIT"
-description = "A full, end-to-end-encrypted WhatsApp client running on ESP32-S3 and ESP32-C5 microcontrollers, built on whatsapp-rust."
+description = "A full, end-to-end-encrypted WhatsApp client running on ESP32-S3, ESP32-C5 and ESP32-C3 microcontrollers, built on whatsapp-rust."
 repository = "https://github.com/oxidezap/whatsapp-rust-esp32"
 keywords = ["whatsapp", "esp32", "embedded", "esp-idf", "iot"]
 categories = ["embedded"]
@@ -83,6 +83,12 @@ panic = "abort"
 # ldproxy announces itself on stderr ("[ldproxy] Running ldproxy"); rustc's
 # `linker_messages` lint would otherwise report that on every link.
 linker_messages = "allow"
+# `esp_idf_spiram` is one of the cfgs esp-idf-sys derives from the sdkconfig
+# (CONFIG_SPIRAM), and the firmware reads it to decide where stacks and the heap
+# live. The build script only *declares* it on a board that has PSRAM, so on the
+# ESP32-C3 -- the build where its absence is the entire point -- rustc would
+# otherwise report it as an unexpected cfg name.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_spiram)'] }
 
 [features]
 # The dashboard only. `mock-server` is deliberately not a default: a consumer

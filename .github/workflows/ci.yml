@@ -91,7 +91,7 @@ jobs:
             ~/.cargo/git
             .embuild
             target
-          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.defaults', 'sdkconfig.defaults.*', 'sdkconfig.qemu', 'components_*.lock', '.cargo/config.toml', 'scripts/build.sh') }}
+          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.*', 'components_*.lock', '.cargo/config.toml', 'scripts/*.sh') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-
 
@@ -99,6 +99,18 @@ jobs:
         run: |
           # Purge older v5.4 tools if restored from legacy cache so esp-idf-sys installs v5.5.5 tools cleanly
           rm -rf .embuild/espressif/esp-idf/v5.4 .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
+
+      # The board table owns the target triple and the qemu target dir, so this
+      # file never repeats either. $OUT is where cargo left the ELF.
+      - name: Resolve paths from the board table
+        run: |
+          source scripts/boards.sh
+          board_select "${{ matrix.board }}"
+          if [ -n "${{ matrix.qemu }}" ]; then
+            echo "OUT=$(board_out_dir "$(board_qemu_target_dir)")" >> "$GITHUB_ENV"
+          else
+            echo "OUT=$(board_out_dir)" >> "$GITHUB_ENV"
+          fi
 
       - name: Build
         run: ${{ matrix.build }}
@@ -120,9 +132,9 @@ jobs:
       - name: App image and partition size gate
         run: |
           python3 -m venv .venv && .venv/bin/pip install -q esptool
-          .venv/bin/esptool --chip ${{ matrix.chip }} elf2image --flash_size 16MB \
-            -o "${{ matrix.out }}/whatsapp-esp32.bin" "${{ matrix.out }}/whatsapp-esp32"
-          scripts/check-app-size.sh "${{ matrix.out }}/whatsapp-esp32.bin" partitions.csv
+          .venv/bin/esptool --chip ${{ matrix.board }} elf2image --flash_size 16MB \
+            -o "$OUT/whatsapp-esp32.bin" "$OUT/whatsapp-esp32"
+          scripts/check-app-size.sh "$OUT/whatsapp-esp32.bin" partitions.csv
 
       - name: Upload firmware
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -130,10 +142,10 @@ jobs:
           name: firmware-${{ matrix.flavor }}
           if-no-files-found: error
           path: |
-            ${{ matrix.out }}/whatsapp-esp32
-            ${{ matrix.out }}/whatsapp-esp32.bin
-            ${{ matrix.out }}/bootloader.bin
-            ${{ matrix.out }}/partition-table.bin
+            ${{ env.OUT }}/whatsapp-esp32
+            ${{ env.OUT }}/whatsapp-esp32.bin
+            ${{ env.OUT }}/bootloader.bin
+            ${{ env.OUT }}/partition-table.bin
 
   # An empty `password:` under `services.*.credentials` is a template error that
   # GitHub reports as "Unexpected value ''" with no hint about which secret, so
@@ -156,7 +168,7 @@ jobs:
           echo "secret present"
 
   qemu-e2e:
-    name: Pair, persist and message on QEMU (ESP32-S3)
+    name: Pair, persist and message on QEMU (${{ matrix.board }})
     # Runs only when the build passed and the credentials check ran and passed;
     # inherits the fork-PR skip from `mock-server-secret`.
     needs: [build, mock-server-secret]
@@ -164,6 +176,19 @@ jobs:
     # scripts/qemu.sh test caps each boot-to-connected wait at 10 min; this bounds
     # the rest (image download, QEMU install, a mock server that never answers).
     timeout-minutes: 40
+    strategy:
+      # One chip failing must not hide the other's result: the C3 is the tight
+      # one, and knowing whether the S3 still passes is exactly what says whether
+      # a failure is the port or the change.
+      fail-fast: false
+      matrix:
+        include:
+          - board: esp32s3
+            # The QEMU release ships one binary per architecture; `arch` names
+            # both the tarball and the qemu-system-* inside it.
+            arch: xtensa
+          - board: esp32c3
+            arch: riscv32
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
@@ -186,20 +211,29 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve paths from the board table
+        run: |
+          source scripts/boards.sh
+          board_select "${{ matrix.board }}"
+          echo "OUT=$(board_out_dir "$(board_qemu_target_dir)")" >> "$GITHUB_ENV"
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: firmware-qemu
-          path: target/qemu/xtensa-esp32s3-espidf/release
+          name: firmware-qemu-${{ matrix.board }}
+          path: ${{ env.OUT }}
 
       - name: Espressif QEMU, esptool and the NVS partition generator
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends libsdl2-2.0-0 libslirp0 libglib2.0-0 libpixman-1-0
           v="${QEMU_RELEASE#esp-develop-}"
+          arch="${{ matrix.arch }}"
           curl -sSfL -o qemu.tar.xz \
-            "https://dl.espressif.com/github_assets/espressif/qemu/releases/download/${QEMU_RELEASE}/qemu-xtensa-softmmu-esp_develop_${v/-/_}-x86_64-linux-gnu.tar.xz"
+            "https://dl.espressif.com/github_assets/espressif/qemu/releases/download/${QEMU_RELEASE}/qemu-${arch}-softmmu-esp_develop_${v/-/_}-x86_64-linux-gnu.tar.xz"
           mkdir -p "$HOME/qemu" && tar -xJf qemu.tar.xz -C "$HOME/qemu"
-          echo "QEMU_XTENSA=$HOME/qemu/qemu/bin/qemu-system-xtensa" >> "$GITHUB_ENV"
+          # scripts/boards.sh reads QEMU_XTENSA for the S3 and QEMU_RISCV32 for
+          # the C3; only the one for this chip is set.
+          echo "QEMU_${arch^^}=$HOME/qemu/qemu/bin/qemu-system-${arch}" >> "$GITHUB_ENV"
           python3 -m venv .venv && .venv/bin/pip install -q esptool esp-idf-nvs-partition-gen
           echo "ESPTOOL=$PWD/.venv/bin/esptool" >> "$GITHUB_ENV"
           echo "NVS_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
@@ -215,14 +249,14 @@ jobs:
           echo "Mock server did not become ready"; exit 1
 
       - name: Pair, reboot, and message between two boards
-        run: scripts/qemu.sh test
+        run: BOARD=${{ matrix.board }} scripts/qemu.sh test
 
       - name: Upload serial logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qemu-serial-logs
+          name: qemu-serial-logs-${{ matrix.board }}
           if-no-files-found: ignore
           path: |
-            target/qemu/xtensa-esp32s3-espidf/release/qemu-*.log
-            target/qemu/xtensa-esp32s3-espidf/release/qemu-metrics.json
+            ${{ env.OUT }}/qemu-*.log
+            ${{ env.OUT }}/qemu-metrics.json

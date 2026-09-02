@@ -50,6 +50,50 @@ impl<F: Future<Output = ()> + Unpin> Future for AbortableFuture<F> {
 
 pub type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// Whether this ESP-IDF build has external SPI RAM.
+///
+/// `esp_idf_spiram` is the cfg esp-idf-sys derives from `CONFIG_SPIRAM` in the
+/// sdkconfig, so this follows the board's own `sdkconfig.defaults.<mcu>` and is
+/// never a guess about which chip is being built for. It decides two things
+/// that no `Bot` code has to know about: where thread stacks are allocated
+/// ([`stack_caps`]) and how large they can afford to be.
+///
+/// On an ESP32-S3 or ESP32-C5 there are 8 MB to spend and the defaults are
+/// generous. On an ESP32-C3 the whole memory system is ~400 KB of on-chip SRAM,
+/// so the same defaults would not leave room for the TLS session, and the
+/// sizes below come down accordingly.
+pub const HAS_PSRAM: bool = cfg!(esp_idf_spiram);
+
+/// The heap a thread stack is allocated from: PSRAM where the build has it,
+/// internal DRAM otherwise.
+///
+/// Asking for `MallocCap::Spiram` on a chip without PSRAM does not fall back,
+/// it fails the spawn, so this is not a preference but a requirement.
+pub fn stack_caps() -> enumset::EnumSet<MallocCap> {
+    if HAS_PSRAM {
+        enumset::enum_set!(MallocCap::Spiram | MallocCap::Cap8bit)
+    } else {
+        enumset::enum_set!(MallocCap::Internal | MallocCap::Cap8bit)
+    }
+}
+
+/// Pick a buffer or stack size by whether this build has PSRAM.
+///
+/// One function so that every size that has to shrink on a chip with no external
+/// RAM -- the thread stacks here, the transport's WebSocket buffers -- reads the
+/// same way, and so the no-PSRAM column can be found and re-tuned in one place.
+/// Public because a firmware sizing its own threads faces the same choice.
+///
+/// `GET /metrics` reports `stack_*_min` for each of this crate's threads, which
+/// is where those numbers came from and where a re-tune should start.
+pub const fn by_ram(psram: usize, no_psram: usize) -> usize {
+    if HAS_PSRAM {
+        psram
+    } else {
+        no_psram
+    }
+}
+
 /// Spawn a `std` thread whose FreeRTOS task has `config`'s name, stack size,
 /// stack memory, priority and core.
 ///
@@ -97,18 +141,19 @@ pub struct BlockingWorker {
 }
 
 impl BlockingWorker {
-    /// The thread [`BlockingWorker::start`] creates: 32 KB of PSRAM stack,
-    /// pinned to core 0 below the network and executor threads (priority 5) so
-    /// a long key batch never delays a socket read, and above idle, which the
-    /// task watchdog must therefore not check on that core.
+    /// The thread [`BlockingWorker::start`] creates: 32 KB of stack (20 KB
+    /// without PSRAM, see [`HAS_PSRAM`]), pinned to core 0 below the network
+    /// and executor threads (priority 5) so a long key batch never delays a
+    /// socket read, and above idle, which the task watchdog must therefore not
+    /// check on that core.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-blocking"),
-            stack_size: 32 * 1024,
+            stack_size: by_ram(32 * 1024, 20 * 1024),
             priority: 1,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
-            stack_alloc_caps: enumset::enum_set!(MallocCap::Spiram | MallocCap::Cap8bit),
+            stack_alloc_caps: stack_caps(),
         }
     }
 
@@ -232,17 +277,22 @@ pub struct Esp32Executor {
 
 impl Esp32Executor {
     /// The thread [`Esp32Executor::block_on`] is meant to run on: `wa-main`,
-    /// 256 KB of PSRAM stack (the send path with a quoted reply and an edit
-    /// has deep frames; internal RAM could not spare that), core 0, priority 5.
-    /// Spawn it with [`spawn_thread`].
+    /// 256 KB of PSRAM stack (the send path with a quoted reply and an edit has
+    /// deep frames), core 0, priority 5. Spawn it with [`spawn_thread`].
+    ///
+    /// Without PSRAM this is 64 KB of internal DRAM instead, which is the
+    /// single largest concession the ESP32-C3 port makes: it is the measured
+    /// high-water mark of that same send path with headroom, not a comfortable
+    /// margin. A firmware that adds deeper work to the executor should watch
+    /// `stack_wa_main_min` in `GET /metrics` on that chip.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-main"),
-            stack_size: 256 * 1024,
+            stack_size: by_ram(256 * 1024, 64 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
-            stack_alloc_caps: enumset::enum_set!(MallocCap::Spiram | MallocCap::Cap8bit),
+            stack_alloc_caps: stack_caps(),
         }
     }
 
