@@ -526,7 +526,7 @@ async fn feed_task_watchdog() {
     /// About a minute of consecutive failures before giving the watchdog up.
     const MAX_CONSECUTIVE_FAILURES: u32 = 12;
 
-    let timer_service = esp_idf_svc::timer::EspTaskTimerService::new().ok();
+    let mut timer_service = esp_idf_svc::timer::EspTaskTimerService::new().ok();
     let mut timer = timer_service.as_ref().and_then(|s| s.timer_async().ok());
     let mut failures = 0u32;
     loop {
@@ -538,8 +538,11 @@ async fn feed_task_watchdog() {
             error!("Failed to feed the wa-main task watchdog: ESP error {result}");
         }
 
-        // Re-arm or allocate timer if needed
+        // Re-arm or allocate timer if needed, retrying timer service creation if it failed
         if timer.is_none() {
+            if timer_service.is_none() {
+                timer_service = esp_idf_svc::timer::EspTaskTimerService::new().ok();
+            }
             if let Some(ref s) = timer_service {
                 timer = s.timer_async().ok();
             }
