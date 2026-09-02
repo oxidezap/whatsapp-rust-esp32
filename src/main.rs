@@ -13,23 +13,30 @@ use esp_idf_svc::wifi::{
     AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi, PmfConfiguration,
 };
 use esp_idf_svc::{
-    eventloop::EspSystemEventLoop, hal::peripherals::Peripherals, nvs::EspDefaultNvsPartition,
+    eventloop::EspSystemEventLoop,
+    hal::peripherals::Peripherals,
+    nvs::{EspDefaultNvsPartition, EspNvs},
 };
 use log::{error, info, warn};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 // Single upstream dependency: whatsapp-rust re-exports wacore/waproto/buffa and
 // the shared support crates, so there is no way for them to drift out of sync.
 use whatsapp_rust::async_channel;
 use whatsapp_rust::bytes;
-use whatsapp_rust::prelude::{Bot, Event, MessageContext, MessageExt as _, MessageField, wa};
+use whatsapp_rust::prelude::{wa, Bot, Event, MessageContext, MessageExt as _, MessageField};
 use whatsapp_rust::wacore::net::{HttpClient as _, HttpRequest};
+use whatsapp_rust::wacore::store::DevicePropsOverride;
+use whatsapp_rust::wacore::types::events::{
+    ConnectFailureReason, EventHandler, EventInterest, EventKind,
+};
 
 use crate::http_client::EspHttpClient;
-use crate::runtime::Esp32Runtime;
-use crate::storage::MemoryStore;
+use crate::runtime::{BlockingWorker, BoxedTask, Esp32Runtime};
+use crate::storage::{
+    ActiveClient, DeviceStatus, MaintenanceAction, MaintenanceCoordinator, MaintenanceRequest,
+    MessageLogEntry, NvsStore,
+};
 use crate::transport::Esp32TransportFactory;
 
 // WiFi + server come from .env at build time (see .env.example). option_env! keeps
@@ -63,6 +70,28 @@ const SKIP_TLS_VERIFY: bool = true;
 // real WhatsApp gateway (no such endpoint exists there; you scan with your phone).
 const MOCK_AUTOPAIR: bool = true;
 
+// The name this device pairs under. Against the mock server the push name is also
+// what selects the account, so two boards with the same name share one number.
+// `WHATSAPP_PUSH_NAME` in .env bakes one in; the `push_name` key of the `wa`
+// namespace in the default NVS partition overrides it at flash time (see README
+// "Configure"), which is how the two-board QEMU test tells its boards apart from
+// one firmware image.
+const DEFAULT_PUSH_NAME: &str = match option_env!("WHATSAPP_PUSH_NAME") {
+    Some(n) => n,
+    None => "esp32-test",
+};
+/// Shared secret the sensitive admin routes require, when one is configured.
+/// Same two sources as the push name: `.env` at build time, or the `wa`
+/// namespace of the default NVS partition (key `admin_token`) at flash time.
+/// Empty means unset, which keeps the historical unauthenticated behavior.
+const DEFAULT_ADMIN_TOKEN: &str = match option_env!("ADMIN_TOKEN") {
+    Some(t) => t,
+    None => "",
+};
+
+/// What Linked Devices shows as the device's OS.
+const DEVICE_OS: &str = "whatsapp-esp32";
+
 const PING_TRIGGER: &str = "\u{1f980}ping"; // 🦀ping
 const PONG_TEXT: &str = "\u{1f3d3} Pong!"; // 🏓 Pong!
 const REACTION_EMOJI: &str = "\u{1f3d3}"; // 🏓
@@ -70,6 +99,84 @@ const REACTION_EMOJI: &str = "\u{1f3d3}"; // 🏓
 /// Stack for the main async executor thread, in PSRAM (so 256 KB is cheap). The full
 /// send path (reaction + quoted reply + edit) has deep frames and needs every byte.
 const MAIN_TASK_STACK_SIZE: usize = 256 * 1024;
+
+/// Why the last client instance stopped, and what the supervisor does about it.
+/// Ordered by severity so concurrent events keep the strongest outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum ClientExit {
+    /// Rebuild the client after a short delay (the default for any exit).
+    Restart = 0,
+    /// The server said when to come back; wait that long first.
+    TemporaryBan = 1,
+    /// The server rejected the client in a way a retry cannot fix (outdated
+    /// build, stream replaced, generic failure), but the credentials are still
+    /// valid. Stop retrying rather than hammer the server; a reboot retries.
+    PreserveCredentials = 2,
+    /// The server unlinked this device. The stored credentials are dead and
+    /// must be erased so the next boot pairs afresh instead of looping on 401.
+    ResetCredentials = 3,
+}
+
+impl ClientExit {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            3 => Self::ResetCredentials,
+            2 => Self::PreserveCredentials,
+            1 => Self::TemporaryBan,
+            _ => Self::Restart,
+        }
+    }
+}
+
+/// Watches the lifecycle events that decide how a client instance ends. A
+/// registered handler rather than the `on_event` closure because it must see
+/// the event even when the closure's own future is behind.
+struct ClientExitObserver {
+    outcome: Arc<AtomicU8>,
+    temporary_ban_seconds: Arc<AtomicU32>,
+}
+
+impl EventHandler for ClientExitObserver {
+    fn handle_event(&self, event: Arc<Event>) {
+        let outcome = match &*event {
+            // A `<failure>`/`<stream:error>` from the server with the logged-out
+            // reason: the phone removed this device. Our own `logout()` also
+            // dispatches LoggedOut, without a raw stanza, and is handled by the
+            // maintenance task that called it.
+            Event::LoggedOut(logout)
+                if logout.raw.is_some()
+                    && matches!(&logout.reason, ConnectFailureReason::LoggedOut) =>
+            {
+                ClientExit::ResetCredentials
+            }
+            Event::LoggedOut(logout) if logout.raw.is_some() => ClientExit::PreserveCredentials,
+            Event::TemporaryBan(ban) => {
+                self.temporary_ban_seconds.store(
+                    u32::try_from(ban.expire.num_seconds().max(0)).unwrap_or(u32::MAX),
+                    Ordering::Release,
+                );
+                ClientExit::TemporaryBan
+            }
+            Event::ClientOutdated(_) | Event::StreamReplaced(_) => ClientExit::PreserveCredentials,
+            Event::ConnectFailure(failure) if !failure.reason.should_reconnect() => {
+                ClientExit::PreserveCredentials
+            }
+            _ => return,
+        };
+        self.outcome.fetch_max(outcome as u8, Ordering::Release);
+    }
+
+    fn interest(&self) -> EventInterest {
+        EventInterest::of(&[
+            EventKind::LoggedOut,
+            EventKind::ClientOutdated,
+            EventKind::StreamReplaced,
+            EventKind::TemporaryBan,
+            EventKind::ConnectFailure,
+        ])
+    }
+}
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -85,6 +192,12 @@ fn main() -> Result<()> {
         esp_idf_svc::sys::esp_log_level_set(
             c"*".as_ptr(),
             esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
+        );
+        // Async timers are short-lived RAII objects; their DEBUG drop message is
+        // routine noise rather than a resource failure.
+        esp_idf_svc::sys::esp_log_level_set(
+            c"esp_idf_svc::timer".as_ptr(),
+            esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
         );
     }
 
@@ -111,9 +224,45 @@ fn main() -> Result<()> {
     let last_panic = metrics::last_panic_str();
     info!("whatsapp-esp32 starting... (last reset: {last_reset:?}{last_panic})");
 
+    // The credentials come up before the network: a store that cannot be opened
+    // is not something to pair over, and a reboot is the only recovery that
+    // does not erase it (see NvsStore::open on why it never self-repairs).
+    let store = match NvsStore::open("wa_store") {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            error!("Failed to open WhatsApp NVS: {error}; rebooting to retry");
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            unsafe { esp_idf_svc::sys::esp_restart() }
+        }
+    };
+
     let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
+    let push_name = match nvs_string(&nvs, "push_name") {
+        Ok(Some(name)) => {
+            info!("Push name from NVS: {name}");
+            name
+        }
+        Ok(None) => DEFAULT_PUSH_NAME.to_string(),
+        Err(e) => {
+            warn!("Could not read 'push_name' from NVS ({e}); falling back to default");
+            DEFAULT_PUSH_NAME.to_string()
+        }
+    };
+    // Never logged: it is a shared secret, and the boot log is not private.
+    // If an admin token was configured in NVS but cannot be read (corrupt NVS or
+    // type error), fail startup instead of silently disabling authentication.
+    let admin_token = match nvs_string(&nvs, "admin_token") {
+        Ok(Some(token)) => Some(token),
+        Ok(None) => Some(DEFAULT_ADMIN_TOKEN.to_string()).filter(|t| !t.is_empty()),
+        Err(e) => {
+            error!(
+                "Configured admin_token in NVS could not be read: {e}. Failing startup to prevent unauthenticated admin access."
+            );
+            return Err(e);
+        }
+    };
 
     // The network handle must stay alive for the rest of main(): dropping it tears
     // the interface down. Which interface that is depends on where the firmware runs.
@@ -134,9 +283,21 @@ fn main() -> Result<()> {
         mdns
     };
 
-    let store = std::sync::Arc::new(MemoryStore::new());
-    let device_status = std::sync::Arc::new(storage::DeviceStatus::new());
-    let _admin_server = admin::start_admin_server(store.clone(), device_status.clone())?;
+    let device_status = Arc::new(DeviceStatus::new());
+    let active_client = Arc::new(ActiveClient::new());
+    let maintenance = Arc::new(MaintenanceCoordinator::new());
+    // Channel for Runtime::spawn() and the admin server -> main executor.
+    // async_channel's recv() has a waker, so the executor parks when idle and a
+    // spawn unparks it.
+    let (task_tx, task_rx) = async_channel::unbounded::<BoxedTask>();
+    let _admin_server = admin::start_admin_server(
+        store.clone(),
+        device_status.clone(),
+        active_client.clone(),
+        maintenance.clone(),
+        task_tx.clone(),
+        Arc::new(admin::AdminAuth::new(admin_token)),
+    )?;
     info!("Admin: http://esp32-whatsapp.local:8081/dashboard");
     info!("Admin: http://{}:8081/dashboard", ip);
 
@@ -145,6 +306,10 @@ fn main() -> Result<()> {
         unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
         unsafe { esp_idf_svc::sys::esp_get_free_internal_heap_size() }
     );
+
+    // Started before the executor's spawn configuration below: each `set()`
+    // configures the next thread this thread spawns.
+    let blocking_worker = BlockingWorker::start()?;
 
     // Configure PSRAM stack for the main async thread
     esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
@@ -160,21 +325,47 @@ fn main() -> Result<()> {
     }
     .set()?;
 
-    // Channel for Runtime::spawn() -> main executor. async_channel's recv() has a
-    // waker, so the executor parks when idle and a spawn unparks it.
-    let (task_tx, task_rx) =
-        async_channel::unbounded::<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>();
-
     let jh = std::thread::Builder::new()
         .stack_size(MAIN_TASK_STACK_SIZE)
         .spawn(move || {
-            run_executor(task_tx, task_rx, store, device_status);
+            run_executor(
+                task_tx,
+                task_rx,
+                store,
+                device_status,
+                active_client,
+                maintenance,
+                blocking_worker,
+                push_name,
+            );
         })?;
 
     if let Err(e) = jh.join() {
         error!("Executor thread panicked: {:?}", e);
     }
     Ok(())
+}
+
+/// A string provisioned in the default NVS partition, namespace `wa`.
+///
+/// Provisioning is a plain NVS record written with `nvs_partition_gen` at flash
+/// time or by any tool that can write that partition, which is how one firmware
+/// image can be flashed to several boards that differ only in these values.
+fn nvs_string(nvs: &EspDefaultNvsPartition, key: &str) -> Result<Option<String>> {
+    // A read-only open of a namespace that was never written fails with
+    // NVS_NOT_FOUND. That is the unprovisioned case, not an error.
+    let namespace = match EspNvs::new(nvs.clone(), "wa", false) {
+        Ok(ns) => ns,
+        Err(e) if e.code() == esp_idf_svc::sys::ESP_ERR_NVS_NOT_FOUND => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("Failed to open NVS namespace 'wa': {e}")),
+    };
+    let mut buf = [0u8; 512];
+    match namespace.get_str(key, &mut buf) {
+        Ok(Some(value)) if !value.is_empty() => Ok(Some(value.to_string())),
+        Ok(_) => Ok(None),
+        Err(e) if e.code() == esp_idf_svc::sys::ESP_ERR_NVS_NOT_FOUND => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("Failed to read '{key}' from NVS: {e}")),
+    }
 }
 
 /// Station-mode WiFi: the real board. Blocks until the interface has an address.
@@ -267,11 +458,16 @@ fn bring_up_ethernet(
     Ok((eth, ip))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_executor(
-    task_tx: async_channel::Sender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    task_rx: async_channel::Receiver<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    store: std::sync::Arc<MemoryStore>,
-    device_status: std::sync::Arc<storage::DeviceStatus>,
+    task_tx: async_channel::Sender<BoxedTask>,
+    task_rx: async_channel::Receiver<BoxedTask>,
+    store: Arc<NvsStore>,
+    device_status: Arc<DeviceStatus>,
+    active_client: Arc<ActiveClient>,
+    maintenance: Arc<MaintenanceCoordinator>,
+    blocking_worker: BlockingWorker,
+    push_name: String,
 ) {
     // `UnboundQueue` (a growable VecDeque) rather than the default 64-slot
     // `BoundQueue`: a burst of more than 64 runnable tasks must queue, not fail
@@ -279,8 +475,28 @@ fn run_executor(
     let executor: edge_executor::LocalExecutor<'_, edge_executor::UnboundQueue> =
         edge_executor::LocalExecutor::new();
 
+    // Register this thread with the task watchdog: with the idle-task check off
+    // for this core (sdkconfig.defaults), a wedged event loop is otherwise
+    // invisible. The feed runs as a task, so it stops exactly when the loop does.
+    let watchdog_registered = unsafe {
+        esp_idf_svc::sys::esp_task_wdt_add(core::ptr::null_mut()) == esp_idf_svc::sys::ESP_OK
+    };
+    if watchdog_registered {
+        executor.spawn(feed_task_watchdog()).detach();
+    } else {
+        error!("Failed to register wa-main with the task watchdog");
+    }
+
     executor
-        .spawn(run_whatsapp(task_tx, store, device_status))
+        .spawn(run_whatsapp(
+            task_tx,
+            store,
+            device_status,
+            active_client,
+            maintenance,
+            blocking_worker,
+            push_name,
+        ))
         .detach();
 
     // run() polls the spawned bot task plus the spawn-pump below, and PARKS the OS
@@ -294,10 +510,93 @@ fn run_executor(
     }));
 }
 
+/// Feeds the task watchdog `wa-main` registered itself with, at a fraction of
+/// the configured timeout so ordinary scheduling jitter has room.
+///
+/// Every error here is transient by nature (the async timer is an allocation),
+/// so none of them may end the loop: a feeder that returns leaves the watchdog
+/// armed with nobody feeding it, which reboots a device that is working fine.
+/// Only a run of failures long enough to be a real fault stops it, and then it
+/// unregisters first so the reboot it can no longer prevent never happens.
+async fn feed_task_watchdog() {
+    /// Well inside `CONFIG_ESP_TASK_WDT_TIMEOUT_S` (30 s in sdkconfig.defaults).
+    const FEED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+    /// Delay between retries when timer creation or wait fails.
+    const ERROR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+    /// About a minute of consecutive failures before giving the watchdog up.
+    const MAX_CONSECUTIVE_FAILURES: u32 = 12;
+
+    let mut timer_service = esp_idf_svc::timer::EspTaskTimerService::new().ok();
+    let mut timer = timer_service.as_ref().and_then(|s| s.timer_async().ok());
+    let mut failures = 0u32;
+    loop {
+        // Feed first: the point of this task is that the watchdog gets fed even
+        // on an iteration where arming the next timer went wrong.
+        let result = unsafe { esp_idf_svc::sys::esp_task_wdt_reset() };
+        if result != esp_idf_svc::sys::ESP_OK {
+            failures += 1;
+            error!("Failed to feed the wa-main task watchdog: ESP error {result}");
+        }
+
+        // Re-arm or allocate timer if needed, retrying timer service creation if it failed
+        if timer.is_none() {
+            if timer_service.is_none() {
+                timer_service = esp_idf_svc::timer::EspTaskTimerService::new().ok();
+            }
+            if let Some(ref s) = timer_service {
+                timer = s.timer_async().ok();
+            }
+        }
+
+        let feed_cycle_ok = if let Some(ref mut t) = timer {
+            match t.after(FEED_INTERVAL).await {
+                Ok(()) => true,
+                Err(error) => {
+                    failures += 1;
+                    error!("Task-watchdog feed timer failed: {error}");
+                    false
+                }
+            }
+        } else {
+            failures += 1;
+            error!("Could not arm the task-watchdog feed timer");
+            false
+        };
+
+        if feed_cycle_ok && result == esp_idf_svc::sys::ESP_OK {
+            failures = 0;
+            continue;
+        }
+
+        if failures >= MAX_CONSECUTIVE_FAILURES {
+            // Unregister before leaving. A watchdog nobody feeds is a guaranteed
+            // reboot loop, which hides the fault instead of reporting it.
+            error!(
+                "Giving up on the task watchdog after {failures} consecutive failures; unregistering wa-main"
+            );
+            unsafe { esp_idf_svc::sys::esp_task_wdt_delete(core::ptr::null_mut()) };
+            return;
+        }
+        // The timer is unusable this round; back off briefly and yield to executor
+        // so transient timer failures do not spin or permanently starve wa-main.
+        std::thread::sleep(ERROR_RETRY_DELAY);
+        futures::future::poll_fn(|cx| {
+            cx.waker().wake_by_ref();
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_whatsapp(
-    task_tx: async_channel::Sender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    store: std::sync::Arc<MemoryStore>,
-    device_status: std::sync::Arc<storage::DeviceStatus>,
+    task_tx: async_channel::Sender<BoxedTask>,
+    store: Arc<NvsStore>,
+    device_status: Arc<DeviceStatus>,
+    active_client: Arc<ActiveClient>,
+    maintenance: Arc<MaintenanceCoordinator>,
+    blocking_worker: BlockingWorker,
+    push_name: String,
 ) {
     let timer_service = match esp_idf_svc::timer::EspTaskTimerService::new() {
         Ok(t) => t,
@@ -312,59 +611,142 @@ async fn run_whatsapp(
     // if the bot future ever does end, re-create it after a short delay. This task also
     // keeps `task_tx` alive, so the executor's spawn channel never closes.
     loop {
-        match run_whatsapp_inner(
+        let outcome = run_whatsapp_inner(
             task_tx.clone(),
             store.clone(),
             device_status.clone(),
+            active_client.clone(),
             timer_service.clone(),
+            blocking_worker.clone(),
+            push_name.clone(),
         )
-        .await
-        {
-            Ok(()) => warn!("WhatsApp client exited; restarting in 5s"),
-            Err(e) => error!("WhatsApp client error: {e}; restarting in 5s"),
-        }
-        if let Ok(mut t) = timer_service.timer_async() {
-            let _ = t.after(std::time::Duration::from_secs(5)).await;
+        .await;
+        let delay = match outcome {
+            Ok(ClientExit::Restart) => {
+                warn!("WhatsApp client exited; restarting in 5s");
+                5
+            }
+            Ok(ClientExit::TemporaryBan) => {
+                let wait = TEMPORARY_BAN_WAIT.swap(0, Ordering::AcqRel).max(1);
+                warn!("WhatsApp temporarily banned this client; retrying in {wait}s");
+                u64::from(wait)
+            }
+            Ok(ClientExit::PreserveCredentials) => {
+                error!(
+                    "WhatsApp rejected the client without invalidating its credentials; keeping them and stopping automatic retries (reboot to retry)"
+                );
+                futures::future::pending::<()>().await;
+                unreachable!()
+            }
+            Ok(ClientExit::ResetCredentials) => {
+                warn!("WhatsApp unlinked this device; erasing the stored credentials");
+                // The dashboard's actions end in the same place, so go through the
+                // coordinator rather than erasing here: it decides who runs the
+                // work. `Start` is ours to run; `Queued` means a dashboard action
+                // is already in flight and has just been upgraded to a reset, and
+                // `Rejected` means the reboot is already committed. In both of
+                // those the other task finishes and reboots, so this one must wait
+                // rather than erase and restart a second time underneath it.
+                match maintenance.request(MaintenanceAction::Reset) {
+                    MaintenanceRequest::Start => {
+                        run_maintenance(
+                            store.clone(),
+                            device_status.clone(),
+                            active_client.clone(),
+                            maintenance.clone(),
+                        )
+                        .await;
+                    }
+                    MaintenanceRequest::Queued | MaintenanceRequest::Rejected => {
+                        info!("Maintenance is already running; it will reboot this device");
+                    }
+                }
+                futures::future::pending::<()>().await;
+                unreachable!("maintenance reboots the device")
+            }
+            Err(e) => {
+                error!("WhatsApp client error: {e}; restarting in 5s");
+                5
+            }
+        };
+        let delay_dur = std::time::Duration::from_secs(delay);
+        let start = std::time::Instant::now();
+        while start.elapsed() < delay_dur {
+            let remaining = delay_dur.saturating_sub(start.elapsed());
+            if let Ok(mut t) = timer_service.timer_async() {
+                let _ = t.after(remaining).await;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            futures::future::poll_fn(|cx| {
+                cx.waker().wake_by_ref();
+                std::task::Poll::Ready(())
+            })
+            .await;
         }
     }
 }
 
+/// Seconds a temporary ban asked us to wait, handed from the client instance
+/// that saw the ban to the supervisor that sleeps it off.
+static TEMPORARY_BAN_WAIT: AtomicU32 = AtomicU32::new(0);
+
 async fn run_whatsapp_inner(
-    task_tx: async_channel::Sender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    backend: std::sync::Arc<MemoryStore>,
-    device_status: std::sync::Arc<storage::DeviceStatus>,
+    task_tx: async_channel::Sender<BoxedTask>,
+    backend: Arc<NvsStore>,
+    device_status: Arc<DeviceStatus>,
+    active_client: Arc<ActiveClient>,
     timer_service: esp_idf_svc::timer::EspTaskTimerService,
-) -> Result<()> {
+    blocking_worker: BlockingWorker,
+    push_name: String,
+) -> Result<ClientExit> {
     let transport_factory = Esp32TransportFactory::new(MOCK_SERVER_WS, SKIP_TLS_VERIFY);
     let http_client = EspHttpClient::new(SKIP_TLS_VERIFY);
-    let runtime = Esp32Runtime::new(task_tx, timer_service);
+    let runtime = Esp32Runtime::new(task_tx, timer_service, blocking_worker);
 
     // One-shot guard so dev auto-pair POSTs the QR only once per bot session.
     let scanned = Arc::new(AtomicBool::new(false));
+    let exit_outcome = Arc::new(AtomicU8::new(ClientExit::Restart as u8));
+    let temporary_ban_seconds = Arc::new(AtomicU32::new(0));
 
+    let event_status = device_status.clone();
+    let event_active_client = active_client.clone();
     let bot = Bot::builder()
         .with_backend_arc(backend)
         .with_transport_factory(transport_factory)
         .with_http_client(http_client)
         .with_runtime(runtime)
-        .with_push_name("esp32-test".to_string())
+        .with_push_name(push_name)
         .with_version((2, 3000, 0))
-        // 50 instead of the 812 default: generating 812 X25519 keypairs inline at
-        // login blocks the single-core executor ~8s and exhausts internal DRAM.
-        // Configurable upstream as of whatsapp-rust PR #695, so no fork needed.
+        .with_device_props(
+            DevicePropsOverride::new()
+                .with_os(DEVICE_OS)
+                .with_platform_type(wa::device_props::PlatformType::CHROME),
+        )
+        // 50 instead of the 812 default: generating 812 X25519 keypairs at login
+        // exhausts internal DRAM, and even on the blocking worker it is seconds
+        // of work the first connect would wait on. Configurable upstream as of
+        // whatsapp-rust PR #695, so no fork needed.
         .with_wanted_pre_key_count(50)
-        // The store is in-memory and wiped on every reboot, so a history sync
-        // buys this firmware nothing and costs it a lot: upstream measures the
-        // drain at ~14 MB of allocation churn (more than the whole PSRAM), and
-        // `Esp32Runtime::spawn_blocking` runs the per-blob protobuf decode
-        // INLINE on the single executor thread, so each one is a multi-second
-        // stall with the task watchdog running. Drop this line if you later add
-        // a flash-backed store and actually want the history.
+        // Message history is not persisted (only identity and Signal state are),
+        // so a history sync buys this firmware nothing and costs it a lot:
+        // upstream measures the drain at ~14 MB of allocation churn, more than
+        // the whole PSRAM. Drop this line if the store ever keeps the history.
         .skip_history_sync()
+        .with_event_handler(ClientExitObserver {
+            outcome: exit_outcome.clone(),
+            temporary_ban_seconds: temporary_ban_seconds.clone(),
+        })
         .on_event(move |event, client| {
-            let ds = device_status.clone();
+            let ds = event_status.clone();
             let scanned = scanned.clone();
+            let active_client = event_active_client.clone();
             async move {
+                // A superseded instance can still drain a few events while the
+                // new one starts; they must not touch the shared status.
+                if !active_client.is_current(&client) {
+                    return;
+                }
                 match &*event {
                     // 0.7.0 sealed the event payloads into `#[non_exhaustive]`
                     // structs, so this is a tuple variant now, not `{ code, timeout }`.
@@ -374,6 +756,10 @@ async fn run_whatsapp_inner(
                         if MOCK_AUTOPAIR && !scanned.swap(true, Ordering::Relaxed) {
                             auto_scan_qr(&qr.code).await;
                         }
+                    }
+                    Event::PairingQrCodesExhausted(_) => {
+                        warn!("Pairing QR codes exhausted; reconnect to get a new one");
+                        ds.clear_qr_code();
                     }
                     Event::Connected(_) => {
                         // Send "active" delivery receipts (type omitted) instead of the
@@ -408,9 +794,21 @@ async fn run_whatsapp_inner(
                     // instead of one event per message, so this iterates.
                     Event::Messages(batch) => {
                         for inbound in batch {
-                            let text = inbound.message.text_content().unwrap_or("<no text>");
-                            info!("Message from {}: {:?}", inbound.info.source.sender, text);
-                            if text == PING_TRIGGER {
+                            let text = inbound.message.text_content();
+                            info!(
+                                "Message from {}: {:?}",
+                                inbound.info.source.sender,
+                                text.unwrap_or("<no text>")
+                            );
+                            ds.record_message(MessageLogEntry {
+                                id: inbound.info.id.clone(),
+                                chat: inbound.info.source.chat.to_string(),
+                                sender: inbound.info.source.sender.to_string(),
+                                text: text.map(str::to_owned),
+                                timestamp: inbound.info.timestamp.timestamp(),
+                                from_me: inbound.info.source.is_from_me,
+                            });
+                            if text == Some(PING_TRIGGER) {
                                 let ctx =
                                     MessageContext::from_inbound(inbound, Arc::clone(&client));
                                 handle_message(&ctx).await;
@@ -436,9 +834,120 @@ async fn run_whatsapp_inner(
         .build()
         .await?;
 
+    let client = bot.client();
+    active_client.set(client.clone());
     info!("Bot built, starting run loop...");
     bot.run().await;
-    Ok(())
+    active_client.clear_if(&client);
+
+    let outcome = ClientExit::from_u8(exit_outcome.load(Ordering::Acquire));
+    match outcome {
+        ClientExit::ResetCredentials => device_status.set_logged_out(),
+        ClientExit::Restart | ClientExit::TemporaryBan | ClientExit::PreserveCredentials => {
+            device_status.set_disconnected()
+        }
+    }
+    TEMPORARY_BAN_WAIT.store(
+        temporary_ban_seconds
+            .load(Ordering::Acquire)
+            .saturating_add(5),
+        Ordering::Release,
+    );
+    Ok(outcome)
+}
+
+/// The one path that erases or reboots, shared by the dashboard actions and
+/// the supervisor's response to being unlinked. Stops the live client first
+/// (a logout for a reset, a disconnect otherwise), applies the highest action
+/// requested by the time it gets there, and reboots on the NVS worker's stack.
+pub(crate) async fn run_maintenance(
+    store: Arc<NvsStore>,
+    device_status: Arc<DeviceStatus>,
+    active_client: Arc<ActiveClient>,
+    maintenance: Arc<MaintenanceCoordinator>,
+) {
+    let initial = maintenance.requested();
+    let client = active_client.current();
+    let mut logout_attempted = false;
+    if let Some(client) = &client {
+        match initial {
+            MaintenanceAction::Reset => {
+                info!("Maintenance: logging out before factory reset");
+                client.logout().await;
+                logout_attempted = true;
+            }
+            MaintenanceAction::ClearSessions | MaintenanceAction::Reboot => {
+                info!("Maintenance: disconnecting WhatsApp client");
+                client.disconnect().await;
+            }
+        }
+        active_client.clear_if(client);
+    }
+
+    let mut applied = MaintenanceAction::Reboot;
+    loop {
+        let requested = maintenance.requested();
+        if requested > applied {
+            let succeeded = match requested {
+                MaintenanceAction::Reset => {
+                    if !logout_attempted {
+                        // A reset may upgrade a session-clear/reboot while its
+                        // disconnect is in flight. The remote IQ is best-effort
+                        // once offline, but local credential removal remains safe.
+                        if let Some(client) = &client {
+                            info!("Maintenance: reset upgrade, attempting logout");
+                            client.logout().await;
+                        }
+                        logout_attempted = true;
+                    }
+                    device_status.set_logged_out();
+                    store.seal_writes();
+                    match store.reset() {
+                        Ok(()) => {
+                            info!("Maintenance: persistent WhatsApp data cleared");
+                            true
+                        }
+                        Err(error) => {
+                            error!("Maintenance: factory reset failed: {error}; retrying");
+                            false
+                        }
+                    }
+                }
+                MaintenanceAction::ClearSessions => {
+                    store.seal_writes();
+                    match store.clear_sessions() {
+                        Ok(count) => {
+                            info!("Maintenance: cleared {count} persistent sessions");
+                            true
+                        }
+                        Err(error) => {
+                            error!("Maintenance: session clear failed: {error}; retrying");
+                            false
+                        }
+                    }
+                }
+                MaintenanceAction::Reboot => true,
+            };
+            if succeeded {
+                applied = requested;
+            } else {
+                // A blocking sleep on the executor thread, deliberately: this is
+                // only reached when erasing flash has already failed its own
+                // retries, the device is on its way to a reboot either way, and
+                // there is nothing else worth running in the meantime.
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                continue;
+            }
+        }
+        if maintenance.begin_reboot(applied) {
+            break;
+        }
+    }
+
+    if let Err(error) = store.restart() {
+        error!("Maintenance: could not schedule restart: {error}");
+        futures::future::pending::<()>().await;
+    }
 }
 
 /// DEV-ONLY: POST the pairing QR to the bartender mock server's scan-qr admin
@@ -500,7 +1009,7 @@ async fn handle_message(ctx: &MessageContext) {
     let duration = format!("{:.2?}", start.elapsed());
     info!(
         "Send took {}. Editing message {}...",
-        duration, &sent.message_id
+        duration, sent.message_id
     );
 
     // buffa (the prost replacement in 0.7.0) wraps sub-messages in

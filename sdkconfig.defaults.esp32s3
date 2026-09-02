@@ -1,0 +1,11 @@
+# ESP32-S3 N16R8. Read by esp-idf-sys after sdkconfig.defaults whenever MCU=esp32s3.
+
+# PSRAM: 8 MB octal SPI
+CONFIG_SPIRAM_MODE_OCT=y
+
+# Move instructions to PSRAM to avoid cache crashes during heavy PSRAM allocation
+# (flash and octal PSRAM share the SPI bus on N16R8)
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+# Use 32KB instruction cache to reduce PSRAM consumption from instruction fetch
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y

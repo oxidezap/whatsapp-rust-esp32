@@ -8,3 +8,7 @@ factory,    app,  factory, 0x10000,  0x4C0000,
 # 64 KB crash core dump (ELF), right after factory (ends at 0x4D0000). Read at boot
 # via esp_core_dump_get_summary; survives power-off. Of 16 MB flash, plenty spare.
 coredump,   data, coredump, 0x4D0000, 0x10000,
+# Persistent WhatsApp identity and Signal records (src/storage.rs). Kept apart from
+# the small default NVS that WiFi calibration lives in, so erasing one never touches
+# the other; 1 MB bounds NVS's internal-RAM page cache to about 22 KB.
+wa_store,   data, nvs,     0x4E0000, 0x100000,

@@ -12,6 +12,9 @@ use whatsapp_rust::bytes::Bytes;
 use whatsapp_rust::wacore::net::{DisconnectReason, Transport, TransportEvent, TransportFactory};
 
 /// TLS stream backed by ESP-IDF's mbedTLS.
+/// Default bound on establishing a connection (TCP connect plus TLS handshake).
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct EspTlsStream {
     tls: *mut esp_idf_svc::sys::esp_tls_t,
 }
@@ -20,7 +23,22 @@ unsafe impl Send for EspTlsStream {}
 
 impl EspTlsStream {
     pub fn connect(host: &str, port: u16, skip_tls_verify: bool) -> Result<Self> {
-        let mut cfg: esp_idf_svc::sys::esp_tls_cfg_t = Default::default();
+        Self::connect_with_timeout(host, port, skip_tls_verify, CONNECT_TIMEOUT)
+    }
+
+    /// `timeout` bounds establishing the connection: the TCP connect and the TLS
+    /// handshake. Without it a route that silently drops SYNs parks the calling
+    /// thread indefinitely, before any socket option could apply.
+    pub fn connect_with_timeout(
+        host: &str,
+        port: u16,
+        skip_tls_verify: bool,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        let mut cfg = esp_idf_svc::sys::esp_tls_cfg_t {
+            timeout_ms: timeout.as_millis().try_into().unwrap_or(i32::MAX),
+            ..Default::default()
+        };
 
         if skip_tls_verify {
             // Mock server: it mints a fresh ephemeral self-signed cert on every start,
@@ -60,6 +78,17 @@ impl EspTlsStream {
     }
 
     pub fn set_read_timeout_ms(&self, ms: u32) -> Result<()> {
+        self.set_socket_timeout_ms(esp_idf_svc::sys::SO_RCVTIMEO as i32, "SO_RCVTIMEO", ms)
+    }
+
+    /// The send-side counterpart. Without it a peer that accepts the connection
+    /// and then stops reading parks the calling thread in `write` forever, which
+    /// on the media-upload path is the executor.
+    pub fn set_write_timeout_ms(&self, ms: u32) -> Result<()> {
+        self.set_socket_timeout_ms(esp_idf_svc::sys::SO_SNDTIMEO as i32, "SO_SNDTIMEO", ms)
+    }
+
+    fn set_socket_timeout_ms(&self, option: i32, option_name: &str, ms: u32) -> Result<()> {
         let mut sockfd: i32 = 0;
         let err = unsafe { esp_idf_svc::sys::esp_tls_get_conn_sockfd(self.tls, &mut sockfd) };
         if err != 0 {
@@ -74,13 +103,13 @@ impl EspTlsStream {
             esp_idf_svc::sys::lwip_setsockopt(
                 sockfd,
                 esp_idf_svc::sys::SOL_SOCKET as i32,
-                esp_idf_svc::sys::SO_RCVTIMEO as i32,
+                option,
                 &tv as *const _ as *const std::ffi::c_void,
                 std::mem::size_of_val(&tv) as u32,
             )
         };
         if ret != 0 {
-            return Err(anyhow!("setsockopt SO_RCVTIMEO failed"));
+            return Err(anyhow!("setsockopt {option_name} failed"));
         }
         Ok(())
     }

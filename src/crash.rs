@@ -43,14 +43,35 @@ pub fn take_coredump_summary() -> Option<CoredumpSummary> {
         let task = core::ffi::CStr::from_bytes_until_nul(&raw)
             .map(|c| c.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from_utf8_lossy(&raw).into_owned());
-        let depth = (s.exc_bt_info.depth as usize).min(s.exc_bt_info.bt.len());
+        // The summary's exception block is per architecture: Xtensa carries an
+        // on-device parsed backtrace, RISC-V the trap registers plus a raw stack
+        // dump. Keep the PC and return address as the frames that are useful
+        // without a host-side decoder.
+        #[cfg(target_arch = "xtensa")]
+        let (exc_cause, fault_addr, backtrace, bt_corrupted) = {
+            let depth = (s.exc_bt_info.depth as usize).min(s.exc_bt_info.bt.len());
+            (
+                s.ex_info.exc_cause,
+                s.ex_info.exc_vaddr,
+                s.exc_bt_info.bt[..depth].to_vec(),
+                s.exc_bt_info.corrupted,
+            )
+        };
+        #[cfg(target_arch = "riscv32")]
+        let (exc_cause, fault_addr, backtrace, bt_corrupted) = {
+            let mut backtrace = vec![s.exc_pc];
+            if s.ex_info.ra != 0 && s.ex_info.ra != s.exc_pc {
+                backtrace.push(s.ex_info.ra);
+            }
+            (s.ex_info.mcause, s.ex_info.mtval, backtrace, false)
+        };
         Some(CoredumpSummary {
             task,
             exc_pc: s.exc_pc,
-            exc_cause: s.ex_info.exc_cause,
-            fault_addr: s.ex_info.exc_vaddr,
-            backtrace: s.exc_bt_info.bt[..depth].to_vec(),
-            bt_corrupted: s.exc_bt_info.corrupted,
+            exc_cause,
+            fault_addr,
+            backtrace,
+            bt_corrupted,
         })
     }
 }

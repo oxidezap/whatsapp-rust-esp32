@@ -7,7 +7,7 @@
 /dependencies.lock
 
 # Generated sdkconfig (derived from sdkconfig.defaults at build time).
-# Keep sdkconfig.defaults and components_esp32s3.lock checked in.
+# Keep sdkconfig.defaults* and components_*.lock checked in.
 /sdkconfig
 /sdkconfig.old
 

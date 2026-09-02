@@ -1,14 +1,15 @@
 name: CI
 
 # Two questions, answered in order: does the firmware still build for the real
-# chip, and does it still run on one. The first is the `build` matrix (the board
-# flavor is the bits you would flash; the qemu flavor swaps WiFi for the emulated
-# Ethernet MAC). The second is `qemu-e2e`, which boots the qemu flavor on
-# Espressif's QEMU (an ESP32-S3 with 8 MB PSRAM and an OpenCores NIC), pairs it
-# against the same mock server whatsapp-rust's E2E suite uses, and checks the
-# firmware's own dashboard reports a live session. No board is involved, but the
-# instruction stream, the memory map, the ESP-IDF build and the whole network +
-# crypto stack are the real ones.
+# chips, and does it still run on one. The first is the `build` matrix: the two
+# board flavors are the bits you would flash to an ESP32-S3 and an ESP32-C5, the
+# qemu flavor swaps WiFi for the emulated Ethernet MAC. The second is `qemu-e2e`,
+# which boots the qemu flavor on Espressif's QEMU (an ESP32-S3 with 8 MB PSRAM
+# and an OpenCores NIC), pairs it against the same mock server whatsapp-rust's
+# E2E suite uses, reboots it to prove the pairing survives in flash, then boots
+# a second board and has the two message each other. No board is involved, but
+# the instruction stream, the memory map, the ESP-IDF build and the whole
+# network + crypto + storage stack are the real ones.
 
 on:
   push:
@@ -23,7 +24,10 @@ env:
   CARGO_TERM_COLOR: always
   # Pinned Xtensa Rust release (esp-rs/rust-build). Bump deliberately: it moves the
   # rustc the `esp` channel resolves to, and with it every size and timing number.
+  # The same toolchain carries the RISC-V targets, so the ESP32-C5 uses it too.
   ESP_RUST_VERSION: "1.98.0.0"
+  # Unified ESP-IDF version across all boards.
+  ESP_IDF_VERSION: "v5.5.5"
   # Espressif QEMU release used by qemu-e2e, from the dl.espressif.com mirror of the
   # GitHub asset so the job does not depend on api.github.com.
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
@@ -38,14 +42,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - flavor: board
-            # Exactly what `cargo build --release` produces for the N16R8. No .env
+          - flavor: esp32s3
+            # Exactly what `cargo build --release` produces for the S3 N16R8. No .env
             # is present, so the firmware reports missing WiFi at runtime; that is
             # the documented clone-and-build behavior, not a build failure.
             build: cargo build --release
+            chip: esp32s3
             out: target/xtensa-esp32s3-espidf/release
+          - flavor: esp32c5
+            # The RISC-V board: ESP-IDF v5.5.5, selected by the script.
+            build: scripts/build.sh --board esp32c5 --release
+            chip: esp32c5
+            out: target/riscv32imac-esp-espidf/release
           - flavor: qemu
             build: scripts/qemu.sh build
+            chip: esp32s3
             out: target/qemu/xtensa-esp32s3-espidf/release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,8 +70,9 @@ jobs:
             git cmake ninja-build clang python3 python3-venv python3-pip libusb-1.0-0 ccache
 
       # Installs the `esp` Rust toolchain (Xtensa-enabled rustc + GCC) with espup and
-      # ldproxy, the linker wrapper .cargo/config.toml names.
-      - name: Xtensa Rust toolchain
+      # ldproxy, the linker wrapper .cargo/config.toml names. The RISC-V GCC the C5
+      # needs is installed by ESP-IDF's own tool installer during the first build.
+      - name: Espressif Rust toolchain
         uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7
         with:
           default: true
@@ -79,9 +91,14 @@ jobs:
             ~/.cargo/git
             .embuild
             target
-          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.defaults', 'sdkconfig.qemu', 'components_esp32s3.lock', '.cargo/config.toml') }}
+          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.defaults', 'sdkconfig.defaults.*', 'sdkconfig.qemu', 'components_*.lock', '.cargo/config.toml', 'scripts/build.sh') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-
+            ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-
+
+      - name: Clean stale ESP-IDF tools from cache
+        run: |
+          # Purge older v5.4 tools if restored from legacy cache so esp-idf-sys installs v5.5.5 tools cleanly
+          rm -rf .embuild/espressif/esp-idf/v5.4 .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
 
       - name: Build
         run: ${{ matrix.build }}
@@ -89,7 +106,7 @@ jobs:
       - name: App image and partition size gate
         run: |
           python3 -m venv .venv && .venv/bin/pip install -q esptool
-          .venv/bin/esptool --chip esp32s3 elf2image --flash_size 16MB \
+          .venv/bin/esptool --chip ${{ matrix.chip }} elf2image --flash_size 16MB \
             -o "${{ matrix.out }}/whatsapp-esp32.bin" "${{ matrix.out }}/whatsapp-esp32"
           scripts/check-app-size.sh "${{ matrix.out }}/whatsapp-esp32.bin" partitions.csv
 
@@ -125,14 +142,14 @@ jobs:
           echo "secret present"
 
   qemu-e2e:
-    name: Boot and pair on QEMU (ESP32-S3)
+    name: Pair, persist and message on QEMU (ESP32-S3)
     # Runs only when the build passed and the credentials check ran and passed;
     # inherits the fork-PR skip from `mock-server-secret`.
     needs: [build, mock-server-secret]
     runs-on: ubuntu-latest
-    # scripts/qemu.sh test caps the boot-to-connected wait at 10 min; this bounds
+    # scripts/qemu.sh test caps each boot-to-connected wait at 10 min; this bounds
     # the rest (image download, QEMU install, a mock server that never answers).
-    timeout-minutes: 30
+    timeout-minutes: 40
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
@@ -160,7 +177,7 @@ jobs:
           name: firmware-qemu
           path: target/qemu/xtensa-esp32s3-espidf/release
 
-      - name: Espressif QEMU and esptool
+      - name: Espressif QEMU, esptool and the NVS partition generator
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends libsdl2-2.0-0 libslirp0 libglib2.0-0 libpixman-1-0
@@ -169,8 +186,9 @@ jobs:
             "https://dl.espressif.com/github_assets/espressif/qemu/releases/download/${QEMU_RELEASE}/qemu-xtensa-softmmu-esp_develop_${v/-/_}-x86_64-linux-gnu.tar.xz"
           mkdir -p "$HOME/qemu" && tar -xJf qemu.tar.xz -C "$HOME/qemu"
           echo "QEMU_XTENSA=$HOME/qemu/qemu/bin/qemu-system-xtensa" >> "$GITHUB_ENV"
-          python3 -m venv .venv && .venv/bin/pip install -q esptool
+          python3 -m venv .venv && .venv/bin/pip install -q esptool esp-idf-nvs-partition-gen
           echo "ESPTOOL=$PWD/.venv/bin/esptool" >> "$GITHUB_ENV"
+          echo "NVS_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Wait for mock server
         run: |
@@ -182,15 +200,15 @@ jobs:
           done
           echo "Mock server did not become ready"; exit 1
 
-      - name: Boot, pair, and check the dashboard
-        run: scripts/qemu.sh image && scripts/qemu.sh test
+      - name: Pair, reboot, and message between two boards
+        run: scripts/qemu.sh test
 
-      - name: Upload serial log
+      - name: Upload serial logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qemu-serial-log
+          name: qemu-serial-logs
           if-no-files-found: ignore
           path: |
-            target/qemu/xtensa-esp32s3-espidf/release/qemu-serial.log
+            target/qemu/xtensa-esp32s3-espidf/release/qemu-*.log
             target/qemu/xtensa-esp32s3-espidf/release/qemu-metrics.json

@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.94"
 authors = ["João Lucas <jlucaso@hotmail.com>"]
 license = "MIT"
-description = "A full, end-to-end-encrypted WhatsApp client running on an ESP32-S3 microcontroller, built on whatsapp-rust."
+description = "A full, end-to-end-encrypted WhatsApp client running on ESP32-S3 and ESP32-C5 microcontrollers, built on whatsapp-rust."
 repository = "https://github.com/oxidezap/whatsapp-rust-esp32"
 keywords = ["whatsapp", "esp32", "embedded", "esp-idf", "iot"]
 categories = ["embedded"]
@@ -19,6 +19,9 @@ readme = "README.md"
 # esp-idf-hal's is an ESP-IDF spinlock, correct across both cores and ISRs.
 esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
 esp-idf-hal = "0.46"
+# `Headers` for the admin server's POST handlers (Content-Length / Content-Type);
+# the `Request` type esp-idf-svc re-exports implements it but does not re-export it.
+embedded-svc = { version = "0.29", default-features = false }
 
 log = "0.4"
 # anyhow stays a direct dependency: esp-idf-svc errors are converted with `?`,
@@ -28,6 +31,9 @@ anyhow = "1"
 # `futures::executor::block_on` lives behind the `executor` feature, which
 # whatsapp-rust does not enable, so this one is also declared directly.
 futures = "0.3"
+# NVS record names are 15 characters at most; src/storage.rs names each record by
+# a truncated SHA-256 of its logical key. Already in the tree through whatsapp-rust.
+sha2 = { version = "0.11", default-features = false }
 
 # Lightweight async executor for ESP32. Since 0.5 the run-queue is always a
 # growable queue (the old `unbounded` feature is gone), so more than 64 runnable
@@ -88,5 +94,11 @@ dotenvy = "0.15"
 # Pull in espressif/mdns component (moved out of ESP-IDF since v5.0)
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/mdns", version = "1.2" }
+
+[patch.crates-io]
+# ESP-IDF v5.5.5 (the version the ESP32-C5 build uses) backported an sdmmc_host_t
+# field after esp-idf-hal 0.46.2 shipped; this revision adds it behind a version
+# cfg, so the v5.4 ESP32-S3 build compiles the same source it did before.
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", rev = "c2dac82f5243b0b7036c392f8218e6a2b4f7e375" }
 
 [workspace]

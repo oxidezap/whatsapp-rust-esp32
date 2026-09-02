@@ -1,7 +1,12 @@
+# One config for every supported board. `cargo build` alone targets the ESP32-S3;
+# scripts/build.sh selects a board by overriding the target and the `[env]` block
+# below (a process environment variable wins over `[env]` unless `force = true`).
+
 [target.xtensa-esp32s3-espidf]
 linker = "ldproxy"
-# Tokio on ESP32 needs poll-based I/O through lwIP BSD sockets
-rustflags = ["--cfg", "mio_unsupported_force_poll_poll"]
+
+[target.riscv32imac-esp-espidf]
+linker = "ldproxy"
 
 [build]
 target = "xtensa-esp32s3-espidf"
@@ -10,6 +15,6 @@ target = "xtensa-esp32s3-espidf"
 build-std = ["std", "panic_abort"]
 
 [env]
+# Shared ESP-IDF version for every supported board (ESP32-S3 and ESP32-C5).
 MCU = "esp32s3"
-# Use ESP-IDF v5.4
-ESP_IDF_VERSION = "v5.4"
+ESP_IDF_VERSION = "v5.5.5"

@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use esp_idf_svc::timer::EspTaskTimerService;
 use whatsapp_rust::async_channel;
@@ -47,23 +47,114 @@ impl<F: Future<Output = ()> + Unpin> Future for AbortableFuture<F> {
     }
 }
 
-type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+struct BlockingJob {
+    run: Box<dyn FnOnce() + Send + 'static>,
+    done: async_channel::Sender<()>,
+    queued_at: Instant,
+}
+
+/// One process-lifetime worker thread for upstream `spawn_blocking` calls:
+/// prekey batch generation, app-state mutation decode, anything CPU-bound that
+/// whatsapp-rust does not want on the event loop.
+///
+/// Before this existed those jobs ran inline on the executor thread, so every
+/// one of them froze the whole client (and the task watchdog kept count) for
+/// its duration. A single worker with a one-slot queue is the smallest fix: no
+/// pool to keep stacks for, no way for a reconnect storm to pile up canceled
+/// work, and the executor keeps polling the transport while the keys grind.
+#[derive(Clone)]
+pub struct BlockingWorker {
+    jobs: async_channel::Sender<BlockingJob>,
+}
+
+impl BlockingWorker {
+    pub fn start() -> anyhow::Result<Self> {
+        let (jobs, receiver) = async_channel::bounded::<BlockingJob>(1);
+        esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
+            name: Some(c"wa-blocking"),
+            stack_size: 32 * 1024,
+            // Below the network/executor threads (priority 5) so a long key
+            // batch never delays a socket read; above idle, which the task
+            // watchdog no longer watches on this core for exactly this reason
+            // (see sdkconfig.defaults).
+            priority: 1,
+            inherit: false,
+            pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
+            stack_alloc_caps: enumset::enum_set!(
+                esp_idf_svc::hal::task::thread::MallocCap::Spiram
+                    | esp_idf_svc::hal::task::thread::MallocCap::Cap8bit
+            ),
+        }
+        .set()?;
+        std::thread::Builder::new()
+            .name("wa-blocking".to_string())
+            .stack_size(32 * 1024)
+            .spawn(move || {
+                while let Ok(job) = receiver.recv_blocking() {
+                    // Dropping the awaiting future cancels work that has not
+                    // started. A closure already running cannot be cancelled.
+                    if job.done.is_closed() {
+                        continue;
+                    }
+                    let queue_time = job.queued_at.elapsed();
+                    let started = Instant::now();
+                    (job.run)();
+                    let elapsed = started.elapsed();
+                    if elapsed >= Duration::from_millis(100) {
+                        log::info!(
+                            "Blocking job completed in {elapsed:.2?} (queued {queue_time:.2?})"
+                        );
+                    }
+                    let _ = job.done.send_blocking(());
+                }
+            })?;
+        Ok(Self { jobs })
+    }
+
+    async fn execute(&self, run: Box<dyn FnOnce() + Send + 'static>) {
+        let (done, completed) = async_channel::bounded(1);
+        if self
+            .jobs
+            .send(BlockingJob {
+                run,
+                done,
+                queued_at: Instant::now(),
+            })
+            .await
+            .is_err()
+        {
+            // The worker thread is process-lifetime; losing it is a bug, not a
+            // condition to recover from, but a hung future is worse than a
+            // logged one.
+            log::error!("WhatsApp blocking worker stopped; job dropped");
+            return;
+        }
+        if completed.recv().await.is_err() {
+            log::error!("WhatsApp blocking worker dropped a job's completion");
+        }
+    }
+}
 
 pub struct Esp32Runtime {
     /// Futures spawned from any thread are queued here; the executor loop drains
     /// it via `recv().await`, so a spawn unparks a parked executor.
     task_tx: async_channel::Sender<BoxedTask>,
     timer_service: EspTaskTimerService,
+    blocking_worker: BlockingWorker,
 }
 
 impl Esp32Runtime {
     pub fn new(
         task_tx: async_channel::Sender<BoxedTask>,
         timer_service: EspTaskTimerService,
+        blocking_worker: BlockingWorker,
     ) -> Self {
         Self {
             task_tx,
             timer_service,
+            blocking_worker,
         }
     }
 }
@@ -109,21 +200,15 @@ impl Runtime for Esp32Runtime {
         }
     }
 
-    /// Runs `f` INLINE on the executor thread. There is no thread pool to offload
-    /// to: the chip has one usable core for this workload and each FreeRTOS thread
-    /// costs a fixed stack, so a pool would trade a stall for permanent RAM.
-    ///
-    /// The consequence is that every upstream `spawn_blocking` (prekey batch
-    /// generation, history-sync blob decode, appstate mutation decode) blocks the
-    /// whole executor for its duration. That is why `with_wanted_pre_key_count`
-    /// is lowered and `skip_history_sync()` is set in main.rs — both are there to
-    /// keep the inline work short enough for the task watchdog.
+    /// Hands `f` to the `wa-blocking` thread and parks the calling task until
+    /// it is done, so the executor keeps serving the transport meanwhile.
     fn spawn_blocking(
         &self,
         f: Box<dyn FnOnce() + Send + 'static>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let worker = self.blocking_worker.clone();
         Box::pin(async move {
-            f();
+            worker.execute(f).await;
         })
     }
 
