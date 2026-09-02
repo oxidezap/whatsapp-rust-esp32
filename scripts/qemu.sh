@@ -77,6 +77,9 @@ cmd_build() {
     # relative; sdkconfig.qemu carries the deeper one.) esp-idf-sys adds the
     # chip-specific sdkconfig.defaults.esp32s3 by itself, before the overlay.
     log "building $PROFILE with sdkconfig.qemu into $TARGET_DIR"
+    if [[ -d ".embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119" && -d ".embuild/espressif/esp-idf/v5.5.5" ]]; then
+        rm -rf .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
+    fi
     ESP_IDF_SDKCONFIG_DEFAULTS="$PWD/sdkconfig.defaults;$PWD/sdkconfig.qemu" \
     ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
     CARGO_TARGET_DIR="$TARGET_DIR" \

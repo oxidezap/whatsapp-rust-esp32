@@ -42,5 +42,8 @@ esac
 
 # Process environment beats .cargo/config.toml's [env] block, so this is the
 # whole board switch. Both boards share ESP-IDF v5.5.5 under .embuild.
+if [[ -d ".embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119" && -d ".embuild/espressif/esp-idf/v5.5.5" ]]; then
+    rm -rf .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
+fi
 export MCU="$BOARD" ESP_IDF_VERSION="v5.5.5"
 exec cargo "${CARGO_CMD:-build}" --target "$TARGET" "$@"

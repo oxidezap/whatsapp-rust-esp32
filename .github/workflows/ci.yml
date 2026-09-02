@@ -26,6 +26,8 @@ env:
   # rustc the `esp` channel resolves to, and with it every size and timing number.
   # The same toolchain carries the RISC-V targets, so the ESP32-C5 uses it too.
   ESP_RUST_VERSION: "1.98.0.0"
+  # Unified ESP-IDF version across all boards.
+  ESP_IDF_VERSION: "v5.5.5"
   # Espressif QEMU release used by qemu-e2e, from the dl.espressif.com mirror of the
   # GitHub asset so the job does not depend on api.github.com.
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
@@ -89,9 +91,14 @@ jobs:
             ~/.cargo/git
             .embuild
             target
-          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.defaults', 'sdkconfig.defaults.*', 'sdkconfig.qemu', 'components_*.lock', '.cargo/config.toml', 'scripts/build.sh') }}
+          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.defaults', 'sdkconfig.defaults.*', 'sdkconfig.qemu', 'components_*.lock', '.cargo/config.toml', 'scripts/build.sh') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-
+            ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-
+
+      - name: Clean stale ESP-IDF tools from cache
+        run: |
+          # Purge older v5.4 tools if restored from legacy cache so esp-idf-sys installs v5.5.5 tools cleanly
+          rm -rf .embuild/espressif/esp-idf/v5.4 .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
 
       - name: Build
         run: ${{ matrix.build }}
