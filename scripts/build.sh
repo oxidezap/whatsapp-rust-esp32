@@ -13,8 +13,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+usage() {
+    echo "usage: $0 [--board esp32s3|esp32c5] [cargo args...]" >&2
+    exit 2
+}
+
 BOARD="${BOARD:-esp32s3}"
 if [[ "${1:-}" == "--board" ]]; then
+    # Guard before expanding $2: `set -u` would otherwise abort with an
+    # unbound-variable error instead of this usage line.
+    [[ $# -ge 2 ]] || usage
     BOARD="$2"
     shift 2
 fi
@@ -33,7 +41,7 @@ case "$BOARD" in
         ;;
     *)
         echo "unknown board '$BOARD' (esp32s3 or esp32c5)" >&2
-        exit 2
+        usage
         ;;
 esac
 

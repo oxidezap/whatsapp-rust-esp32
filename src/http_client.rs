@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::net::ToSocketAddrs;
 
 use anyhow::Result;
 use whatsapp_rust::async_trait;
@@ -120,7 +121,11 @@ enum HttpStream {
 impl HttpStream {
     fn set_timeouts(&self) -> Result<()> {
         match self {
-            Self::Tls(stream) => stream.set_read_timeout_ms(HTTP_IO_TIMEOUT.as_millis() as u32),
+            Self::Tls(stream) => {
+                let ms = HTTP_IO_TIMEOUT.as_millis() as u32;
+                stream.set_read_timeout_ms(ms)?;
+                stream.set_write_timeout_ms(ms)
+            }
             Self::Tcp(stream) => {
                 stream.set_read_timeout(Some(HTTP_IO_TIMEOUT))?;
                 stream.set_write_timeout(Some(HTTP_IO_TIMEOUT))?;
@@ -163,9 +168,24 @@ fn connect_stream(
     skip_tls_verify: bool,
 ) -> Result<HttpStream> {
     let stream = if use_tls {
-        HttpStream::Tls(EspTlsStream::connect(host, port, skip_tls_verify)?)
+        HttpStream::Tls(EspTlsStream::connect_with_timeout(
+            host,
+            port,
+            skip_tls_verify,
+            HTTP_IO_TIMEOUT,
+        )?)
     } else {
-        HttpStream::Tcp(std::net::TcpStream::connect(format!("{host}:{port}"))?)
+        // `TcpStream::connect` has no deadline of its own, so resolve first and
+        // dial with one: the socket timeouts below only start applying once a
+        // connection exists.
+        let address = format!("{host}:{port}")
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{host}:{port} did not resolve"))?;
+        HttpStream::Tcp(std::net::TcpStream::connect_timeout(
+            &address,
+            HTTP_IO_TIMEOUT,
+        )?)
     };
     stream.set_timeouts()?;
     Ok(stream)
@@ -255,13 +275,25 @@ fn do_request(
     }
     stream.flush()?;
 
+    // The response ends at EOF, which `Connection: close` above guarantees.
+    // Both streams are blocking with the timeouts `set_timeouts` installed, so a
+    // WouldBlock/TimedOut here is that timeout firing, never a finished body:
+    // treating it as EOF would hand back a silently truncated response, and for
+    // a media download that is a corrupt file reported as a success.
     let mut response_buf = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => response_buf.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                anyhow::bail!("HTTP response timed out after {HTTP_IO_TIMEOUT:?}");
+            }
             Err(e) => return Err(e.into()),
         }
     }
@@ -298,22 +330,26 @@ fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
     let status_code = parse_status_code(&header_buf[..header_end])?;
     let content_length = parse_streaming_body_length(&header_buf[..header_end])?;
 
-    // Any bytes past the header delimiter were over-read body data. The body
-    // reader stops at Content-Length rather than at EOF: with `Connection:
-    // close` the two agree on a well-behaved server, and on any other server a
-    // bounded reader is what keeps a decrypt-as-you-go download from waiting
-    // on a socket that will never close.
+    // Any bytes past the header delimiter were over-read body data. When the
+    // response declares a length the reader stops there, so a decrypt-as-you-go
+    // download cannot be left waiting on a socket that never closes. Without one
+    // the body is delimited by the close that `Connection: close` asks for, and
+    // reading to EOF is the only framing available.
     let overflow = header_buf.split_off(header_end);
-    let body: Box<dyn std::io::Read + Send> = Box::new(
-        std::io::Cursor::new(overflow)
-            .chain(stream)
-            .take(content_length),
-    );
+    let rest = std::io::Cursor::new(overflow).chain(stream);
+    let body: Box<dyn std::io::Read + Send> = match content_length {
+        Some(length) => Box::new(rest.take(length)),
+        None => Box::new(rest),
+    };
 
     Ok(StreamingHttpResponse { status_code, body })
 }
 
-fn parse_streaming_body_length(header_bytes: &[u8]) -> Result<u64> {
+/// The declared body length, or `None` when the response is delimited by the
+/// connection closing. A transfer encoding we cannot decode is an error rather
+/// than a `None`: handing the framed bytes back as the body would corrupt the
+/// download and report it as a success.
+fn parse_streaming_body_length(header_bytes: &[u8]) -> Result<Option<u64>> {
     let header = std::str::from_utf8(header_bytes)?;
     let mut content_length = None;
     for line in header.lines().skip(1) {
@@ -332,7 +368,7 @@ fn parse_streaming_body_length(header_bytes: &[u8]) -> Result<u64> {
             }
         }
     }
-    content_length.ok_or_else(|| anyhow::anyhow!("Streaming HTTP response has no Content-Length"))
+    Ok(content_length)
 }
 
 fn parse_status_code(header_bytes: &[u8]) -> Result<u16> {

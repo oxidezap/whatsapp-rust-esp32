@@ -14,6 +14,3 @@ CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 # secondary console is output-only.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
-
-# The RISC-V core dump writer needs a little more stack than the Xtensa one.
-CONFIG_ESP_COREDUMP_STACK_SIZE=2048

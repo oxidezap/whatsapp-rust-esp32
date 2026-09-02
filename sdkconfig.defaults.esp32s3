@@ -12,6 +12,3 @@ CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
 # Use 32KB instruction cache to reduce PSRAM consumption from instruction fetch
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
-
-# The Xtensa core dump walks the register windows for a backtrace; 1 KB is enough.
-CONFIG_ESP_COREDUMP_STACK_SIZE=1024

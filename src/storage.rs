@@ -46,7 +46,19 @@ const MAX_SESSIONS: usize = 2048;
 const MAX_PREKEYS: usize = 256;
 const MAX_SIGNED_PREKEYS: usize = 16;
 const MAX_SENDER_KEYS: usize = 2048;
-const MAX_SYNC_KEYS: usize = 64;
+// The Signal caps are a sanity bound on what a namespace may hold; the 1 MB
+// partition fills long before any of them is reached in practice. Sync keys are
+// the exception worth sizing deliberately: the store trait has `remove_prekey`
+// and `remove_signed_prekey` but no delete for a sync key, so they only ever
+// accumulate, and the write that hits this cap fails app-state sync for good.
+// They are ~200 bytes each, so a generous bound costs a rounding error of flash.
+const MAX_SYNC_KEYS: usize = 256;
+
+/// Longest message text kept per entry. The log is a dashboard preview, and the
+/// text is whatever a remote sender chose to send, so it is truncated rather
+/// than retained whole: a handful of maximum-size messages would otherwise pin
+/// megabytes of PSRAM for a panel that shows one line each.
+pub const MAX_LOGGED_TEXT_BYTES: usize = 256;
 
 /// How many inbound messages `/messages` keeps for the dashboard and the tests.
 const MESSAGE_LOG_CAPACITY: usize = 16;
@@ -81,10 +93,26 @@ struct FlashWorker {
 impl FlashWorker {
     fn start(flash: FlashNamespaces) -> anyhow::Result<Self> {
         let (jobs, receiver) = mpsc::sync_channel::<FlashJob>(1);
+        // Writing flash switches the cache off, so every byte this thread touches
+        // has to be in internal RAM; a stack in PSRAM would fault the moment the
+        // write begins. `ThreadSpawnConfiguration` applies to the next thread the
+        // calling thread spawns, and the other workers set it to Spiram, so state
+        // it here rather than depending on this being constructed first.
+        esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
+            name: Some(c"wa-nvs"),
+            stack_size: 32 * 1024,
+            priority: 5,
+            inherit: false,
+            pin_to_core: None,
+            stack_alloc_caps: enumset::enum_set!(
+                esp_idf_svc::hal::task::thread::MallocCap::Internal
+                    | esp_idf_svc::hal::task::thread::MallocCap::Cap8bit
+            ),
+        }
+        .set()
+        .map_err(|error| anyhow::anyhow!("could not configure the NVS worker: {error}"))?;
         std::thread::Builder::new()
             .name("wa-nvs".to_string())
-            // Flash writes disable the cache, so this stack must be internal
-            // RAM: the default allocation, not the PSRAM the other workers use.
             .stack_size(32 * 1024)
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
@@ -323,6 +351,8 @@ impl FlashNamespaces {
     }
 
     fn erase_signal(&self) -> Result<()> {
+        // Belongs with the keys it names, so it goes when they do.
+        remove_blob(&self.control, "latestsync")?;
         erase_namespace(&self.identities, "identity")?;
         erase_namespace(&self.sessions, "session")?;
         erase_namespace(&self.prekeys, "prekey")?;
@@ -337,6 +367,29 @@ impl FlashNamespaces {
         // after this commit, startup discards any remaining orphaned Signal rows.
         erase_namespace(&self.device, "device")?;
         self.erase_signal()
+    }
+
+    fn load_latest_sync_key_id(&self) -> Result<Option<Vec<u8>>> {
+        let Some(record) = read_blob(
+            &self.control,
+            "latestsync",
+            RECORD_HEADER_LEN + b"latestsync".len() + MAX_LOGICAL_KEY_LEN,
+        )?
+        else {
+            return Ok(None);
+        };
+        let (logical_key, payload) = decode_record(&record)?;
+        if logical_key != b"latestsync" {
+            return Err(StoreError::Validation(
+                "latest sync key record contains the wrong logical key".to_string(),
+            ));
+        }
+        Ok(Some(payload.to_vec()))
+    }
+
+    fn save_latest_sync_key_id(&self, key_id: &[u8]) -> Result<()> {
+        let record = encode_record(b"latestsync", key_id)?;
+        set_blob(&self.control, "latestsync", &record)
     }
 
     fn reset_pending(&self) -> Result<bool> {
@@ -569,6 +622,7 @@ impl NvsStore {
             device: flash.load_device()?,
             ..Default::default()
         };
+        let mut timestamp_latest: Option<Vec<u8>> = None;
         if inner.device.is_some() {
             for (key, value) in
                 flash.load_records(&flash.identities, "identity", MAX_IDENTITIES, 32)?
@@ -630,20 +684,25 @@ impl NvsStore {
             )? {
                 let key: AppStateSyncKey = serde_json::from_slice(&value)
                     .map_err(|error| anyhow::anyhow!("invalid sync key record: {error}"))?;
-                // The newest key by the phone's own timestamp is the one new
-                // patches are encrypted with, which is what `latest` means.
-                let newer = inner
-                    .latest_sync_key_id
+                // Fallback for a store written before the latest id was recorded:
+                // the newest key by the phone's own timestamp is the best guess
+                // at the one written last. The recorded id below wins over it.
+                let newer = timestamp_latest
                     .as_ref()
                     .and_then(|id| inner.sync_keys.get(id))
-                    .is_none_or(|latest| key.timestamp >= latest.timestamp);
+                    .is_none_or(|latest: &AppStateSyncKey| key.timestamp >= latest.timestamp);
                 if newer {
-                    inner.latest_sync_key_id = Some(key_id.clone());
+                    timestamp_latest = Some(key_id.clone());
                 }
                 if inner.sync_keys.insert(key_id, key).is_some() {
                     anyhow::bail!("duplicate sync-key record in WhatsApp NVS");
                 }
             }
+            // Only trust a recorded id that names a key actually present.
+            inner.latest_sync_key_id = flash
+                .load_latest_sync_key_id()?
+                .filter(|id| inner.sync_keys.contains_key(id))
+                .or(timestamp_latest);
         } else if flash.has_signal_records()? {
             log::warn!("Discarding orphaned Signal records without a linked device");
             flash.erase_signal()?;
@@ -1010,7 +1069,21 @@ impl DeviceStatus {
         }
     }
 
-    pub fn record_message(&self, entry: MessageLogEntry) {
+    pub fn record_message(&self, mut entry: MessageLogEntry) {
+        // Edition 2021 here, so no let-chain.
+        if let Some(text) = entry
+            .text
+            .as_mut()
+            .filter(|t| t.len() > MAX_LOGGED_TEXT_BYTES)
+        {
+            // Cut on a character boundary; the byte cap is the budget, not an index.
+            let end = (0..=MAX_LOGGED_TEXT_BYTES)
+                .rev()
+                .find(|&i| text.is_char_boundary(i))
+                .unwrap_or(0);
+            text.truncate(end);
+            text.push('…');
+        }
         let mut s = self.lock();
         if s.messages.len() == MESSAGE_LOG_CAPACITY {
             s.messages.pop_front();
@@ -1292,8 +1365,12 @@ impl AppSyncStore for NvsStore {
         let payload =
             serde_json::to_vec(&key).map_err(|error| StoreError::Serialization(Box::new(error)))?;
         let logical_key = key_id.to_vec();
+        let latest = key_id.to_vec();
         self.flash.run(move |flash| {
-            flash.put_record(&flash.sync_keys, &logical_key, &payload, "sync key")
+            flash.put_record(&flash.sync_keys, &logical_key, &payload, "sync key")?;
+            // `get_latest_sync_key_id` means the one written last, which nothing
+            // in the records themselves records, so it is stored explicitly.
+            flash.save_latest_sync_key_id(&latest)
         })?;
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);

@@ -92,6 +92,12 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=32
+# Both boards allow FreeRTOS task stacks in PSRAM, which turns on
+# ESP_COREDUMP_USE_STACK_SIZE and with it a [1792, 4096] range on this symbol:
+# the dump cannot run on a crashed task's stack when that stack is in PSRAM,
+# because the cache is off while it writes. A value below the range is silently
+# ignored, so this must stay inside it.
+CONFIG_ESP_COREDUMP_STACK_SIZE=2048
 
 # Binary size reduction
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y

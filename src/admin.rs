@@ -2,7 +2,7 @@ use embedded_svc::http::server::Connection;
 use embedded_svc::http::Headers;
 use esp_idf_svc::http::server::{Configuration, EspHttpServer, Request};
 use esp_idf_svc::io::Read;
-use log::info;
+use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use whatsapp_rust::pair_code::PairCodeOptions;
@@ -18,9 +18,68 @@ use crate::storage::{
 
 const ADMIN_PORT: u16 = 8081;
 
+/// Header carrying the admin token, when one is configured.
+const TOKEN_HEADER: &str = "x-admin-token";
+
+/// The token the sensitive routes require, or `None` when the device was
+/// flashed without one.
+///
+/// The dashboard has always been unauthenticated on the LAN, which was already
+/// enough to factory-reset the device. Reading recent messages and sending as
+/// the linked account is a different kind of exposure, so those routes and the
+/// destructive ones can be put behind a shared secret. It is opt-in because a
+/// device with no token configured must keep working exactly as before; the
+/// boot log says which of the two a given device is.
+pub struct AdminAuth {
+    token: Option<String>,
+}
+
+impl AdminAuth {
+    pub fn new(token: Option<String>) -> Self {
+        match &token {
+            Some(_) => info!("Admin API: token required on the sensitive routes"),
+            None => warn!(
+                "Admin API: no token configured, so anyone who can reach port {ADMIN_PORT} can read recent messages, send as this account and factory-reset it. Set ADMIN_TOKEN (see README \"Configure\") to require one."
+            ),
+        }
+        Self { token }
+    }
+
+    /// `Ok(())` when the request may proceed. Compares in constant time for the
+    /// length it does compare: the token is a shared secret, not a hash.
+    fn check<C: Connection>(
+        &self,
+        req: &Request<C>,
+    ) -> std::result::Result<(), (u16, &'static str)> {
+        let Some(expected) = self.token.as_deref() else {
+            return Ok(());
+        };
+        let provided = req.header(TOKEN_HEADER).unwrap_or_default();
+        let matches = provided.len() == expected.len()
+            && provided
+                .bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0;
+        if matches {
+            Ok(())
+        } else {
+            Err((
+                401,
+                r#"{"error":"A valid X-Admin-Token header is required"}"#,
+            ))
+        }
+    }
+}
+
 /// How long `POST /send` waits for the executor to report the send's outcome
 /// before answering 504. A DM to an established session takes well under a
 /// second; a first message to a new contact fetches prekeys first.
+///
+/// ESP-IDF's httpd serves requests on one task, so a send in flight is also the
+/// dashboard not answering. That is the price of reporting the real outcome
+/// (and a message id) instead of a 202 the caller then has to poll for, and it
+/// is why this waits in seconds rather than minutes.
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
@@ -113,6 +172,11 @@ input{width:100%;background:#111;color:#fff;border:1px solid #444;border-radius:
 <div class="card"><h2>PSRAM free</h2><div class="stat" id="psram">-</div></div>
 </div>
 
+<div class="card"><h2>Admin token</h2>
+<input id="token" type="password" placeholder="Only if this device was flashed with one" oninput="saveToken()">
+<div class="hint">Stored in this browser only. Leave empty if the device has no token.</div>
+</div>
+
 <div class="card"><h2>Actions</h2>
 <button onclick="if(confirm('Clear all Signal sessions and reboot?'))action('/sessions','DELETE')">Clear Sessions</button>
 <button class="danger" onclick="if(confirm('Log out, erase the stored credentials and reboot to re-pair?'))action('/reset','POST')">Factory Reset</button>
@@ -121,14 +185,20 @@ input{width:100%;background:#111;color:#fff;border:1px solid #444;border-radius:
 <div id="log"></div>
 
 <script>
+function tok(){try{return localStorage.getItem('adminToken')||''}catch(e){return ''}}
+function saveToken(){try{localStorage.setItem('adminToken',document.getElementById('token').value)}catch(e){}}
+// Every request carries the token; the device ignores it when it has none.
+function authHeaders(extra){const h=Object.assign({},extra||{});const t=tok();if(t)h['X-Admin-Token']=t;return h}
+function get(url){return fetch(url,{headers:authHeaders()})}
 function fmt(n){if(n>1048576)return(n/1048576).toFixed(1)+' <small>MB</small>';if(n>1024)return(n/1024).toFixed(0)+' <small>KB</small>';return n+' <small>B</small>'}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function log(m){const el=document.getElementById('log');el.textContent=new Date().toLocaleTimeString()+' '+m+'\n'+el.textContent;el.classList.remove('hidden')}
 let lastQr=null;
 async function refresh(){
  try{
-  const [sr,dr,mr,xr]=await Promise.all([fetch('/'),fetch('/device'),fetch('/metrics'),fetch('/messages')]);
-  const s=await sr.json(), d=await dr.json(), m=await mr.json(), x=await xr.json();
+  const [sr,dr,mr,xr]=await Promise.all([get('/'),get('/device'),get('/metrics'),get('/messages')]);
+  const s=await sr.json(), d=await dr.json(), m=await mr.json();
+  const x=xr.ok?await xr.json():{count:0,messages:[]};
 
   // Status
   const dot=d.connected?'ok':d.qr_code?'wait':'err';
@@ -182,8 +252,8 @@ async function refresh(){
   } else { devCard.classList.add('hidden') }
   document.getElementById('send-card').classList.toggle('hidden',!d.connected);
 
-  // Messages, newest first
-  document.getElementById('messages').innerHTML=x.count?x.messages.slice().reverse().map(m=>
+  // Messages, newest first. 401 means the device wants a token we do not have.
+  document.getElementById('messages').innerHTML=xr.status===401?'Enter the admin token to see messages.':x.count?x.messages.slice().reverse().map(m=>
     new Date(m.timestamp*1000).toLocaleTimeString()+' <span>'+esc(m.sender)+'</span> '+(m.text==null?'(no text)':esc(m.text))).join('\n'):'-';
 
   // Stats
@@ -217,11 +287,11 @@ async function refresh(){
  }
 }
 async function action(url,method){
- try{const r=await fetch(url,{method});const d=await r.json();log(JSON.stringify(d));refresh()}
+ try{const r=await fetch(url,{method,headers:authHeaders()});const d=await r.json();log(JSON.stringify(d));refresh()}
  catch(e){log('Error: '+e)}
 }
 async function postJson(url,body){
- const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const r=await fetch(url,{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)});
  const d=await r.json();
  if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
  return d;
@@ -250,6 +320,7 @@ async function sendMessage(event){
  }catch(e){log('Send error: '+e.message)}
  button.disabled=false;
 }
+try{document.getElementById('token').value=tok()}catch(e){}
 refresh();setInterval(refresh,3000);
 </script></body></html>"#;
 
@@ -288,7 +359,9 @@ fn read_json_body<C: Connection>(
     {
         return Err((415, r#"{"error":"Content-Type must be application/json"}"#));
     }
-    let Some(content_len) = req.content_len().map(|len| len as usize) else {
+    // `content_len()` is a u64 and usize is 32 bits here, so a cast would wrap a
+    // huge declared length down into the accepted range and then short-read.
+    let Some(content_len) = req.content_len().and_then(|len| usize::try_from(len).ok()) else {
         return Err((411, r#"{"error":"Content-Length required"}"#));
     };
     if content_len == 0 || content_len > max_len {
@@ -309,12 +382,16 @@ fn queue_maintenance(
     req: AdminRequest<'_, '_>,
     action: MaintenanceAction,
     accepted: &str,
+    auth: &AdminAuth,
     store: &Arc<NvsStore>,
     device_status: &Arc<DeviceStatus>,
     active_client: &Arc<ActiveClient>,
     maintenance: &Arc<MaintenanceCoordinator>,
     task_tx: &whatsapp_rust::async_channel::Sender<BoxedTask>,
 ) -> anyhow::Result<()> {
+    if let Err((status, body)) = auth.check(&req) {
+        return json_response_status(req, status, body);
+    }
     match maintenance.request(action) {
         MaintenanceRequest::Rejected => {
             return json_response_status(req, 409, r#"{"error":"Device is already rebooting"}"#);
@@ -347,6 +424,7 @@ pub fn start_admin_server(
     active_client: Arc<ActiveClient>,
     maintenance: Arc<MaintenanceCoordinator>,
     task_tx: whatsapp_rust::async_channel::Sender<BoxedTask>,
+    auth: Arc<AdminAuth>,
 ) -> anyhow::Result<EspHttpServer<'static>> {
     let config = Configuration {
         http_port: ADMIN_PORT,
@@ -400,11 +478,15 @@ pub fn start_admin_server(
 
     // GET /messages: the last inbound messages, oldest first
     {
+        let auth = auth.clone();
         let ds = device_status.clone();
         server.fn_handler::<anyhow::Error, _>(
             "/messages",
             esp_idf_svc::http::Method::Get,
-            move |req| json_response(req, &ds.messages_json()),
+            move |req| match auth.check(&req) {
+                Ok(()) => json_response(req, &ds.messages_json()),
+                Err((status, body)) => json_response_status(req, status, body),
+            },
         )?;
     }
 
@@ -413,12 +495,16 @@ pub fn start_admin_server(
     // channel the executor task answers on; the send itself runs where every
     // other send runs, so nothing here touches the client off its executor.
     {
+        let auth = auth.clone();
         let active_client = active_client.clone();
         let task_tx = task_tx.clone();
         server.fn_handler::<anyhow::Error, _>(
             "/send",
             esp_idf_svc::http::Method::Post,
             move |mut req| {
+                if let Err((status, body)) = auth.check(&req) {
+                    return json_response_status(req, status, body);
+                }
                 let value = match read_json_body(&mut req, 2048) {
                     Ok(value) => value,
                     Err((status, body)) => return json_response_status(req, status, body),
@@ -429,6 +515,9 @@ pub fn start_admin_server(
                 let Some(text) = value.get("text").and_then(|value| value.as_str()) else {
                     return json_response_status(req, 400, r#"{"error":"text is required"}"#);
                 };
+                if text.is_empty() {
+                    return json_response_status(req, 400, r#"{"error":"text is empty"}"#);
+                }
                 let Ok(jid) = to.parse::<Jid>() else {
                     return json_response_status(req, 400, r#"{"error":"to is not a JID"}"#);
                 };
@@ -448,12 +537,20 @@ pub fn start_admin_server(
                     ..Default::default()
                 };
                 let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                let task_active_client = active_client.clone();
                 let task = Box::pin(async move {
-                    let result = client
-                        .send_message(jid, message)
-                        .await
-                        .map(|sent| sent.message_id)
-                        .map_err(|error| error.to_string());
+                    // A reconnect between the check above and this task running
+                    // replaces the client; sending through the old one would go
+                    // out on a socket that is already gone.
+                    let result = if task_active_client.is_current(&client) {
+                        client
+                            .send_message(jid, message)
+                            .await
+                            .map(|sent| sent.message_id)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        Err("WhatsApp client reconnected; try again".to_string())
+                    };
                     let _ = result_tx.send(result);
                 });
                 if task_tx.try_send(task).is_err() {
@@ -493,10 +590,14 @@ pub fn start_admin_server(
         let active_client = active_client.clone();
         let maintenance = maintenance.clone();
         let task_tx = task_tx.clone();
+        let auth = auth.clone();
         server.fn_handler::<anyhow::Error, _>(
             "/pair-code",
             esp_idf_svc::http::Method::Post,
             move |mut req| {
+                if let Err((status, body)) = auth.check(&req) {
+                    return json_response_status(req, status, body);
+                }
                 let value = match read_json_body(&mut req, 128) {
                     Ok(value) => value,
                     Err((status, body)) => return json_response_status(req, status, body),
@@ -553,6 +654,7 @@ pub fn start_admin_server(
                 let task_ds = ds.clone();
                 let task_store = store.clone();
                 let task_active_client = active_client.clone();
+                let task_maintenance = maintenance.clone();
                 let task = Box::pin(async move {
                     if client
                         .wait_for_socket(Duration::from_secs(30))
@@ -568,6 +670,13 @@ pub fn start_admin_server(
                     }
                     if task_store.stats().device_exists || client.is_logged_in() {
                         task_ds.fail_pair_code(request_id, "Device is already paired");
+                        return;
+                    }
+                    // A reset can be requested between the check in the handler
+                    // and this task running; pairing into a store that is about
+                    // to be erased would strand a code the user cannot use.
+                    if !task_maintenance.is_idle() {
+                        task_ds.fail_pair_code(request_id, "Device maintenance is in progress");
                         return;
                     }
                     match client
@@ -631,6 +740,7 @@ pub fn start_admin_server(
         let active_client = active_client.clone();
         let maintenance = maintenance.clone();
         let task_tx = task_tx.clone();
+        let auth = auth.clone();
         server.fn_handler::<anyhow::Error, _>(
             "/reset",
             esp_idf_svc::http::Method::Post,
@@ -639,6 +749,7 @@ pub fn start_admin_server(
                     req,
                     MaintenanceAction::Reset,
                     r#"{"result":"resetting","message":"Logging out, clearing persistent data, and rebooting."}"#,
+                    &auth,
                     &store,
                     &device_status,
                     &active_client,
@@ -656,6 +767,7 @@ pub fn start_admin_server(
         let active_client = active_client.clone();
         let maintenance = maintenance.clone();
         let task_tx = task_tx.clone();
+        let auth = auth.clone();
         server.fn_handler::<anyhow::Error, _>(
             "/reboot",
             esp_idf_svc::http::Method::Post,
@@ -664,6 +776,7 @@ pub fn start_admin_server(
                     req,
                     MaintenanceAction::Reboot,
                     r#"{"result":"rebooting"}"#,
+                    &auth,
                     &store,
                     &device_status,
                     &active_client,
@@ -708,6 +821,7 @@ pub fn start_admin_server(
                     req,
                     MaintenanceAction::ClearSessions,
                     r#"{"result":"clearing","message":"Disconnecting, clearing sessions, and rebooting."}"#,
+                    &auth,
                     &store,
                     &device_status,
                     &active_client,

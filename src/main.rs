@@ -34,8 +34,8 @@ use whatsapp_rust::wacore::types::events::{
 use crate::http_client::EspHttpClient;
 use crate::runtime::{BlockingWorker, BoxedTask, Esp32Runtime};
 use crate::storage::{
-    ActiveClient, DeviceStatus, MaintenanceAction, MaintenanceCoordinator, MessageLogEntry,
-    NvsStore,
+    ActiveClient, DeviceStatus, MaintenanceAction, MaintenanceCoordinator, MaintenanceRequest,
+    MessageLogEntry, NvsStore,
 };
 use crate::transport::Esp32TransportFactory;
 
@@ -80,6 +80,15 @@ const DEFAULT_PUSH_NAME: &str = match option_env!("WHATSAPP_PUSH_NAME") {
     Some(n) => n,
     None => "esp32-test",
 };
+/// Shared secret the sensitive admin routes require, when one is configured.
+/// Same two sources as the push name: `.env` at build time, or the `wa`
+/// namespace of the default NVS partition (key `admin_token`) at flash time.
+/// Empty means unset, which keeps the historical unauthenticated behavior.
+const DEFAULT_ADMIN_TOKEN: &str = match option_env!("ADMIN_TOKEN") {
+    Some(t) => t,
+    None => "",
+};
+
 /// What Linked Devices shows as the device's OS.
 const DEVICE_OS: &str = "whatsapp-esp32";
 
@@ -230,7 +239,12 @@ fn main() -> Result<()> {
     let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
-    let push_name = push_name(&nvs);
+    let push_name = nvs_string(&nvs, "push_name")
+        .inspect(|name| info!("Push name from NVS: {name}"))
+        .unwrap_or_else(|| DEFAULT_PUSH_NAME.to_string());
+    // Never logged: it is a shared secret, and the boot log is not private.
+    let admin_token = nvs_string(&nvs, "admin_token")
+        .or_else(|| Some(DEFAULT_ADMIN_TOKEN.to_string()).filter(|t| !t.is_empty()));
 
     // The network handle must stay alive for the rest of main(): dropping it tears
     // the interface down. Which interface that is depends on where the firmware runs.
@@ -264,6 +278,7 @@ fn main() -> Result<()> {
         active_client.clone(),
         maintenance.clone(),
         task_tx.clone(),
+        Arc::new(admin::AdminAuth::new(admin_token)),
     )?;
     info!("Admin: http://esp32-whatsapp.local:8081/dashboard");
     info!("Admin: http://{}:8081/dashboard", ip);
@@ -313,25 +328,24 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The push name, from the default NVS partition when provisioned there,
-/// otherwise the build-time default. Provisioning is a plain NVS string:
-/// namespace `wa`, key `push_name`, written with `nvs_partition_gen` at flash
-/// time or by any tool that can write the default partition.
-fn push_name(nvs: &EspDefaultNvsPartition) -> String {
-    // Read-only open of a namespace that was never written fails with
-    // NVS_NOT_FOUND, which is the unprovisioned case, not an error.
-    if let Ok(namespace) = EspNvs::new(nvs.clone(), "wa", false) {
-        let mut buf = [0u8; 64];
-        match namespace.get_str("push_name", &mut buf) {
-            Ok(Some(name)) if !name.is_empty() => {
-                info!("Push name from NVS: {name}");
-                return name.to_string();
-            }
-            Ok(_) => {}
-            Err(e) => warn!("Could not read the provisioned push name: {e}"),
+/// A string provisioned in the default NVS partition, namespace `wa`.
+///
+/// Provisioning is a plain NVS record written with `nvs_partition_gen` at flash
+/// time or by any tool that can write that partition, which is how one firmware
+/// image can be flashed to several boards that differ only in these values.
+fn nvs_string(nvs: &EspDefaultNvsPartition, key: &str) -> Option<String> {
+    // A read-only open of a namespace that was never written fails with
+    // NVS_NOT_FOUND. That is the unprovisioned case, not an error.
+    let namespace = EspNvs::new(nvs.clone(), "wa", false).ok()?;
+    let mut buf = [0u8; 128];
+    match namespace.get_str(key, &mut buf) {
+        Ok(Some(value)) if !value.is_empty() => Some(value.to_string()),
+        Ok(_) => None,
+        Err(e) => {
+            warn!("Could not read '{key}' from NVS: {e}");
+            None
         }
     }
-    DEFAULT_PUSH_NAME.to_string()
 }
 
 /// Station-mode WiFi: the real board. Blocks until the interface has an address.
@@ -476,28 +490,62 @@ fn run_executor(
     }));
 }
 
+/// Feeds the task watchdog `wa-main` registered itself with, at a fraction of
+/// the configured timeout so ordinary scheduling jitter has room.
+///
+/// Every error here is transient by nature (the async timer is an allocation),
+/// so none of them may end the loop: a feeder that returns leaves the watchdog
+/// armed with nobody feeding it, which reboots a device that is working fine.
+/// Only a run of failures long enough to be a real fault stops it, and then it
+/// unregisters first so the reboot it can no longer prevent never happens.
 async fn feed_task_watchdog() {
-    let timer_service = match esp_idf_svc::timer::EspTaskTimerService::new() {
-        Ok(service) => service,
-        Err(error) => {
-            error!("Failed to create task-watchdog timer: {error}");
-            return;
-        }
-    };
+    /// Well inside `CONFIG_ESP_TASK_WDT_TIMEOUT_S` (30 s in sdkconfig.defaults).
+    const FEED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+    /// About a minute of consecutive failures before giving the watchdog up.
+    const MAX_CONSECUTIVE_FAILURES: u32 = 12;
+
+    let mut failures = 0u32;
     loop {
-        let Ok(mut timer) = timer_service.timer_async() else {
-            error!("Failed to create task-watchdog feed timer");
-            return;
-        };
-        if let Err(error) = timer.after(std::time::Duration::from_secs(5)).await {
-            error!("Task-watchdog feed timer failed: {error}");
-            return;
-        }
+        // Feed first: the point of this task is that the watchdog gets fed even
+        // on an iteration where arming the next timer went wrong.
         let result = unsafe { esp_idf_svc::sys::esp_task_wdt_reset() };
-        if result != esp_idf_svc::sys::ESP_OK {
-            error!("Failed to feed wa-main task watchdog: ESP error {result}");
+        if result == esp_idf_svc::sys::ESP_OK {
+            failures = 0;
+        } else {
+            failures += 1;
+            error!("Failed to feed the wa-main task watchdog: ESP error {result}");
+        }
+
+        match esp_idf_svc::timer::EspTaskTimerService::new().and_then(|s| s.timer_async()) {
+            Ok(mut timer) => match timer.after(FEED_INTERVAL).await {
+                Ok(()) => continue,
+                Err(error) => {
+                    failures += 1;
+                    error!("Task-watchdog feed timer failed: {error}");
+                }
+            },
+            Err(error) => {
+                failures += 1;
+                error!("Could not arm the task-watchdog feed timer: {error}");
+            }
+        }
+
+        if failures >= MAX_CONSECUTIVE_FAILURES {
+            // Unregister before leaving. A watchdog nobody feeds is a guaranteed
+            // reboot loop, which hides the fault instead of reporting it.
+            error!(
+                "Giving up on the task watchdog after {failures} consecutive failures; unregistering wa-main"
+            );
+            unsafe { esp_idf_svc::sys::esp_task_wdt_delete(core::ptr::null_mut()) };
             return;
         }
+        // The timer is unusable this round; yield so a broken timer service
+        // cannot spin this task on the single executor thread.
+        futures::future::poll_fn(|cx| {
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        })
+        .await
     }
 }
 
@@ -553,17 +601,29 @@ async fn run_whatsapp(
             }
             Ok(ClientExit::ResetCredentials) => {
                 warn!("WhatsApp unlinked this device; erasing the stored credentials");
-                // The reset path is the same one the dashboard uses, so the two
-                // cannot race: whichever asks first wins and the other upgrades it.
-                maintenance.request(MaintenanceAction::Reset);
-                run_maintenance(
-                    store.clone(),
-                    device_status.clone(),
-                    active_client.clone(),
-                    maintenance.clone(),
-                )
-                .await;
-                unreachable!("run_maintenance reboots")
+                // The dashboard's actions end in the same place, so go through the
+                // coordinator rather than erasing here: it decides who runs the
+                // work. `Start` is ours to run; `Queued` means a dashboard action
+                // is already in flight and has just been upgraded to a reset, and
+                // `Rejected` means the reboot is already committed. In both of
+                // those the other task finishes and reboots, so this one must wait
+                // rather than erase and restart a second time underneath it.
+                match maintenance.request(MaintenanceAction::Reset) {
+                    MaintenanceRequest::Start => {
+                        run_maintenance(
+                            store.clone(),
+                            device_status.clone(),
+                            active_client.clone(),
+                            maintenance.clone(),
+                        )
+                        .await;
+                    }
+                    MaintenanceRequest::Queued | MaintenanceRequest::Rejected => {
+                        info!("Maintenance is already running; it will reboot this device");
+                    }
+                }
+                futures::future::pending::<()>().await;
+                unreachable!("maintenance reboots the device")
             }
             Err(e) => {
                 error!("WhatsApp client error: {e}; restarting in 5s");
@@ -820,6 +880,10 @@ pub(crate) async fn run_maintenance(
             if succeeded {
                 applied = requested;
             } else {
+                // A blocking sleep on the executor thread, deliberately: this is
+                // only reached when erasing flash has already failed its own
+                // retries, the device is on its way to a reboot either way, and
+                // there is nothing else worth running in the meantime.
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }

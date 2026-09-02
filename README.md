@@ -115,6 +115,7 @@ WIFI_SSID=your-ssid          # 2.4 GHz only
 WIFI_PASS=your-password
 WHATSAPP_WS_URL=wss://192.168.0.4:8080/ws/chat   # optional; mock or gateway
 WHATSAPP_PUSH_NAME=esp32-test                    # optional; the name the device pairs under
+ADMIN_TOKEN=                                     # optional; see "Securing the dashboard"
 ```
 
 These are read at build time and baked into the firmware, so changing them needs
@@ -146,6 +147,33 @@ pin against. It relies on `CONFIG_ESP_TLS_INSECURE=y` +
 `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` in `sdkconfig.defaults`. For the real
 WhatsApp gateway, point `WHATSAPP_WS_URL` at it and set `SKIP_TLS_VERIFY = false` so the
 ESP-IDF root certificate bundle is used (verification enforced).
+
+### Securing the dashboard
+
+The dashboard and its API listen on port 8081 for anyone who can reach the
+device. That was already enough to factory-reset it, and this firmware also lets
+that port read recent messages and send as the linked account, so there is a
+shared secret you can require:
+
+```dotenv
+ADMIN_TOKEN=something-long-and-random
+```
+
+With one set, `/send`, `/messages`, `/pair-code`, `/reset`, `/reboot` and
+`DELETE /sessions` answer `401` unless the request carries `X-Admin-Token`. The
+dashboard has a field for it and keeps it in that browser's local storage. The
+status routes (`/`, `/device`, `/metrics`, `/health`) stay open so the page can
+render before you type it in.
+
+Leave it unset and the device behaves as it always has, with a warning in the
+boot log naming what is exposed. Like the push name, it can also be provisioned
+at flash time as an `admin_token` string in the `wa` NVS namespace, which keeps
+it out of the firmware image.
+
+Two things a token does not fix: the API is plain HTTP, so the token and
+everything else crosses the LAN in cleartext, and the `wa_store` partition is
+unencrypted, so anyone who can read the flash can read the pairing and the
+Signal state. Treat physical access to the board as full access to the account.
 
 ## Build
 
@@ -332,15 +360,15 @@ itself pulls `qrcode.min.js` from a CDN, so the browser needs internet access):
 | GET | `/dashboard` | The HTML dashboard. |
 | GET | `/` | JSON store stats (heap, sessions, identities, prekeys, paired). |
 | GET | `/device` | Pairing status: QR code, connection, PN/LID, linking-code state. |
-| GET | `/messages` | The last 16 inbound messages (id, chat, sender, text, timestamp). |
-| POST | `/send` | `{"to":"<jid>","text":"..."}`: send a text and wait for the outcome (`message_id` on success). |
-| POST | `/pair-code` | `{"phone_number":"+15551234567"}`: request a linking code; poll `/device` for it. |
+| GET | `/messages` | The last 16 inbound messages (id, chat, sender, truncated text, timestamp). Needs the token. |
+| POST | `/send` | `{"to":"<jid>","text":"..."}`: send a text and wait for the outcome (`message_id` on success). Needs the token. |
+| POST | `/pair-code` | `{"phone_number":"+15551234567"}`: request a linking code; poll `/device` for it. Needs the token. |
 | GET | `/metrics` | Live system telemetry (see Diagnostics below). |
 | GET | `/health` | Liveness check (`ok`). |
 | GET | `/sessions` | List Signal session addresses. |
-| DELETE | `/sessions` | Disconnect, erase all Signal sessions from flash, reboot. |
-| POST | `/reset` | Factory reset: log out, erase `wa_store`, reboot to re-pair. |
-| POST | `/reboot` | Disconnect cleanly and reboot. |
+| DELETE | `/sessions` | Disconnect, erase all Signal sessions from flash, reboot. Needs the token. |
+| POST | `/reset` | Factory reset: log out, erase `wa_store`, reboot to re-pair. Needs the token. |
+| POST | `/reboot` | Disconnect cleanly and reboot. Needs the token. |
 | POST | `/test-panic` | Deliberately panic, to exercise the persistent crash capture (see Diagnostics). |
 
 Handy for a quick liveness check from the same network, using the IP from the boot

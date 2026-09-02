@@ -89,7 +89,9 @@ cmd_build() {
 # push name selects the account, so this is what makes two boards from one
 # firmware image two different WhatsApp numbers.
 nvs_image() {
-    local name="$1" out="$OUT_DIR/nvs-$name.bin" csv="$OUT_DIR/nvs-$name.csv"
+    local name="$1"
+    local out="$OUT_DIR/nvs-$name.bin"
+    local csv="$OUT_DIR/nvs-$name.csv"
     cat > "$csv" <<CSV
 key,type,encoding,value
 wa,namespace,,
@@ -145,10 +147,17 @@ qemu_cmd() {
     fi
 }
 
+# Board "a" gets $ADMIN_PORT, "b" the next one, and so on, so a board keeps the
+# same admin port whether it is started by `run` or by `test`.
+board_port() {
+    local name="$1"
+    printf '%s' "$((ADMIN_PORT + $(LC_ALL=C printf '%d' "'$name") - $(LC_ALL=C printf '%d' "'a")))"
+}
+
 cmd_run() {
     local name="${1:-a}"
     test -f "$(flash_image "$name")" || cmd_image "$name"
-    qemu_cmd "$name" "$ADMIN_PORT"
+    qemu_cmd "$name" "$(board_port "$name")"
     exec "${QEMU_CMD[@]}"
 }
 
@@ -237,7 +246,16 @@ BOOT_MARKERS=("whatsapp-esp32 starting" "Ethernet connected! IP:" "Bot built, st
 
 cmd_test() {
     trap stop_all EXIT
-    local port_a="$ADMIN_PORT" port_b=$((ADMIN_PORT + 1))
+    local port_a port_b
+    port_a="$(board_port a)"
+    port_b="$(board_port b)"
+
+    # QEMU writes the emulated flash back into the image file, which is what the
+    # reboot stage relies on. It also means a previous run left board a paired,
+    # so both images are rebuilt here: stage 1 asserts an empty store.
+    log "rebuilding both flash images so the run starts from an unpaired store"
+    cmd_image a
+    cmd_image b
 
     # 1. First boot of board a: fresh store, QR pairing against the mock server.
     boot a "$port_a" "$OUT_DIR/qemu-a-boot1.log"
@@ -248,7 +266,11 @@ cmd_test() {
     log "board a, boot 1: GET /device -> $device"
     [[ "$(json_field "$device" "d['connected']")" == True ]] || { log "board a is not connected"; return 1; }
     local pn_a
-    pn_a="$(json_field "$device" "d['pn']")"
+    pn_a="$(json_field "$device" "d['pn'] or ''")"
+    if [[ -z "$pn_a" ]]; then
+        log "board a connected without reporting a number; /device -> $device"
+        return 1
+    fi
 
     # 2. Reboot board a from the same flash image. The credentials and Signal
     #    state must come back from the wa_store partition: no QR this time, the
@@ -277,7 +299,11 @@ cmd_test() {
     device="$(admin_get "$port_b" /device)"
     log "board b: GET /device -> $device"
     local to_b sent
-    to_b="$(account_jid "$(json_field "$device" "d['pn']")")"
+    to_b="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"
+    if [[ -z "$to_b" ]]; then
+        log "board b connected without reporting a number; /device -> $device"
+        return 1
+    fi
     log "board a -> board b ($to_b): ping"
     sent="$(curl -sS --max-time 60 -H 'Content-Type: application/json' \
         -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")"
