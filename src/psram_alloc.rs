@@ -1,5 +1,17 @@
 //! Global allocator routing the entire Rust heap to PSRAM.
 //!
+//! Opt-in: the library only defines the type. A firmware installs it with
+//!
+//! ```ignore
+//! #[global_allocator]
+//! static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
+//!     whatsapp_esp32::psram_alloc::PsramAllocator;
+//! ```
+//!
+//! which is what `src/main.rs` does, and which the memory figures in the README
+//! assume. Without it the client still runs, but the internal-DRAM drain
+//! described below returns.
+//!
 //! Internal DRAM (~300 KB) is the scarce resource and is the only place FreeRTOS
 //! objects (mutexes/semaphores, created lazily by `std::sync` primitives) and DMA
 //! buffers can live. The default malloc heuristic places small allocations in
@@ -13,7 +25,8 @@ use core::alloc::{GlobalAlloc, Layout};
 
 use esp_idf_svc::sys;
 
-struct PsramAllocator;
+/// See the module documentation.
+pub struct PsramAllocator;
 
 unsafe impl GlobalAlloc for PsramAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -86,6 +99,3 @@ impl PsramAllocator {
         new_ptr
     }
 }
-
-#[global_allocator]
-static ALLOCATOR: PsramAllocator = PsramAllocator;

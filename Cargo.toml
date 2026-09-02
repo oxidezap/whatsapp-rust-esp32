@@ -13,6 +13,14 @@ keywords = ["whatsapp", "esp32", "embedded", "esp-idf", "iot"]
 categories = ["embedded"]
 readme = "README.md"
 
+[lib]
+name = "whatsapp_esp32"
+path = "src/lib.rs"
+
+[[bin]]
+name = "whatsapp-esp32"
+path = "src/main.rs"
+
 [dependencies]
 # `critical-section`: edge-executor 0.5 guards its run-queue with embassy-sync's
 # CriticalSectionRawMutex, which links against a `critical-section` provider.
@@ -21,7 +29,7 @@ esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
 esp-idf-hal = "0.46"
 # `Headers` for the admin server's POST handlers (Content-Length / Content-Type);
 # the `Request` type esp-idf-svc re-exports implements it but does not re-export it.
-embedded-svc = { version = "0.29", default-features = false }
+embedded-svc = { version = "0.29", default-features = false, optional = true }
 
 log = "0.4"
 # anyhow stays a direct dependency: esp-idf-svc errors are converted with `?`,
@@ -80,6 +88,10 @@ strip = false
 panic = "abort"
 
 [features]
+default = ["admin"]
+# The HTTP dashboard and API (`admin` module): status, send, pairing code,
+# maintenance. The demo firmware serves it; a library consumer can leave it out.
+admin = ["dep:embedded-svc"]
 # Run inside Espressif's QEMU instead of on a board: brings the network up over the
 # emulated OpenCores Ethernet MAC instead of WiFi, and points the default server URL
 # at the QEMU host (10.0.2.2). Build with `scripts/qemu.sh build`, which also layers

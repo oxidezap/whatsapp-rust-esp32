@@ -49,21 +49,105 @@ source is the same for both boards; both share ESP-IDF v5.5.5. What differs is
 the target triple and one chip-specific `sdkconfig.defaults.<chip>` overlay (PSRAM
 mode, console, cache layout), which `esp-idf-sys` picks up from the `MCU` it is
 building for. Adding a board is adding that one file.
+
 ## How it works
 
-`whatsapp-rust` is platform-agnostic. This crate provides the ESP32 implementations
-of its runtime traits:
+`whatsapp-rust` is platform-agnostic: the protocol engine is written against
+four traits, and a platform supplies them. This repository is one crate with two
+targets. The library, `whatsapp_esp32`, is the ESP32 platform: exactly those four
+implementations, plus the pieces a firmware around them tends to need. The
+binary, `whatsapp-esp32`, is the demo firmware built on it.
 
-| File | Provides | Role |
-|------|----------|------|
-| `src/storage.rs` | `NvsStore` | `Backend` (Signal / AppSync / Protocol / MsgSecret / Device stores). The linked device, the Signal state and the app-state sync keys live in the `wa_store` NVS partition and survive reboots; the rest is a RAM cache. |
-| `src/transport.rs` | `Esp32TransportFactory` | ESP-IDF mbedTLS + `tungstenite` WebSocket, driven on a dedicated `std::thread`. |
-| `src/http_client.rs` | `EspHttpClient` | Raw HTTP/1.1 over ESP-IDF TLS/TCP (used for media + version fetch). |
-| `src/runtime.rs` | `Esp32Runtime` | `edge-executor`-based async runtime (spawn / sleep / yield); `spawn_blocking` jobs run on a dedicated `wa-blocking` thread so key generation never stalls the event loop. |
-| `src/admin.rs` | `start_admin_server` | HTTP admin dashboard and API on port 8081 (status, send, pairing code, maintenance). |
-| `src/main.rs` | firmware entry | WiFi + SNTP + mDNS bringup, executor loop, client supervisor, the ping/pong bot. |
+| Module | Provides | `whatsapp-rust` contract |
+|--------|----------|--------------------------|
+| `storage` | `NvsStore` | `Backend`. The linked device, the Signal state and the app-state sync keys live in an NVS partition (`wa_store` by default) and survive reboots; the rest is a RAM cache. |
+| `transport` | `Esp32TransportFactory` | `TransportFactory`. ESP-IDF mbedTLS + `tungstenite` WebSocket, driven on its own thread. |
+| `http_client` | `EspHttpClient` | `HttpClient`. Streaming HTTP/1.1 over ESP-IDF TLS/TCP with bounded RAM (media, version fetch). |
+| `runtime` | `Esp32Runtime`, `Esp32Executor`, `BlockingWorker` | `Runtime`. `edge-executor` event loop that parks when idle; `spawn_blocking` runs on a dedicated `wa-blocking` thread so key generation never stalls the loop. |
+| `psram_alloc` | `PsramAllocator` | Optional global allocator that keeps the Rust heap in PSRAM. |
+| `supervisor` | `DeviceStatus`, `ActiveClient`, `MaintenanceCoordinator` | Firmware bookkeeping: which client is live, what the dashboard shows, the one path that erases or reboots. |
+| `metrics`, `crash` | system telemetry, panic and core-dump capture | What the dashboard's `/metrics` reports. |
+| `admin` (feature `admin`, default on) | `start_admin_server` | The HTTP dashboard and API. |
+| `src/main.rs` | the demo firmware | WiFi + SNTP + mDNS bringup, the executor thread, a supervisor that rebuilds the bot when it exits, the ping/pong bot. |
 
-Since `whatsapp-rust` 0.7.0 a single dependency is enough: the crate re-exports
+## Using it as a library
+
+There is no wrapper around `Bot`, no ESP32 event type and no extension trait:
+a firmware on this crate writes the same `Bot::builder()` code as a desktop
+program, with the four platform values plugged in, and reads `whatsapp-rust`'s
+own documentation for everything else.
+
+```toml
+[dependencies]
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", default-features = false }
+whatsapp-esp32 = { git = "https://github.com/oxidezap/whatsapp-rust-esp32", default-features = false }
+```
+
+```rust
+use std::sync::Arc;
+use whatsapp_rust::bot::Bot;
+use whatsapp_rust::prelude::MessageExt as _;
+use whatsapp_esp32::{Esp32Runtime, Esp32TransportFactory, EspHttpClient, NvsStore};
+
+#[global_allocator]
+static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
+    whatsapp_esp32::psram_alloc::PsramAllocator;
+
+fn main() -> anyhow::Result<()> {
+    esp_idf_svc::sys::link_patches();
+    // Bring up WiFi and SNTP, and whatever else the board needs (see src/main.rs).
+
+    let store = Arc::new(NvsStore::open_default()?);
+    let (runtime, executor) = Esp32Runtime::create_default()?;
+
+    // Runs on this thread until the future completes; give the thread a large
+    // PSRAM stack (the demo uses 256 KB) and never let the future return.
+    executor.block_on(async move {
+        let bot = Bot::builder()
+            .with_backend_arc(store)
+            .with_transport_factory(Esp32TransportFactory::default())
+            .with_http_client(EspHttpClient::default())
+            .with_runtime(runtime.clone())
+            .with_wanted_pre_key_count(50) // 812 keypairs at login would exhaust DRAM
+            .skip_history_sync()           // history is not persisted; its sync churns ~14 MB
+            .on_qr_code(|code, timeout| async move {
+                log::info!("scan this QR (valid for {timeout:?}): {code}");
+            })
+            .on_message(|ctx| async move {
+                if ctx.message.text_content() == Some("ping") {
+                    let _ = ctx.reply("pong").await;
+                }
+            })
+            .build()
+            .await?;
+        bot.run().await;
+        Ok(())
+    })
+}
+```
+
+`Esp32TransportFactory::default()` and `EspHttpClient::default()` talk to the
+production gateway with the server certificate verified against ESP-IDF's root
+bundle; `::new(url, skip_tls_verify)` is for a local mock server. The threads the
+library starts (`ws-transport`, `wa-blocking`) can be given other stacks,
+priorities or cores through `Esp32TransportFactory::with_thread_config` and
+`BlockingWorker::start_with`, both taking esp-idf-hal's own
+`ThreadSpawnConfiguration`.
+
+What the firmware around it has to provide, all of which `src/main.rs`,
+`sdkconfig.defaults` and `partitions.csv` show working:
+
+- **PSRAM**, enabled for `malloc` and for task stacks
+  (`CONFIG_SPIRAM_USE_MALLOC`, `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`), and a
+  large stack for the executor thread.
+- **A `wa_store` NVS partition** (1 MB here), or any name passed to `NvsStore::open`.
+- **mbedTLS allocating from external memory** (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`),
+  and the **task watchdog not checking the idle task** on the executor's core,
+  since the blocking worker runs below idle priority there.
+- **Time**: the Noise handshake needs a roughly correct clock, so start SNTP
+  before the first connect.
+
+Since `whatsapp-rust` 0.7.0 a single upstream dependency is enough: the crate re-exports
 `wacore`, `waproto`, `buffa` and the shared support crates, so they can never
 resolve to a different version than the one it was built against. It is pulled
 from crates.io with `default-features = false`, which drops the desktop-only

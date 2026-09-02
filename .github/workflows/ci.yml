@@ -103,6 +103,12 @@ jobs:
       - name: Build
         run: ${{ matrix.build }}
 
+      # The library is also consumed without the dashboard; that configuration
+      # has no other build, and this one reuses the target dir the build just filled.
+      - name: Check the library without default features
+        if: matrix.flavor == 'esp32s3'
+        run: cargo check --no-default-features
+
       - name: App image and partition size gate
         run: |
           python3 -m venv .venv && .venv/bin/pip install -q esptool

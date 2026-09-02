@@ -11,12 +11,13 @@ use whatsapp_rust::serde_json;
 use whatsapp_rust::Jid;
 
 use crate::runtime::BoxedTask;
-use crate::storage::{
+use crate::storage::NvsStore;
+use crate::supervisor::{
     ActiveClient, DeviceStatus, MaintenanceAction, MaintenanceCoordinator, MaintenanceRequest,
-    NvsStore,
 };
 
-const ADMIN_PORT: u16 = 8081;
+/// The port the demo firmware serves the dashboard on.
+pub const DEFAULT_ADMIN_PORT: u16 = 8081;
 
 /// Header carrying the admin token, when one is configured.
 const TOKEN_HEADER: &str = "x-admin-token";
@@ -36,15 +37,19 @@ pub struct AdminAuth {
 
 impl AdminAuth {
     pub fn new(token: Option<String>) -> Self {
-        match &token {
+        Self { token }
+    }
+
+    /// Say in the boot log what this device exposes on `port`.
+    fn log_exposure(&self, port: u16) {
+        match &self.token {
             Some(_) => info!(
-                "Admin API: token required on sensitive routes. NOTE: Admin API is served over plaintext HTTP on port {ADMIN_PORT}; restrict access to trusted networks (e.g. isolated LAN) to prevent token interception."
+                "Admin API: token required on sensitive routes. NOTE: Admin API is served over plaintext HTTP on port {port}; restrict access to trusted networks (e.g. isolated LAN) to prevent token interception."
             ),
             None => warn!(
-                "Admin API: no token configured, so anyone who can reach port {ADMIN_PORT} can read recent messages, send as this account and factory-reset it. Set ADMIN_TOKEN (see README \"Configure\") to require one."
+                "Admin API: no token configured, so anyone who can reach port {port} can read recent messages, send as this account and factory-reset it. Set ADMIN_TOKEN (see README \"Configure\") to require one."
             ),
         }
-        Self { token }
     }
 
     /// `Ok(())` when the request may proceed. Compares in constant time for the
@@ -400,7 +405,7 @@ fn queue_maintenance(
         }
         MaintenanceRequest::Queued => {}
         MaintenanceRequest::Start => {
-            let task = Box::pin(crate::run_maintenance(
+            let task = Box::pin(crate::supervisor::run_maintenance(
                 store.clone(),
                 device_status.clone(),
                 active_client.clone(),
@@ -427,9 +432,11 @@ pub fn start_admin_server(
     maintenance: Arc<MaintenanceCoordinator>,
     task_tx: whatsapp_rust::async_channel::Sender<BoxedTask>,
     auth: Arc<AdminAuth>,
+    port: u16,
 ) -> anyhow::Result<EspHttpServer<'static>> {
+    auth.log_exposure(port);
     let config = Configuration {
-        http_port: ADMIN_PORT,
+        http_port: port,
         // Put the httpd worker stack in PSRAM (Default is internal DRAM). Handlers
         // serve static HTML + small JSON and hand real work to the executor, so
         // 6 KB from PSRAM is plenty; JSON parsing of a POST body is the deepest.
@@ -844,6 +851,6 @@ pub fn start_admin_server(
         )?;
     }
 
-    info!("Admin server ready on port {}", ADMIN_PORT);
+    info!("Admin server ready on port {port}");
     Ok(server)
 }

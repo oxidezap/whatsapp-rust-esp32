@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
 use tungstenite::Message;
 // Re-exported through whatsapp-rust so the `async_channel::Receiver` handed back
 // by `create_transport` is provably the same type the client expects.
@@ -186,14 +187,46 @@ impl Transport for Esp32Transport {
 pub struct Esp32TransportFactory {
     ws_url: String,
     skip_tls_verify: bool,
+    thread: ThreadSpawnConfiguration,
 }
 
 impl Esp32TransportFactory {
+    /// Connect to `ws_url`; `skip_tls_verify` accepts any server certificate
+    /// (for a local mock server only; the real gateway must be verified).
     pub fn new(ws_url: impl Into<String>, skip_tls_verify: bool) -> Self {
         Self {
             ws_url: ws_url.into(),
             skip_tls_verify,
+            thread: Self::default_thread_config(),
         }
+    }
+
+    /// The thread each connection's socket is driven on: 16 KB of PSRAM stack
+    /// on core 0, at the same priority as the executor.
+    pub fn default_thread_config() -> ThreadSpawnConfiguration {
+        ThreadSpawnConfiguration {
+            name: Some(c"ws-transport"),
+            stack_size: 16_384,
+            priority: 5,
+            inherit: false,
+            pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
+            stack_alloc_caps: enumset::enum_set!(MallocCap::Spiram | MallocCap::Cap8bit),
+        }
+    }
+
+    /// Drive the socket on a thread of the caller's choosing instead of
+    /// [`Esp32TransportFactory::default_thread_config`].
+    pub fn with_thread_config(mut self, thread: ThreadSpawnConfiguration) -> Self {
+        self.thread = thread;
+        self
+    }
+}
+
+/// The production WhatsApp gateway (`wacore::net::WHATSAPP_WEB_WS_URL`), with
+/// the server certificate verified against ESP-IDF's root bundle.
+impl Default for Esp32TransportFactory {
+    fn default() -> Self {
+        Self::new(whatsapp_rust::wacore::net::WHATSAPP_WEB_WS_URL, false)
     }
 }
 
@@ -209,27 +242,16 @@ impl TransportFactory for Esp32TransportFactory {
         let shutdown_clone = shutdown.clone();
         let ws_url = self.ws_url.clone();
         let skip_tls = self.skip_tls_verify;
-        // Put this thread's 16 KB stack in PSRAM (not scarce internal DRAM). The
-        // c"ws-transport" name also lets /metrics report its stack high-water mark.
-        // Configures the next spawn from this thread; harmless to re-set per reconnect.
-        esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
-            name: Some(c"ws-transport"),
-            stack_size: 16_384,
-            priority: 5,
-            inherit: false,
-            pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
-            stack_alloc_caps: enumset::enum_set!(
-                esp_idf_svc::hal::task::thread::MallocCap::Spiram
-                    | esp_idf_svc::hal::task::thread::MallocCap::Cap8bit
-            ),
+        // Configures the next spawn from this thread; re-set on every reconnect
+        // because the executor thread spawns other workers in between.
+        self.thread.set()?;
+        let mut thread = std::thread::Builder::new().stack_size(self.thread.stack_size);
+        if let Some(name) = self.thread.name {
+            thread = thread.name(name.to_string_lossy().into_owned());
         }
-        .set()?;
-        std::thread::Builder::new()
-            .name("ws-transport".into())
-            .stack_size(16_384)
-            .spawn(move || {
-                ws_thread(event_tx, data_rx, shutdown_clone, &ws_url, skip_tls);
-            })?;
+        thread.spawn(move || {
+            ws_thread(event_tx, data_rx, shutdown_clone, &ws_url, skip_tls);
+        })?;
 
         let transport = Arc::new(Esp32Transport { data_tx, shutdown });
         Ok((transport, event_rx))
