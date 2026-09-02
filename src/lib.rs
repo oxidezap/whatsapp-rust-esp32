@@ -43,9 +43,8 @@
 //! - **Time**: the Noise handshake needs a roughly correct clock, so start SNTP
 //!   (or set the time some other way) before the first connect.
 //!
-//! The crate's default features are the demo firmware's (`admin`, `mock-server`);
-//! a consumer sets `default-features = false`. The optional [`admin`] module is
-//! the demo's HTTP dashboard; [`supervisor`], [`metrics`] and [`crash`] are the
+//! The optional [`admin`] module (feature `admin`, the only default) is the
+//! demo's HTTP dashboard; [`supervisor`], [`metrics`] and [`crash`] are the
 //! bookkeeping it and the demo firmware share. None of them is needed to run a
 //! `Bot`.
 

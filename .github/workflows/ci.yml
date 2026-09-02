@@ -43,15 +43,15 @@ jobs:
       matrix:
         include:
           - flavor: esp32s3
-            # Exactly what `cargo build --release` produces for the S3 N16R8. No .env
-            # is present, so the firmware reports missing WiFi at runtime; that is
-            # the documented clone-and-build behavior, not a build failure.
-            build: cargo build --release
+            # The S3 N16R8 build against the mock server (what a developer flashes
+            # first). No .env is present, so the firmware reports missing WiFi at
+            # runtime; that is the documented clone-and-build behavior, not a failure.
+            build: cargo build --release --features mock-server
             chip: esp32s3
             out: target/xtensa-esp32s3-espidf/release
           - flavor: esp32c5
             # The RISC-V board: ESP-IDF v5.5.5, selected by the script.
-            build: scripts/build.sh --board esp32c5 --release
+            build: scripts/build.sh --board esp32c5 --release --features mock-server
             chip: esp32c5
             out: target/riscv32imac-esp-espidf/release
           - flavor: qemu
@@ -103,16 +103,17 @@ jobs:
       - name: Build
         run: ${{ matrix.build }}
 
-      # Three configurations the board builds never compile: the library without
-      # the dashboard or the mock server (how a product firmware consumes it), the
-      # unit tests (default features; they cannot run on the target, but they must
-      # keep compiling), and the documented example, also without default
-      # features. Same profile as the build above so esp-idf-sys reuses its output
-      # instead of building ESP-IDF a second time.
-      - name: Check the library without default features, the unit tests and the example
+      # Four configurations the board builds never compile: the library alone
+      # without any feature (how a product firmware consumes it), the demo without
+      # the mock server (the production build), the unit tests (they cannot run on
+      # the target, but they must keep compiling) and the documented example. Same
+      # profile as the build above so esp-idf-sys reuses its output instead of
+      # building ESP-IDF a second time.
+      - name: Check the library, the production demo, the unit tests and the example
         if: matrix.flavor == 'esp32s3'
         run: |
-          cargo check --release --no-default-features
+          cargo check --release --lib --no-default-features
+          cargo check --release
           cargo check --release --tests
           cargo check --release --examples --no-default-features
 

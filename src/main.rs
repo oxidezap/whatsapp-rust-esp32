@@ -55,11 +55,13 @@ const WIFI_PASS: &str = match option_env!("WIFI_PASS") {
 // WebSocket URL of the mock server or WhatsApp gateway. Override via WHATSAPP_WS_URL in .env.
 // Under the `qemu` feature the default is the emulator's view of the host: QEMU's user-mode
 // network hands the guest 10.0.2.15 and exposes the host as 10.0.2.2, so a mock server
-// listening on the host's port 8080 is reachable without any forwarding rule.
+// listening on the host's port 8080 is reachable without any forwarding rule. Without
+// `mock-server` the default is the real gateway, matching the verification that build does.
 const MOCK_SERVER_WS: &str = match option_env!("WHATSAPP_WS_URL") {
     Some(u) => u,
     None if cfg!(feature = "qemu") => "wss://10.0.2.2:8080/ws/chat",
-    None => "wss://192.168.0.4:8080/ws/chat",
+    None if cfg!(feature = "mock-server") => "wss://192.168.0.4:8080/ws/chat",
+    None => whatsapp_rust::wacore::net::WHATSAPP_WEB_WS_URL,
 };
 // Accept whatever certificate the server presents. The mock server mints a fresh
 // self-signed one on every start; the real gateway must be verified.

@@ -79,10 +79,15 @@ codegen-units = 1
 strip = false
 panic = "abort"
 
+[lints.rust]
+# ldproxy announces itself on stderr ("[ldproxy] Running ldproxy"); rustc's
+# `linker_messages` lint would otherwise report that on every link.
+linker_messages = "allow"
+
 [features]
-# The demo firmware's defaults: the dashboard, and the local mock server as the
-# target. A library consumer disables them (`default-features = false`).
-default = ["admin", "mock-server"]
+# The dashboard only. `mock-server` is deliberately not a default: a consumer
+# that forgets `default-features = false` must still get a verified connection.
+default = ["admin"]
 # The HTTP dashboard and API (`admin` module): status, send, pairing code,
 # maintenance. The demo firmware serves it; a library consumer can leave it out.
 admin = ["dep:embedded-svc"]

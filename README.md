@@ -32,17 +32,17 @@ demo bot, and serves a status dashboard over HTTP. See
 > is not affiliated with, endorsed by, or connected to WhatsApp or Meta in any way.
 > Running an unofficial client against the real WhatsApp service can break their Terms
 > of Service and may get the number banned, so test with a spare number and the local
-> mock server. The default `mock-server` cargo feature is deliberately insecure for
-> that local setup (any TLS certificate is accepted, the Noise server certificate is
-> not verified, and the firmware scans its own pairing QR); build without it before
-> pointing this at the real gateway.
+> mock server. The `mock-server` cargo feature is deliberately insecure for that
+> local setup (any TLS certificate is accepted, the Noise server certificate is not
+> verified, and the firmware scans its own pairing QR); it is off by default, and a
+> build without it is what you point at the real gateway.
 
 ## Hardware
 
 | Board | Chip | Flash / PSRAM | ESP-IDF | Build |
 |-------|------|---------------|---------|-------|
-| ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release` |
-| [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release` |
+| ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release --features mock-server` |
+| [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release --features mock-server` |
 
 The PSRAM is required on both: the main async task runs on a 256 KB stack
 allocated from PSRAM, which is far larger than internal SRAM can provide. The
@@ -226,7 +226,7 @@ cp .env.example .env
 ```dotenv
 WIFI_SSID=your-ssid          # 2.4 GHz only
 WIFI_PASS=your-password
-WHATSAPP_WS_URL=wss://192.168.0.4:8080/ws/chat   # optional; mock or gateway
+WHATSAPP_WS_URL=wss://192.168.0.4:8080/ws/chat   # optional; defaults to the mock (with `mock-server`) or the gateway
 WHATSAPP_PUSH_NAME=esp32-test                    # optional; the name the device pairs under
 ADMIN_TOKEN=                                     # optional; see "Securing the dashboard"
 ```
@@ -246,22 +246,23 @@ python -m esp_idf_nvs_partition_gen generate nvs.csv nvs.bin 0x6000
 espflash write-bin 0x9000 nvs.bin        # the `nvs` partition in partitions.csv
 ```
 
-Which server the firmware trusts is the `mock-server` cargo feature, on by default.
-With it the firmware connects with **no** CA configured, so esp-tls applies
-`MBEDTLS_SSL_VERIFY_NONE` and accepts whatever certificate the server presents
-(the mock server, `barback`, mints a fresh ephemeral self-signed cert on every
-start, so there is nothing stable to pin against; this relies on
-`CONFIG_ESP_TLS_INSECURE=y` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` in
-`sdkconfig.defaults`), `whatsapp-rust` skips Noise server-certificate verification,
-and the pairing QR is auto-scanned. For the real WhatsApp gateway, point
-`WHATSAPP_WS_URL` at it and build without the feature:
+Which server the firmware trusts is the `mock-server` cargo feature, off by
+default. With it the firmware defaults to the mock server URL and connects with
+**no** CA configured, so esp-tls applies `MBEDTLS_SSL_VERIFY_NONE` and accepts
+whatever certificate the server presents (the mock server, `barback`, mints a
+fresh ephemeral self-signed cert on every start, so there is nothing stable to pin
+against; this relies on `CONFIG_ESP_TLS_INSECURE=y` +
+`CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` in `sdkconfig.defaults`),
+`whatsapp-rust` skips Noise server-certificate verification, and the pairing QR is
+auto-scanned:
 
 ```bash
-cargo build --release --no-default-features --features admin
+cargo build --release --features mock-server
 ```
 
-The ESP-IDF root certificate bundle and the Noise certificate chain are then both
-verified.
+Without it (a bare `cargo build --release`) the firmware defaults to the real
+WhatsApp gateway and verifies both the ESP-IDF root certificate bundle and the
+Noise certificate chain.
 
 ### Securing the dashboard
 
@@ -295,9 +296,10 @@ access to the board as full access to the account.
 ## Build
 
 ```bash
-cargo build              # ESP32-S3, debug (opt-level "z", fat LTO, ~14 MB ELF with debug info)
-cargo build --release    # ESP32-S3, release
-scripts/build.sh --board esp32c5 --release   # ESP32-C5 (riscv32imac-esp-espidf, ESP-IDF v5.5.5)
+cargo build --features mock-server              # ESP32-S3, debug (opt-level "z", fat LTO, ~14 MB ELF with debug info)
+cargo build --release --features mock-server    # ESP32-S3, release, against the local mock server
+cargo build --release                           # ESP32-S3, release, against the real gateway (see "Configure")
+scripts/build.sh --board esp32c5 --release --features mock-server   # ESP32-C5 (riscv32imac-esp-espidf, ESP-IDF v5.5.5)
 ```
 
 The S3 target (`xtensa-esp32s3-espidf`), `build-std`, and the `MCU` /
@@ -543,7 +545,7 @@ DRAM and that's what OOMs first.
 - **TLS handshake fails against the mock server (`mbedtls_ssl_handshake returned
   -0x2700` / "Failed to verify peer certificate"):** the mock server regenerates its
   self-signed cert on every start, so verification cannot succeed against any pinned CA.
-  Ensure the `mock-server` feature is on (it is by default) **and** that
+  Ensure the build has `--features mock-server` **and** that
   `CONFIG_ESP_TLS_INSECURE=y` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` are in
   `sdkconfig.defaults`, then rebuild + reflash. With those set the firmware skips cert
   verification entirely and the regenerated ephemeral cert no longer matters.

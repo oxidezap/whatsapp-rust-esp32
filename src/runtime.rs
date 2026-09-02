@@ -67,13 +67,12 @@ pub fn spawn_thread(
     if let Some(name) = config.name {
         builder = builder.name(name.to_string_lossy().into_owned());
     }
-    let spawned = builder.spawn(f);
-    let restored = previous
-        .unwrap_or_default()
-        .set()
-        .map_err(|error| anyhow::anyhow!("could not restore the thread configuration: {error}"));
-    let handle = spawned?;
-    restored?;
+    let handle = builder.spawn(f)?;
+    // The thread is already running, so this cannot be a failure of the spawn;
+    // the caller's next spawn would just inherit `config`.
+    if let Err(error) = previous.unwrap_or_default().set() {
+        log::warn!("could not restore the thread configuration after spawning: {error}");
+    }
     Ok(handle)
 }
 
