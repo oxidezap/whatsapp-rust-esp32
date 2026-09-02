@@ -1,0 +1,196 @@
+name: CI
+
+# Two questions, answered in order: does the firmware still build for the real
+# chip, and does it still run on one. The first is the `build` matrix (the board
+# flavor is the bits you would flash; the qemu flavor swaps WiFi for the emulated
+# Ethernet MAC). The second is `qemu-e2e`, which boots the qemu flavor on
+# Espressif's QEMU (an ESP32-S3 with 8 MB PSRAM and an OpenCores NIC), pairs it
+# against the same mock server whatsapp-rust's E2E suite uses, and checks the
+# firmware's own dashboard reports a live session. No board is involved, but the
+# instruction stream, the memory map, the ESP-IDF build and the whole network +
+# crypto stack are the real ones.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes to the repository; the token only needs to read it.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned Xtensa Rust release (esp-rs/rust-build). Bump deliberately: it moves the
+  # rustc the `esp` channel resolves to, and with it every size and timing number.
+  ESP_RUST_VERSION: "1.98.0.0"
+  # Espressif QEMU release used by qemu-e2e, from the dl.espressif.com mirror of the
+  # GitHub asset so the job does not depend on api.github.com.
+  QEMU_RELEASE: "esp-develop-9.2.2-20260417"
+
+jobs:
+  build:
+    name: Build (${{ matrix.flavor }})
+    runs-on: ubuntu-latest
+    # A cold ESP-IDF build is ~20 min; a cached one a few. Anything past this is stuck.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: board
+            # Exactly what `cargo build --release` produces for the N16R8. No .env
+            # is present, so the firmware reports missing WiFi at runtime; that is
+            # the documented clone-and-build behavior, not a build failure.
+            build: cargo build --release
+            out: target/xtensa-esp32s3-espidf/release
+          - flavor: qemu
+            build: scripts/qemu.sh build
+            out: target/qemu/xtensa-esp32s3-espidf/release
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Host tools the ESP-IDF build needs
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            git cmake ninja-build clang python3 python3-venv python3-pip libusb-1.0-0 ccache
+
+      # Installs the `esp` Rust toolchain (Xtensa-enabled rustc + GCC) with espup and
+      # ldproxy, the linker wrapper .cargo/config.toml names.
+      - name: Xtensa Rust toolchain
+        uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+          version: ${{ env.ESP_RUST_VERSION }}
+
+      # ESP-IDF is cloned and built by esp-idf-sys on the first build (several GB
+      # under .embuild). Cache it with the target dir; the key covers everything
+      # that changes what esp-idf-sys produces.
+      - name: Cache ESP-IDF and build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .embuild
+            target
+          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.defaults', 'sdkconfig.qemu', 'components_esp32s3.lock', '.cargo/config.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-
+
+      - name: Build
+        run: ${{ matrix.build }}
+
+      - name: App image and partition size gate
+        run: |
+          python3 -m venv .venv && .venv/bin/pip install -q esptool
+          .venv/bin/esptool --chip esp32s3 elf2image --flash_size 16MB \
+            -o "${{ matrix.out }}/whatsapp-esp32.bin" "${{ matrix.out }}/whatsapp-esp32"
+          scripts/check-app-size.sh "${{ matrix.out }}/whatsapp-esp32.bin" partitions.csv
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: firmware-${{ matrix.flavor }}
+          if-no-files-found: error
+          path: |
+            ${{ matrix.out }}/whatsapp-esp32
+            ${{ matrix.out }}/whatsapp-esp32.bin
+            ${{ matrix.out }}/bootloader.bin
+            ${{ matrix.out }}/partition-table.bin
+
+  # An empty `password:` under `services.*.credentials` is a template error that
+  # GitHub reports as "Unexpected value ''" with no hint about which secret, so
+  # check the secret first and say so. Skipped on fork PRs, which get no secrets;
+  # a same-repo run without it is a misconfiguration and fails here, loudly.
+  mock-server-secret:
+    name: Mock server credentials
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: BARTENDER_GHCR_TOKEN is available to this repository
+        env:
+          TOKEN: ${{ secrets.BARTENDER_GHCR_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::BARTENDER_GHCR_TOKEN is empty. It must be a repository secret, or an organization secret whose repository access includes this (public) repository."
+            exit 1
+          fi
+          echo "secret present"
+
+  qemu-e2e:
+    name: Boot and pair on QEMU (ESP32-S3)
+    # Runs only when the build passed and the credentials check ran and passed;
+    # inherits the fork-PR skip from `mock-server-secret`.
+    needs: [build, mock-server-secret]
+    runs-on: ubuntu-latest
+    # scripts/qemu.sh test caps the boot-to-connected wait at 10 min; this bounds
+    # the rest (image download, QEMU install, a mock server that never answers).
+    timeout-minutes: 30
+    services:
+      mock-server:
+        # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
+        image: ghcr.io/whiskeysockets-devtools/bartender@sha256:9f3a49dd9f944414fbda50571bba5f66f2ab6fdc48001e6803d4c09a1042c78e
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.BARTENDER_GHCR_TOKEN }}
+        ports:
+          - 8080:8080
+        # `local` compresses rotated files by default and refuses to start with
+        # max-file=1 unless compression is off; same three options as the
+        # whatsapp-rust E2E job.
+        options: >-
+          --log-driver local
+          --log-opt max-size=10m
+          --log-opt max-file=1
+          --log-opt compress=false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: firmware-qemu
+          path: target/qemu/xtensa-esp32s3-espidf/release
+
+      - name: Espressif QEMU and esptool
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libsdl2-2.0-0 libslirp0 libglib2.0-0 libpixman-1-0
+          v="${QEMU_RELEASE#esp-develop-}"
+          curl -sSfL -o qemu.tar.xz \
+            "https://dl.espressif.com/github_assets/espressif/qemu/releases/download/${QEMU_RELEASE}/qemu-xtensa-softmmu-esp_develop_${v/-/_}-x86_64-linux-gnu.tar.xz"
+          mkdir -p "$HOME/qemu" && tar -xJf qemu.tar.xz -C "$HOME/qemu"
+          echo "QEMU_XTENSA=$HOME/qemu/qemu/bin/qemu-system-xtensa" >> "$GITHUB_ENV"
+          python3 -m venv .venv && .venv/bin/pip install -q esptool
+          echo "ESPTOOL=$PWD/.venv/bin/esptool" >> "$GITHUB_ENV"
+
+      - name: Wait for mock server
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sk --max-time 5 https://localhost:8080/ > /dev/null 2>&1; then
+              echo "Mock server is ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "Mock server did not become ready"; exit 1
+
+      - name: Boot, pair, and check the dashboard
+        run: scripts/qemu.sh image && scripts/qemu.sh test
+
+      - name: Upload serial log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qemu-serial-log
+          if-no-files-found: ignore
+          path: |
+            target/qemu/xtensa-esp32s3-espidf/release/qemu-serial.log
+            target/qemu/xtensa-esp32s3-espidf/release/qemu-metrics.json

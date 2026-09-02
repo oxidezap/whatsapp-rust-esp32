@@ -30,6 +30,31 @@ pub fn parse_url(url: &str) -> Result<(String, u16, String, bool)> {
     Ok((host.to_string(), port, path.to_string(), use_tls))
 }
 
+/// Under QEMU, a URL that names the host's loopback has to be dialed as the
+/// emulator's gateway instead. Only the dial address changes; the request's
+/// Host header still carries the URL's own authority.
+///
+/// The mock server hands out media and app-state URLs on `https://127.0.0.1:8080`,
+/// which is right for a client running on the same machine and wrong for one
+/// running inside QEMU's user-mode network, where 127.0.0.1 is the guest itself
+/// and the host is 10.0.2.2. Without this the app-state snapshot download fails
+/// on every attempt, the critical sync never completes, and `Event::Connected`
+/// never fires. Only the loopback names are touched; a board build has no
+/// such mapping at all.
+#[cfg(feature = "qemu")]
+fn qemu_host(host: String) -> String {
+    if host == "127.0.0.1" || host == "localhost" {
+        "10.0.2.2".to_string()
+    } else {
+        host
+    }
+}
+
+#[cfg(not(feature = "qemu"))]
+fn qemu_host(host: String) -> String {
+    host
+}
+
 pub struct EspHttpClient {
     skip_tls_verify: bool,
 }
@@ -44,6 +69,8 @@ impl EspHttpClient {
 impl HttpClient for EspHttpClient {
     async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
         let (host, port, path, use_tls) = parse_url(&request.url)?;
+        // The Host header keeps the URL's own authority; only the address dialed
+        // is remapped under QEMU.
         let raw_request = build_raw_request(
             &request.method,
             &path,
@@ -52,7 +79,8 @@ impl HttpClient for EspHttpClient {
             request.body.as_deref(),
         );
 
-        let mut stream = connect_stream(&host, port, use_tls, self.skip_tls_verify)?;
+        let dial = qemu_host(host);
+        let mut stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
         do_request(&mut stream, &raw_request, request.body.as_deref())
     }
 
@@ -60,7 +88,8 @@ impl HttpClient for EspHttpClient {
         let (host, port, path, use_tls) = parse_url(&request.url)?;
         let raw_request = build_raw_request(&request.method, &path, &host, &request.headers, None);
 
-        let stream = connect_stream(&host, port, use_tls, self.skip_tls_verify)?;
+        let dial = qemu_host(host);
+        let stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
         do_streaming_request(stream, &raw_request)
     }
 }

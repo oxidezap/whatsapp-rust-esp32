@@ -1,0 +1,65 @@
+# Dependency updates arrive as a few batched pull requests, not one per crate.
+# Same shape as whatsapp-rust's .github/dependabot.yml, so the two repositories
+# get their bumps on the same day in the same form.
+# Configuration reference:
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # Group PRs, not individual bumps — 5 is headroom for the two groups below
+    # plus anything Dependabot has to split out (a security advisory opens its
+    # own PR regardless of grouping).
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    groups:
+      # The routine weekly batch: one PR, one CI run (board + QEMU), one merge.
+      cargo:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      # Majors ride in their own PR so a breaking bump that needs code changes
+      # never holds the routine batch hostage. They stay grouped rather than
+      # one-per-crate because most of this tree is 0.x, where Dependabot counts
+      # 0.52 -> 0.53 as a *minor* update even though Cargo treats it as
+      # breaking; the split is only about keeping the rare loud PR separate
+      # from the quiet one.
+      cargo-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
+    # `whatsapp-rust` is a git dependency pinned by commit (see Cargo.toml), and
+    # Dependabot only follows git dependencies that track a semver tag, so it is
+    # never in these PRs. Moving that pin is a deliberate, hand-made change: the
+    # esp-idf-svc / esp-idf-hal pair is the one to watch for majors here, as
+    # both must move together and each one regenerates the ESP-IDF bindings.
+
+  # Actions are pinned to commit SHAs with the version in a trailing comment
+  # (.github/workflows/ci.yml); Dependabot updates the SHA and the comment in
+  # place. `esp-rs/xtensa-toolchain` is included on purpose: its releases track
+  # espup, not a Rust version, so a bump there is an ordinary action update.
+  # The Rust release itself is pinned separately by ESP_RUST_VERSION in the
+  # workflow and is raised by hand.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"
