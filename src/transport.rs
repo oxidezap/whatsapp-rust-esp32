@@ -215,7 +215,9 @@ impl Esp32TransportFactory {
     }
 
     /// Drive the socket on a thread of the caller's choosing instead of
-    /// [`Esp32TransportFactory::default_thread_config`].
+    /// [`Esp32TransportFactory::default_thread_config`]. The dashboard's
+    /// `/metrics` reports the stack high-water mark of the thread named
+    /// `ws-transport`; another name just drops out of that report.
     pub fn with_thread_config(mut self, thread: ThreadSpawnConfiguration) -> Self {
         self.thread = thread;
         self
@@ -242,14 +244,7 @@ impl TransportFactory for Esp32TransportFactory {
         let shutdown_clone = shutdown.clone();
         let ws_url = self.ws_url.clone();
         let skip_tls = self.skip_tls_verify;
-        // Configures the next spawn from this thread; re-set on every reconnect
-        // because the executor thread spawns other workers in between.
-        self.thread.set()?;
-        let mut thread = std::thread::Builder::new().stack_size(self.thread.stack_size);
-        if let Some(name) = self.thread.name {
-            thread = thread.name(name.to_string_lossy().into_owned());
-        }
-        thread.spawn(move || {
+        crate::runtime::spawn_thread(&self.thread, move || {
             ws_thread(event_tx, data_rx, shutdown_clone, &ws_url, skip_tls);
         })?;
 

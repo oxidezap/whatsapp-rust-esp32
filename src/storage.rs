@@ -85,10 +85,8 @@ impl FlashWorker {
         let (jobs, receiver) = mpsc::sync_channel::<FlashJob>(1);
         // Writing flash switches the cache off, so every byte this thread touches
         // has to be in internal RAM; a stack in PSRAM would fault the moment the
-        // write begins. `ThreadSpawnConfiguration` applies to the next thread the
-        // calling thread spawns, and the other workers set it to Spiram, so state
-        // it here rather than depending on this being constructed first.
-        esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
+        // write begins. Not configurable for that reason.
+        let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
             stack_size: 32 * 1024,
             priority: 5,
@@ -98,17 +96,13 @@ impl FlashWorker {
                 esp_idf_svc::hal::task::thread::MallocCap::Internal
                     | esp_idf_svc::hal::task::thread::MallocCap::Cap8bit
             ),
-        }
-        .set()
-        .map_err(|error| anyhow::anyhow!("could not configure the NVS worker: {error}"))?;
-        std::thread::Builder::new()
-            .name("wa-nvs".to_string())
-            .stack_size(32 * 1024)
-            .spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    job(&flash);
-                }
-            })?;
+        };
+        crate::runtime::spawn_thread(&thread, move || {
+            while let Ok(job) = receiver.recv() {
+                job(&flash);
+            }
+        })
+        .map_err(|error| anyhow::anyhow!("could not start the NVS worker: {error}"))?;
         Ok(Self { jobs })
     }
 

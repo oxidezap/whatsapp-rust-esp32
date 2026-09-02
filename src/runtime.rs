@@ -50,6 +50,33 @@ impl<F: Future<Output = ()> + Unpin> Future for AbortableFuture<F> {
 
 pub type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// Spawn a `std` thread whose FreeRTOS task has `config`'s name, stack size,
+/// stack memory, priority and core.
+///
+/// `ThreadSpawnConfiguration::set` is sticky: it configures every thread the
+/// calling thread spawns from then on. This applies it for the one spawn and
+/// restores what was there before, so a caller's own thread configuration is
+/// never silently replaced by a worker's.
+pub fn spawn_thread(
+    config: &ThreadSpawnConfiguration,
+    f: impl FnOnce() + Send + 'static,
+) -> anyhow::Result<std::thread::JoinHandle<()>> {
+    let previous = ThreadSpawnConfiguration::get();
+    config.set()?;
+    let mut builder = std::thread::Builder::new().stack_size(config.stack_size);
+    if let Some(name) = config.name {
+        builder = builder.name(name.to_string_lossy().into_owned());
+    }
+    let spawned = builder.spawn(f);
+    let restored = previous
+        .unwrap_or_default()
+        .set()
+        .map_err(|error| anyhow::anyhow!("could not restore the thread configuration: {error}"));
+    let handle = spawned?;
+    restored?;
+    Ok(handle)
+}
+
 struct BlockingJob {
     run: Box<dyn FnOnce() + Send + 'static>,
     done: async_channel::Sender<()>,
@@ -91,17 +118,13 @@ impl BlockingWorker {
         Self::start_with(Self::default_thread_config())
     }
 
-    /// Start the worker on a thread of the caller's choosing. The stack size
-    /// and name are taken from `config`, so the FreeRTOS task and the Rust
-    /// thread agree on both.
+    /// Start the worker on a thread of the caller's choosing (see
+    /// [`spawn_thread`]). The dashboard's `/metrics` reports the stack
+    /// high-water mark of the thread named `wa-blocking`; another name is
+    /// fine, it just drops out of that report.
     pub fn start_with(config: ThreadSpawnConfiguration) -> anyhow::Result<Self> {
         let (jobs, receiver) = async_channel::bounded::<BlockingJob>(1);
-        config.set()?;
-        let mut thread = std::thread::Builder::new().stack_size(config.stack_size);
-        if let Some(name) = config.name {
-            thread = thread.name(name.to_string_lossy().into_owned());
-        }
-        thread.spawn(move || {
+        spawn_thread(&config, move || {
             while let Ok(job) = receiver.recv_blocking() {
                 // Dropping the awaiting future cancels work that has not
                 // started. A closure already running cannot be cancelled.
@@ -175,9 +198,6 @@ impl Esp32Runtime {
     /// Create a runtime with its own `esp_timer` service and a
     /// [`BlockingWorker`] on its default thread, paired with the
     /// [`Esp32Executor`] that will run everything spawned on it.
-    ///
-    /// The worker thread is spawned here, so a [`ThreadSpawnConfiguration`] for
-    /// the executor thread must be `set()` after this returns.
     pub fn create_default() -> anyhow::Result<(Self, Esp32Executor)> {
         Self::create(BlockingWorker::start()?)
     }
@@ -212,6 +232,21 @@ pub struct Esp32Executor {
 }
 
 impl Esp32Executor {
+    /// The thread [`Esp32Executor::block_on`] is meant to run on: `wa-main`,
+    /// 256 KB of PSRAM stack (the send path with a quoted reply and an edit
+    /// has deep frames; internal RAM could not spare that), core 0, priority 5.
+    /// Spawn it with [`spawn_thread`].
+    pub fn default_thread_config() -> ThreadSpawnConfiguration {
+        ThreadSpawnConfiguration {
+            name: Some(c"wa-main"),
+            stack_size: 256 * 1024,
+            priority: 5,
+            inherit: false,
+            pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
+            stack_alloc_caps: enumset::enum_set!(MallocCap::Spiram | MallocCap::Cap8bit),
+        }
+    }
+
     /// Drive `main` to completion on the calling thread, running every future
     /// spawned through the paired [`Esp32Runtime`] alongside it.
     ///
@@ -220,9 +255,9 @@ impl Esp32Executor {
     /// `Bot` (rebuilding it after an exit) and keeps the `Esp32Runtime` alive,
     /// which is what keeps the spawn queue open.
     ///
-    /// The thread this runs on needs a large stack: `whatsapp-rust`'s send path
-    /// has deep frames, and the demo firmware gives it 256 KB from PSRAM (see
-    /// `src/main.rs`).
+    /// Not for the ESP-IDF main task: its stack (`CONFIG_ESP_MAIN_TASK_STACK_SIZE`)
+    /// is far too small. Run it on a thread from
+    /// [`Esp32Executor::default_thread_config`].
     pub fn block_on<T>(self, main: impl Future<Output = T>) -> T {
         // `UnboundQueue` (a growable VecDeque) rather than the default 64-slot
         // `BoundQueue`: a burst of more than 64 runnable tasks must queue, not

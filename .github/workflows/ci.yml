@@ -103,13 +103,15 @@ jobs:
       - name: Build
         run: ${{ matrix.build }}
 
-      # The library is also consumed without the dashboard; that configuration
-      # has no other build, and this one reuses the target dir the build just filled.
-      - name: Check the library without default features, and the unit tests
+      # The library is also consumed without the dashboard or the mock server;
+      # that configuration has no other build. Same profile as the build above so
+      # esp-idf-sys reuses its output instead of building ESP-IDF a second time.
+      - name: Check the library without default features, the unit tests and the example
         if: matrix.flavor == 'esp32s3'
         run: |
-          cargo check --no-default-features
-          cargo check --tests
+          cargo check --release --no-default-features
+          cargo check --release --tests
+          cargo check --release --examples --no-default-features
 
       - name: App image and partition size gate
         run: |

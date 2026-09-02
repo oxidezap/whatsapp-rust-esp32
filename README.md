@@ -32,9 +32,10 @@ demo bot, and serves a status dashboard over HTTP. See
 > is not affiliated with, endorsed by, or connected to WhatsApp or Meta in any way.
 > Running an unofficial client against the real WhatsApp service can break their Terms
 > of Service and may get the number banned, so test with a spare number and the local
-> mock server. A few flags here are deliberately insecure for that local setup
-> (`SKIP_TLS_VERIFY`, the `danger-skip-cert-chain-verify` feature, and `MOCK_AUTOPAIR`);
-> turn them off before pointing this at the real gateway.
+> mock server. The default `mock-server` cargo feature is deliberately insecure for
+> that local setup (any TLS certificate is accepted, the Noise server certificate is
+> not verified, and the firmware scans its own pairing QR); build without it before
+> pointing this at the real gateway.
 
 ## Hardware
 
@@ -89,46 +90,76 @@ anyhow = "1"
 log = "0.4"
 ```
 
+`examples/minimal.rs`, which CI compiles for the target (this is a copy):
+
 ```rust
+//! The smallest firmware on the library: the same `Bot::builder()` code as on a
+//! desktop, with the four ESP32 platform values plugged in.
+//!
+//! Compiled by CI (`cargo check --release --examples`) so it cannot rot; it does
+//! not bring the network up, so it is not a runnable image. `src/main.rs` is the
+//! complete firmware (WiFi, SNTP, supervisor, dashboard).
+
 use std::sync::Arc;
+
+use whatsapp_esp32::runtime::spawn_thread;
+use whatsapp_esp32::{Esp32Executor, Esp32Runtime, Esp32TransportFactory, EspHttpClient, NvsStore};
 use whatsapp_rust::bot::Bot;
 use whatsapp_rust::prelude::MessageExt as _;
-use whatsapp_esp32::{Esp32Runtime, Esp32TransportFactory, EspHttpClient, NvsStore};
 
+// The Rust heap goes to PSRAM; internal DRAM stays free for FreeRTOS and mbedTLS.
 #[global_allocator]
 static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
     whatsapp_esp32::psram_alloc::PsramAllocator;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
-    // Bring up WiFi and SNTP, and whatever else the board needs (see src/main.rs).
+    esp_idf_svc::log::EspLogger::initialize_default();
 
+    // Bring WiFi and SNTP up here: the Noise handshake needs a roughly correct
+    // clock, and the socket needs a route. See `bring_up_wifi` in src/main.rs.
+
+    // Flash-backed: needs a `wa_store` NVS partition (see partitions.csv).
     let store = Arc::new(NvsStore::open_default()?);
+    // One runtime, one executor. The runtime is cheap to clone; clone it per Bot.
     let (runtime, executor) = Esp32Runtime::create_default()?;
 
-    // Runs on this thread until the future completes; give the thread a large
-    // PSRAM stack (the demo uses 256 KB) and never let the future return.
-    executor.block_on(async move {
-        let bot = Bot::builder()
-            .with_backend_arc(store)
-            .with_transport_factory(Esp32TransportFactory::default())
-            .with_http_client(EspHttpClient::default())
-            .with_runtime(runtime.clone())
-            .with_wanted_pre_key_count(50) // 812 keypairs at login would exhaust DRAM
-            .skip_history_sync()           // history is not persisted; its sync churns ~14 MB
-            .on_qr_code(|code, timeout| async move {
-                log::info!("scan this QR (valid for {timeout:?}): {code}");
-            })
-            .on_message(|ctx| async move {
-                if ctx.message.text_content() == Some("ping") {
-                    let _ = ctx.reply("pong").await;
-                }
-            })
-            .build()
-            .await?;
-        bot.run().await;
-        Ok(())
-    })
+    // The executor needs a large stack (the send path has deep frames), which
+    // only PSRAM can afford; `default_thread_config` is 256 KB there.
+    let main_thread = spawn_thread(&Esp32Executor::default_thread_config(), move || {
+        executor.block_on(async move {
+            let bot = Bot::builder()
+                .with_backend_arc(store)
+                .with_transport_factory(Esp32TransportFactory::default())
+                .with_http_client(EspHttpClient::default())
+                .with_runtime(runtime.clone())
+                // 812 X25519 keypairs at login (the default) exhaust internal DRAM.
+                .with_wanted_pre_key_count(50)
+                // History is not persisted here, and its sync churns ~14 MB.
+                .skip_history_sync()
+                .on_qr_code(|code, timeout| async move {
+                    log::info!("scan this QR (valid for {timeout:?}): {code}");
+                })
+                .on_message(|ctx| async move {
+                    if ctx.message.text_content() == Some("ping") {
+                        if let Err(error) = ctx.reply("pong").await {
+                            log::error!("reply failed: {error}");
+                        }
+                    }
+                })
+                .build()
+                .await;
+            match bot {
+                // Runs until logout or `Client::disconnect`; a firmware normally
+                // loops here and rebuilds the bot (see `run_whatsapp` in src/main.rs).
+                Ok(bot) => bot.run().await,
+                Err(error) => log::error!("could not build the bot: {error}"),
+            }
+        })
+    })?;
+    main_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("executor thread panicked"))
 }
 ```
 
@@ -145,7 +176,8 @@ What the firmware around it has to provide, all of which `src/main.rs`,
 
 - **PSRAM**, enabled for `malloc` and for task stacks
   (`CONFIG_SPIRAM_USE_MALLOC`, `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`), and a
-  large stack for the executor thread.
+  large stack for the executor thread (`Esp32Executor::default_thread_config`
+  takes 256 KB there).
 - **A `wa_store` NVS partition** (1 MB here), or any name passed to `NvsStore::open`.
 - **mbedTLS allocating from external memory** (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`),
   and the **task watchdog not checking the idle task** on the executor's core,
@@ -214,20 +246,22 @@ python -m esp_idf_nvs_partition_gen generate nvs.csv nvs.bin 0x6000
 espflash write-bin 0x9000 nvs.bin        # the `nvs` partition in partitions.csv
 ```
 
-TLS verification is a source constant in `src/main.rs`:
+Which server the firmware trusts is the `mock-server` cargo feature, on by default.
+With it the firmware connects with **no** CA configured, so esp-tls applies
+`MBEDTLS_SSL_VERIFY_NONE` and accepts whatever certificate the server presents
+(the mock server, `barback`, mints a fresh ephemeral self-signed cert on every
+start, so there is nothing stable to pin against; this relies on
+`CONFIG_ESP_TLS_INSECURE=y` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` in
+`sdkconfig.defaults`), `whatsapp-rust` skips Noise server-certificate verification,
+and the pairing QR is auto-scanned. For the real WhatsApp gateway, point
+`WHATSAPP_WS_URL` at it and build without the feature:
 
-```rust
-const SKIP_TLS_VERIFY: bool = true; // skip server cert verification (mock server)
+```bash
+cargo build --release --no-default-features --features admin
 ```
 
-For a local mock server keep `SKIP_TLS_VERIFY = true`: the firmware then connects with
-**no** CA configured, so esp-tls applies `MBEDTLS_SSL_VERIFY_NONE` and accepts whatever
-certificate the server presents. This is required because the mock server (`barback`)
-mints a fresh ephemeral self-signed cert on every start, so there is nothing stable to
-pin against. It relies on `CONFIG_ESP_TLS_INSECURE=y` +
-`CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` in `sdkconfig.defaults`. For the real
-WhatsApp gateway, point `WHATSAPP_WS_URL` at it and set `SKIP_TLS_VERIFY = false` so the
-ESP-IDF root certificate bundle is used (verification enforced).
+The ESP-IDF root certificate bundle and the Noise certificate chain are then both
+verified.
 
 ### Securing the dashboard
 
@@ -503,13 +537,13 @@ DRAM and that's what OOMs first.
 
 ## Troubleshooting
 
-- **`Stack canary watchpoint triggered` / stack overflow:** bump
-  `MAIN_TASK_STACK_SIZE` in `src/main.rs` (the full send path with a quoted reply
-  and edit is stack-heavy).
+- **`Stack canary watchpoint triggered` / stack overflow:** give the executor
+  thread more stack (`Esp32Executor::default_thread_config` is 256 KB; the full
+  send path with a quoted reply and edit is stack-heavy).
 - **TLS handshake fails against the mock server (`mbedtls_ssl_handshake returned
   -0x2700` / "Failed to verify peer certificate"):** the mock server regenerates its
   self-signed cert on every start, so verification cannot succeed against any pinned CA.
-  Ensure `SKIP_TLS_VERIFY = true` in `src/main.rs` **and** that
+  Ensure the `mock-server` feature is on (it is by default) **and** that
   `CONFIG_ESP_TLS_INSECURE=y` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` are in
   `sdkconfig.defaults`, then rebuild + reflash. With those set the firmware skips cert
   verification entirely and the regenerated ephemeral cert no longer matters.

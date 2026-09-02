@@ -18,57 +18,21 @@
 //!
 //! # Example
 //!
+//! `examples/minimal.rs`, which CI compiles for the target:
+//!
 //! ```no_run
-//! use std::sync::Arc;
-//! use whatsapp_rust::bot::Bot;
-//! use whatsapp_rust::prelude::MessageExt as _;
-//! use whatsapp_esp32::{Esp32Runtime, Esp32TransportFactory, EspHttpClient, NvsStore};
-//!
-//! # fn example() -> anyhow::Result<()> {
-//! // Bring up WiFi, SNTP and whatever else the board needs first (see src/main.rs).
-//!
-//! // The store is flash-backed: it needs a `wa_store` NVS partition in partitions.csv.
-//! let store = Arc::new(NvsStore::open_default()?);
-//! // One runtime, one executor. The runtime is cheap to clone; clone it per Bot.
-//! let (runtime, executor) = Esp32Runtime::create_default()?;
-//!
-//! // Runs on the calling thread until the future completes, so give this thread
-//! // a big (PSRAM) stack and let the future supervise the bot forever.
-//! executor.block_on(async move {
-//!     let bot = Bot::builder()
-//!         .with_backend_arc(store)
-//!         .with_transport_factory(Esp32TransportFactory::default())
-//!         .with_http_client(EspHttpClient::default())
-//!         .with_runtime(runtime.clone())
-//!         // 50 instead of the 812 default: generating 812 X25519 keypairs at
-//!         // login exhausts internal DRAM.
-//!         .with_wanted_pre_key_count(50)
-//!         // History is not persisted here, and its sync churns ~14 MB.
-//!         .skip_history_sync()
-//!         .on_qr_code(|code, timeout| async move {
-//!             log::info!("scan this QR (valid for {timeout:?}): {code}");
-//!         })
-//!         .on_message(|ctx| async move {
-//!             if ctx.message.text_content() == Some("ping") {
-//!                 let _ = ctx.reply("pong").await;
-//!             }
-//!         })
-//!         .build()
-//!         .await?;
-//!     bot.run().await;
-//!     Ok::<(), anyhow::Error>(())
-//! })
-//! # }
+#![doc = include_str!("../examples/minimal.rs")]
 //! ```
 //!
-//! Everything in that example except the four `with_*` values and
-//! `executor.block_on` is documented by `whatsapp-rust` itself.
+//! Everything in it except the four `with_*` values, the executor thread and
+//! the allocator is documented by `whatsapp-rust` itself.
 //!
 //! # What the firmware around it has to provide
 //!
-//! - **PSRAM**, and a large stack for the executor thread: the demo gives it
-//!   256 KB from PSRAM. Install [`psram_alloc::PsramAllocator`] as the global
-//!   allocator to keep the Rust heap out of internal DRAM as well.
+//! - **PSRAM**, and a large stack for the executor thread
+//!   ([`Esp32Executor::default_thread_config`] takes 256 KB there). Install
+//!   [`psram_alloc::PsramAllocator`] as the global allocator to keep the Rust
+//!   heap out of internal DRAM as well.
 //! - **A `wa_store` NVS partition** (1 MB in the demo's `partitions.csv`), or
 //!   any other name passed to [`NvsStore::open`].
 //! - **`sdkconfig.defaults`** along the lines of the demo's: PSRAM enabled for
@@ -79,8 +43,9 @@
 //! - **Time**: the Noise handshake needs a roughly correct clock, so start SNTP
 //!   (or set the time some other way) before the first connect.
 //!
-//! The optional [`admin`] module (feature `admin`, on by default) is the demo's
-//! HTTP dashboard; [`supervisor`], [`metrics`] and [`crash`] are the
+//! The crate's default features are the demo firmware's (`admin`, `mock-server`);
+//! a consumer sets `default-features = false`. The optional [`admin`] module is
+//! the demo's HTTP dashboard; [`supervisor`], [`metrics`] and [`crash`] are the
 //! bookkeeping it and the demo firmware share. None of them is needed to run a
 //! `Bot`.
 

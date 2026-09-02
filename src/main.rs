@@ -24,6 +24,7 @@ use whatsapp_rust::wacore::types::events::{
 
 #[cfg(feature = "admin")]
 use whatsapp_esp32::admin;
+use whatsapp_esp32::runtime::spawn_thread;
 use whatsapp_esp32::supervisor::{
     run_maintenance, ActiveClient, DeviceStatus, MaintenanceAction, MaintenanceCoordinator,
     MaintenanceRequest, MessageLogEntry,
@@ -60,14 +61,15 @@ const MOCK_SERVER_WS: &str = match option_env!("WHATSAPP_WS_URL") {
     None if cfg!(feature = "qemu") => "wss://10.0.2.2:8080/ws/chat",
     None => "wss://192.168.0.4:8080/ws/chat",
 };
-// Accept the bundled self-signed CA (mock server). Set false for the real WhatsApp gateway.
-const SKIP_TLS_VERIFY: bool = true;
+// Accept whatever certificate the server presents. The mock server mints a fresh
+// self-signed one on every start; the real gateway must be verified.
+const SKIP_TLS_VERIFY: bool = cfg!(feature = "mock-server");
 
 // DEV-ONLY auto-pair: when the bot emits a pairing QR, POST it to the bartender mock
 // server's `/admin/mock-phone/scan-qr` endpoint, which completes pairing as if a phone
 // scanned it (mirrors whatsapp-rust e2e `spawn_qr_autoresponder_http`). Set false for the
 // real WhatsApp gateway (no such endpoint exists there; you scan with your phone).
-const MOCK_AUTOPAIR: bool = true;
+const MOCK_AUTOPAIR: bool = cfg!(feature = "mock-server");
 
 // The name this device pairs under. Against the mock server the push name is also
 // what selects the account, so two boards with the same name share one number.
@@ -101,10 +103,6 @@ const ADMIN_PORT: u16 = admin::DEFAULT_ADMIN_PORT;
 const PING_TRIGGER: &str = "\u{1f980}ping"; // 🦀ping
 const PONG_TEXT: &str = "\u{1f3d3} Pong!"; // 🏓 Pong!
 const REACTION_EMOJI: &str = "\u{1f3d3}"; // 🏓
-
-/// Stack for the main async executor thread, in PSRAM (so 256 KB is cheap). The full
-/// send path (reaction + quoted reply + edit) has deep frames and needs every byte.
-const MAIN_TASK_STACK_SIZE: usize = 256 * 1024;
 
 /// Why the last client instance stopped, and what the supervisor does about it.
 /// Ordered by severity so concurrent events keep the strongest outcome.
@@ -293,9 +291,7 @@ fn main() -> Result<()> {
     let device_status = Arc::new(DeviceStatus::new());
     let active_client = Arc::new(ActiveClient::new());
     let maintenance = Arc::new(MaintenanceCoordinator::new());
-    // The runtime every Bot is built with, and the executor that runs them. This
-    // also starts the `wa-blocking` worker thread, so it comes before the spawn
-    // configuration below: each `set()` configures the next thread spawned.
+    // The runtime every Bot is built with, and the executor that runs them.
     let (runtime, executor) = Esp32Runtime::create_default()?;
     // The admin server spawns onto the same executor (send, pair code,
     // maintenance), through the runtime's queue so it can tell when a spawn
@@ -321,33 +317,17 @@ fn main() -> Result<()> {
         unsafe { esp_idf_svc::sys::esp_get_free_internal_heap_size() }
     );
 
-    // Configure PSRAM stack for the main async thread
-    esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
-        name: Some(c"wa-main"),
-        stack_size: MAIN_TASK_STACK_SIZE,
-        priority: 5,
-        inherit: false,
-        pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
-        stack_alloc_caps: enumset::enum_set!(
-            esp_idf_hal::task::thread::MallocCap::Spiram
-                | esp_idf_hal::task::thread::MallocCap::Cap8bit
-        ),
-    }
-    .set()?;
-
-    let jh = std::thread::Builder::new()
-        .stack_size(MAIN_TASK_STACK_SIZE)
-        .spawn(move || {
-            run_executor(
-                executor,
-                runtime,
-                store,
-                device_status,
-                active_client,
-                maintenance,
-                push_name,
-            );
-        })?;
+    let jh = spawn_thread(&Esp32Executor::default_thread_config(), move || {
+        run_executor(
+            executor,
+            runtime,
+            store,
+            device_status,
+            active_client,
+            maintenance,
+            push_name,
+        );
+    })?;
 
     if let Err(e) = jh.join() {
         error!("Executor thread panicked: {:?}", e);
@@ -649,7 +629,8 @@ async fn run_whatsapp(
         };
         // `Runtime::sleep` fails open (returns at once if no esp_timer could be
         // armed), so check the clock: a restart storm must not follow a timer
-        // allocation failure.
+        // allocation failure. The fallback waits on the blocking worker, never
+        // on the executor thread, so the watchdog feed keeps running meanwhile.
         let delay_dur = std::time::Duration::from_secs(delay);
         let start = std::time::Instant::now();
         while start.elapsed() < delay_dur {
@@ -657,7 +638,11 @@ async fn run_whatsapp(
                 .sleep(delay_dur.saturating_sub(start.elapsed()))
                 .await;
             if start.elapsed() < delay_dur {
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                runtime
+                    .spawn_blocking(Box::new(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(250))
+                    }))
+                    .await;
             }
         }
     }
