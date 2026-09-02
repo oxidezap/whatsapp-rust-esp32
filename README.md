@@ -79,8 +79,14 @@ own documentation for everything else.
 
 ```toml
 [dependencies]
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", default-features = false }
+# Both from git, at the same whatsapp-rust revision this crate's Cargo.toml
+# names: two different whatsapp_rust packages in one build would give the
+# Bot builder trait objects the platform types do not implement.
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "ec72862c315cfea50c27404a0777a6f9bfae4d84", default-features = false }
 whatsapp-esp32 = { git = "https://github.com/oxidezap/whatsapp-rust-esp32", default-features = false }
+esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
+anyhow = "1"
+log = "0.4"
 ```
 
 ```rust
@@ -149,13 +155,11 @@ What the firmware around it has to provide, all of which `src/main.rs`,
 
 Since `whatsapp-rust` 0.7.0 a single upstream dependency is enough: the crate re-exports
 `wacore`, `waproto`, `buffa` and the shared support crates, so they can never
-resolve to a different version than the one it was built against. It is pulled
-from crates.io with `default-features = false`, which drops the desktop-only
-features (tokio, SQLite, ureq, SIMD):
-
-```toml
-whatsapp-rust = { version = "0.7.0", default-features = false }
-```
+resolve to a different version than the one it was built against. It is pinned
+to a git revision in `Cargo.toml` (the builder options this firmware relies on
+are newer than the 0.7.0 release) with `default-features = false`, which drops
+the desktop-only features (tokio, SQLite, ureq, SIMD). A consumer of the library
+must name the same revision.
 
 Everything is then reached through it — `whatsapp_rust::wacore::net`,
 `whatsapp_rust::prelude::{wa, MessageField, ...}`, `whatsapp_rust::async_trait`,
@@ -241,7 +245,7 @@ With one set, `/send`, `/messages`, `/pair-code`, `/reset`, `/reboot`, and
 `X-Admin-Token`. The dashboard has a field for it and keeps it in that browser's
 session storage. The status routes (`/`, `/device`, `/metrics`, `/health`) stay
 open so the page can render before you type it in; sensitive pairing fields
-(`qr_code`, `pair_code`) on `/device` are redacted until the token is provided.
+(`qr_code`, `pair_code`, `pn`, `lid`) on `/device` are redacted until the token is provided.
 
 Leave it unset and the device behaves as it always has, with a warning in the
 boot log naming what is exposed. Like the push name, it can also be provisioned

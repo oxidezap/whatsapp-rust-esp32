@@ -81,6 +81,7 @@ pub enum MaintenanceAction {
     Reset,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenanceRequest {
     /// The caller must start the maintenance task.
     Start,
@@ -323,6 +324,14 @@ impl DeviceStatus {
         self.inner.lock().unwrap_or_else(recover_poisoned)
     }
 
+    pub fn is_connected(&self) -> bool {
+        self.lock().connected
+    }
+
+    pub fn qr_code(&self) -> Option<String> {
+        self.lock().qr_code.clone()
+    }
+
     pub fn set_qr_code(&self, code: String) {
         let mut s = self.lock();
         s.qr_code = Some(code);
@@ -453,11 +462,13 @@ impl DeviceStatus {
                 }
             }
         };
+        // The account identifiers are as private as the messages: without the
+        // token the page learns only whether the device is linked and online.
         serde_json::json!({
             "qr_code": if authenticated { s.qr_code.as_deref() } else { None },
             "connected": s.connected,
-            "pn": s.pn,
-            "lid": s.lid,
+            "pn": if authenticated { s.pn.as_deref() } else { None },
+            "lid": if authenticated { s.lid.as_deref() } else { None },
             "pair_code": pair_code,
         })
         .to_string()

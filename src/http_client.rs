@@ -519,7 +519,10 @@ mod tests {
 
         let data = b"hello world from esp32";
         let mut cursor = std::io::Cursor::new(data);
-        let mut reader = ExactLengthReader::new(&mut cursor, data.len() as u64);
+        let mut reader = ExactLengthReader {
+            inner: &mut cursor,
+            remaining: data.len() as u64,
+        };
 
         // Contract: empty buffer read must return Ok(0) without consuming remaining bytes
         let mut empty_buf = [];

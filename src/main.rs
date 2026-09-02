@@ -83,6 +83,7 @@ const DEFAULT_PUSH_NAME: &str = match option_env!("WHATSAPP_PUSH_NAME") {
 /// Same two sources as the push name: `.env` at build time, or the `wa`
 /// namespace of the default NVS partition (key `admin_token`) at flash time.
 /// Empty means unset, which keeps the historical unauthenticated behavior.
+#[cfg(feature = "admin")]
 const DEFAULT_ADMIN_TOKEN: &str = match option_env!("ADMIN_TOKEN") {
     Some(t) => t,
     None => "",
@@ -258,7 +259,8 @@ fn main() -> Result<()> {
     // Never logged: it is a shared secret, and the boot log is not private.
     // If an admin token was configured in NVS but cannot be read (corrupt NVS or
     // type error), fail startup instead of silently disabling authentication.
-    let _admin_token = match nvs_string(&nvs, "admin_token") {
+    #[cfg(feature = "admin")]
+    let admin_token = match nvs_string(&nvs, "admin_token") {
         Ok(Some(token)) => Some(token),
         Ok(None) => Some(DEFAULT_ADMIN_TOKEN.to_string()).filter(|t| !t.is_empty()),
         Err(e) => {
@@ -305,7 +307,7 @@ fn main() -> Result<()> {
         active_client.clone(),
         maintenance.clone(),
         runtime.spawner(),
-        Arc::new(admin::AdminAuth::new(_admin_token)),
+        Arc::new(admin::AdminAuth::new(admin_token)),
         ADMIN_PORT,
     )?;
     #[cfg(feature = "admin")]
