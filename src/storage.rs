@@ -38,7 +38,9 @@ struct StoreInner {
     // SignalStore. sessions/prekeys are read per-device on every encrypt/decrypt and
     // the trait returns Bytes, so store them as Bytes: writers copy once, readers
     // hand back a refcount clone (no per-read heap copy).
-    identities: HashMap<String, Vec<u8>>,
+    // The trait speaks in `[u8; 32]`, so store exactly that: no heap allocation
+    // per identity and no fallible slice-to-array conversion on every read.
+    identities: HashMap<String, [u8; 32]>,
     sessions: HashMap<String, Bytes>,
     prekeys: HashMap<u32, Bytes>,
     signed_prekeys: HashMap<u32, Vec<u8>>,
@@ -212,18 +214,12 @@ impl DeviceStatus {
 #[async_trait]
 impl SignalStore for MemoryStore {
     async fn put_identity(&self, address: &str, key: [u8; 32]) -> Result<()> {
-        self.lock()
-            .identities
-            .insert(address.to_string(), key.to_vec());
+        self.lock().identities.insert(address.to_string(), key);
         Ok(())
     }
 
     async fn load_identity(&self, address: &str) -> Result<Option<[u8; 32]>> {
-        Ok(self
-            .lock()
-            .identities
-            .get(address)
-            .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok()))
+        Ok(self.lock().identities.get(address).copied())
     }
 
     async fn delete_identity(&self, address: &str) -> Result<()> {
