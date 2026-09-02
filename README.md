@@ -40,13 +40,13 @@ demo bot, and serves a status dashboard over HTTP. See
 
 | Board | Chip | Flash / PSRAM | ESP-IDF | Build |
 |-------|------|---------------|---------|-------|
-| ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.4 | `cargo build --release` |
+| ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release` |
 | [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release` |
 
 The PSRAM is required on both: the main async task runs on a 256 KB stack
 allocated from PSRAM, which is far larger than internal SRAM can provide. The
-source is the same for both boards; what differs is the target triple, the
-ESP-IDF version and one chip-specific `sdkconfig.defaults.<chip>` overlay (PSRAM
+source is the same for both boards; both share ESP-IDF v5.5.5. What differs is
+the target triple and one chip-specific `sdkconfig.defaults.<chip>` overlay (PSRAM
 mode, console, cache layout), which `esp-idf-sys` picks up from the `MCU` it is
 building for. Adding a board is adding that one file.
 
@@ -97,8 +97,8 @@ crates are edition 2024). The Xtensa `esp` channel is well past that.
 - `cargo install ldproxy` (the linker wrapper referenced by `.cargo/config.toml`).
 - `cargo install espflash` for flashing and monitoring.
 - ESP-IDF is downloaded and built automatically by `esp-idf-sys` on the first
-  build (into `.embuild/`, a few GB; subsequent builds reuse it): **v5.4** for
-  the ESP32-S3, **v5.5.5** for the ESP32-C5, side by side.
+  build (into `.embuild/`, a few GB; subsequent builds reuse it): **v5.5.5**
+  unified for both the ESP32-S3 and the ESP32-C5.
 - Host tools the ESP-IDF build needs: `git`, `python3`, `cmake`, `ninja`, `clang`.
 
 ## Configure
@@ -435,9 +435,9 @@ DRAM and that's what OOMs first.
 - **`AtomicU64` / 64-bit atomic link errors from a dependency:** Xtensa has no
   native 64-bit atomics; dependencies must use `portable_atomic`. The project
   relies on `portable-atomic` with the `fallback` feature for this.
-- **ESP-IDF build fails on very new host toolchains:** ESP-IDF v5.4 is happiest
-  with cmake < 4 and Python <= 3.12. If your host ships newer ones, the
-  `esp-idf-sys` bootstrap may complain.
+- **ESP-IDF build fails on very new host toolchains:** ESP-IDF v5.5.5 is happiest
+  with cmake < 4 and Python <= 3.12 (or Python 3.14 with the venv esp-idf-sys
+  provisions). If your host ships newer ones, the `esp-idf-sys` bootstrap may complain.
 - **`Failed to open WhatsApp NVS ... rebooting to retry` in a loop:** the
   `wa_store` partition is unreadable (a partition table from before it existed,
   or a corrupted page). The firmware never erases it on its own, because that

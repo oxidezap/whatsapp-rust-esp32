@@ -77,8 +77,8 @@ cmd_build() {
     # relative; sdkconfig.qemu carries the deeper one.) esp-idf-sys adds the
     # chip-specific sdkconfig.defaults.esp32s3 by itself, before the overlay.
     log "building $PROFILE with sdkconfig.qemu into $TARGET_DIR"
-    if [[ -d ".embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119" && -d ".embuild/espressif/esp-idf/v5.5.5" ]]; then
-        rm -rf .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
+    if [[ -d ".embuild/espressif/esp-idf/v5.5.5" ]] && [[ -d ".embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119" || -d ".embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119" ]]; then
+        rm -rf .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
     fi
     ESP_IDF_SDKCONFIG_DEFAULTS="$PWD/sdkconfig.defaults;$PWD/sdkconfig.qemu" \
     ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
@@ -101,7 +101,7 @@ wa,namespace,,
 push_name,data,string,esp32-qemu-$name
 CSV
     if [[ -n "${ADMIN_TOKEN:-}" ]]; then
-        echo "admin_token,data,string,$ADMIN_TOKEN" >> "$csv"
+        printf 'admin_token,data,string,"%s"\n' "${ADMIN_TOKEN//\"/\"\"}" >> "$csv"
     fi
     "$(nvs_python)" -m esp_idf_nvs_partition_gen generate "$csv" "$out" 0x6000 >&2
     echo "$out"

@@ -98,7 +98,7 @@ jobs:
       - name: Clean stale ESP-IDF tools from cache
         run: |
           # Purge older v5.4 tools if restored from legacy cache so esp-idf-sys installs v5.5.5 tools cleanly
-          rm -rf .embuild/espressif/esp-idf/v5.4 .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
+          rm -rf .embuild/espressif/esp-idf/v5.4 .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
 
       - name: Build
         run: ${{ matrix.build }}

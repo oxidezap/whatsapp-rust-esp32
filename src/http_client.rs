@@ -332,7 +332,7 @@ struct ExactLengthReader<R> {
 
 impl<R: Read> Read for ExactLengthReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.remaining == 0 {
+        if buf.is_empty() || self.remaining == 0 {
             return Ok(0);
         }
         let max_to_read = self.remaining.min(buf.len() as u64) as usize;
