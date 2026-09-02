@@ -1,11 +1,13 @@
-# ESP32-S3 N16R8 configuration
+# ESP-IDF configuration shared by every supported board. esp-idf-sys also reads
+# `sdkconfig.defaults.<mcu>` (after this file, so it wins), which is where the
+# chip-specific parts live: PSRAM mode, console, cache layout. Add a board by
+# adding that one file; nothing here should name a chip.
 
-# Flash: 16 MB
+# Flash: 16 MB on every supported board (N16R8 modules).
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
-# PSRAM: 8 MB Octal SPI
+# PSRAM: 8 MB. The mode (octal on the S3, quad on the C5) is per-chip.
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 
 # malloc() routing between the two heaps. ALWAYSINTERNAL is the max request size
@@ -20,25 +22,24 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
-# Allow FreeRTOS task stacks in PSRAM (needed for large thread stacks)
-CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
-
-# Move instructions to PSRAM to avoid cache crashes during heavy PSRAM allocation
-# (flash and octal PSRAM share the SPI bus on N16R8)
-CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
-CONFIG_SPIRAM_RODATA=y
-# Use 32KB instruction cache to reduce PSRAM consumption from instruction fetch
-CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 
 # CPU at full speed (default is 160 MHz)
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
-# Keep main task small - async work runs on spawned threads
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# The main task opens the 1 MB `wa_store` NVS partition and replays every record
+# into RAM before the executor thread exists. 16 KB trips ESP-IDF's stack canary
+# during that one-time scan on a populated store.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
-# Task watchdog stays enabled with a generous 30 s timeout (protocol init is slow)
+# Task watchdog stays enabled with a generous 30 s timeout (protocol init is slow).
+# The idle task on core 0 is not watched: the `wa-blocking` worker runs prekey
+# generation and other CPU-bound upstream jobs at priority 1 on that core, and a
+# batch that legitimately outlasts the timeout would otherwise reboot the chip
+# for starving idle. The executor thread registers itself instead (see
+# `feed_task_watchdog` in src/main.rs), so a stalled event loop is still caught.
 CONFIG_ESP_TASK_WDT_EN=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=32768
 
 # WiFi
@@ -65,7 +66,8 @@ CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384
 # Hardware AES accelerator.
 CONFIG_MBEDTLS_HARDWARE_AES=y
 
-# NVS: for credential storage
+# NVS: the default partition holds WiFi calibration and the optional provisioning
+# namespace (see README "Configure"); `wa_store` holds the WhatsApp credentials.
 CONFIG_NVS_ENCRYPTION=n
 
 # SNTP: needed for correct timestamps
@@ -90,7 +92,6 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=32
-CONFIG_ESP_COREDUMP_STACK_SIZE=1024
 
 # Binary size reduction
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y

@@ -6,6 +6,13 @@ use whatsapp_rust::wacore::net::{HttpClient, HttpRequest, HttpResponse, Streamin
 
 use crate::transport::EspTlsStream;
 
+/// Socket-level bound on every media/version request. Without one a peer that
+/// accepts the connection and then goes quiet holds the calling thread forever;
+/// with the blocking download path that is the executor.
+const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// A response header block past this is not a WhatsApp CDN answering.
+const MAX_RESPONSE_HEADER_BYTES: usize = 8 * 1024;
+
 /// Parse a URL into (host, port, path, use_tls).
 /// Supports http://, https://, ws://, wss:// schemes.
 pub fn parse_url(url: &str) -> Result<(String, u16, String, bool)> {
@@ -77,16 +84,22 @@ impl HttpClient for EspHttpClient {
             &host,
             &request.headers,
             request.body.as_deref(),
-        );
+        )?;
 
         let dial = qemu_host(host);
         let mut stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
         do_request(&mut stream, &raw_request, request.body.as_deref())
     }
 
+    /// Advertised so upstream streams media straight into its decryptor instead
+    /// of buffering a whole download, which on this chip means PSRAM, not RAM.
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     fn execute_streaming(&self, request: HttpRequest) -> Result<StreamingHttpResponse> {
         let (host, port, path, use_tls) = parse_url(&request.url)?;
-        let raw_request = build_raw_request(&request.method, &path, &host, &request.headers, None);
+        let raw_request = build_raw_request(&request.method, &path, &host, &request.headers, None)?;
 
         let dial = qemu_host(host);
         let stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
@@ -102,6 +115,19 @@ impl HttpClient for EspHttpClient {
 enum HttpStream {
     Tls(EspTlsStream),
     Tcp(std::net::TcpStream),
+}
+
+impl HttpStream {
+    fn set_timeouts(&self) -> Result<()> {
+        match self {
+            Self::Tls(stream) => stream.set_read_timeout_ms(HTTP_IO_TIMEOUT.as_millis() as u32),
+            Self::Tcp(stream) => {
+                stream.set_read_timeout(Some(HTTP_IO_TIMEOUT))?;
+                stream.set_write_timeout(Some(HTTP_IO_TIMEOUT))?;
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Read for HttpStream {
@@ -136,17 +162,13 @@ fn connect_stream(
     use_tls: bool,
     skip_tls_verify: bool,
 ) -> Result<HttpStream> {
-    if use_tls {
-        Ok(HttpStream::Tls(EspTlsStream::connect(
-            host,
-            port,
-            skip_tls_verify,
-        )?))
+    let stream = if use_tls {
+        HttpStream::Tls(EspTlsStream::connect(host, port, skip_tls_verify)?)
     } else {
-        Ok(HttpStream::Tcp(std::net::TcpStream::connect(format!(
-            "{host}:{port}"
-        ))?))
-    }
+        HttpStream::Tcp(std::net::TcpStream::connect(format!("{host}:{port}"))?)
+    };
+    stream.set_timeouts()?;
+    Ok(stream)
 }
 
 fn build_raw_request(
@@ -155,19 +177,71 @@ fn build_raw_request(
     host: &str,
     headers: &std::collections::HashMap<String, String>,
     body: Option<&[u8]>,
-) -> String {
-    let mut raw = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
-        method, path, host
-    );
+) -> Result<String> {
+    // The request line and headers are assembled by hand, so anything with a
+    // CR/LF in it would become a second header (or a second request). Every
+    // component comes from upstream or the server's own URLs, but the check is
+    // cheap and the failure mode is silent.
+    if method.is_empty() || !method.bytes().all(is_http_token_byte) {
+        anyhow::bail!("Invalid HTTP method");
+    }
+    if !path.starts_with('/')
+        || path
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+    {
+        anyhow::bail!("Invalid HTTP request target");
+    }
+    if host.is_empty()
+        || host
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        anyhow::bail!("Invalid HTTP host");
+    }
+    let mut raw = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
     for (key, value) in headers {
-        raw.push_str(&format!("{}: {}\r\n", key, value));
+        if key.is_empty()
+            || !key.bytes().all(is_http_token_byte)
+            || value
+                .bytes()
+                .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+        {
+            anyhow::bail!("Invalid HTTP header");
+        }
+        // The body's real length is written below; a caller-supplied one would
+        // duplicate (or contradict) it.
+        if body.is_some() && key.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        raw.push_str(&format!("{key}: {value}\r\n"));
     }
     if let Some(body) = body {
         raw.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     raw.push_str("\r\n");
-    raw
+    Ok(raw)
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 fn do_request(
@@ -213,19 +287,52 @@ fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
                 if let Some(pos) = header_buf.windows(4).position(|w| w == b"\r\n\r\n") {
                     break pos + 4;
                 }
+                if header_buf.len() > MAX_RESPONSE_HEADER_BYTES {
+                    anyhow::bail!("HTTP response headers exceed size limit");
+                }
             }
             Err(e) => return Err(e.into()),
         }
     };
 
     let status_code = parse_status_code(&header_buf[..header_end])?;
+    let content_length = parse_streaming_body_length(&header_buf[..header_end])?;
 
-    // Any bytes past the header delimiter were over-read body data
+    // Any bytes past the header delimiter were over-read body data. The body
+    // reader stops at Content-Length rather than at EOF: with `Connection:
+    // close` the two agree on a well-behaved server, and on any other server a
+    // bounded reader is what keeps a decrypt-as-you-go download from waiting
+    // on a socket that will never close.
     let overflow = header_buf.split_off(header_end);
-    let body: Box<dyn std::io::Read + Send> =
-        Box::new(std::io::Cursor::new(overflow).chain(stream));
+    let body: Box<dyn std::io::Read + Send> = Box::new(
+        std::io::Cursor::new(overflow)
+            .chain(stream)
+            .take(content_length),
+    );
 
     Ok(StreamingHttpResponse { status_code, body })
+}
+
+fn parse_streaming_body_length(header_bytes: &[u8]) -> Result<u64> {
+    let header = std::str::from_utf8(header_bytes)?;
+    let mut content_length = None;
+    for line in header.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("transfer-encoding")
+            && !value.trim().eq_ignore_ascii_case("identity")
+        {
+            anyhow::bail!("Unsupported HTTP transfer encoding: {}", value.trim());
+        }
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            let parsed = value.trim().parse::<u64>()?;
+            if content_length.replace(parsed).is_some() {
+                anyhow::bail!("Duplicate HTTP Content-Length header");
+            }
+        }
+    }
+    content_length.ok_or_else(|| anyhow::anyhow!("Streaming HTTP response has no Content-Length"))
 }
 
 fn parse_status_code(header_bytes: &[u8]) -> Result<u16> {

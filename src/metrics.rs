@@ -4,8 +4,8 @@
 use std::sync::OnceLock;
 
 use esp_idf_svc::hal::reset::ResetReason;
-use whatsapp_rust::serde_json;
 use esp_idf_svc::sys;
+use whatsapp_rust::serde_json;
 
 /// The reset reason captured once at boot (why the PREVIOUS run ended).
 static LAST_RESET: OnceLock<ResetReason> = OnceLock::new();
@@ -107,6 +107,8 @@ pub fn system_metrics_json() -> String {
 
     // Right-sizing data: how close each task came to overflowing its stack.
     let stack_wa_main = stack_free_min(c"wa-main");
+    let stack_wa_blocking = stack_free_min(c"wa-blocking");
+    let stack_wa_nvs = stack_free_min(c"wa-nvs");
     let stack_ws_transport = stack_free_min(c"ws-transport");
 
     // No radio under QEMU (the network is the emulated Ethernet MAC), so the
@@ -136,6 +138,8 @@ pub fn system_metrics_json() -> String {
         "psram_free": psram_free,
         "psram_largest_block": psram_largest_block,
         "stack_wa_main_min": stack_wa_main,
+        "stack_wa_blocking_min": stack_wa_blocking,
+        "stack_wa_nvs_min": stack_wa_nvs,
         "stack_ws_transport_min": stack_ws_transport,
         "rssi_dbm": rssi,
         "last_panic": last_panic(),

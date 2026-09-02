@@ -921,8 +921,7 @@ dependencies = [
 [[package]]
 name = "esp-idf-hal"
 version = "0.46.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2585c80f488be431ad14e199883a05ff31576adaa23014befa0f040fd91490b8"
+source = "git+https://github.com/esp-rs/esp-idf-hal?rev=c2dac82f5243b0b7036c392f8218e6a2b4f7e375#c2dac82f5243b0b7036c392f8218e6a2b4f7e375"
 dependencies = [
  "atomic-waker",
  "critical-section",
@@ -2402,12 +2401,14 @@ dependencies = [
  "anyhow",
  "dotenvy",
  "edge-executor",
+ "embedded-svc",
  "embuild",
  "enumset",
  "esp-idf-hal",
  "esp-idf-svc",
  "futures",
  "log",
+ "sha2",
  "tungstenite",
  "whatsapp-rust",
 ]
