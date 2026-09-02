@@ -55,7 +55,10 @@ struct StoreInner {
     lid_mappings: HashMap<String, LidPnMappingEntry>,
     pn_mappings: HashMap<String, String>, // phone -> lid
     base_keys: HashMap<String, Vec<u8>>,
-    device_lists: HashMap<String, DeviceListRecord>,
+    // Keyed by the record's own `Arc<str>`: the trait hands the user out as
+    // `Arc<str>` now, and a `&str` lookup borrows through it, so no `String`
+    // copy of the user is made on write or read.
+    device_lists: HashMap<Arc<str>, DeviceListRecord>,
     tc_tokens: HashMap<String, TcTokenEntry>,
     sent_messages: HashMap<String, (Vec<u8>, i64)>, // key -> (payload, timestamp)
 
@@ -341,8 +344,13 @@ impl AppSyncStore for MemoryStore {
         Ok(())
     }
 
-    async fn get_version(&self, name: &str) -> Result<HashState> {
-        Ok(self.lock().versions.get(name).cloned().unwrap_or_default())
+    async fn get_version(&self, name: &str) -> Result<Option<HashState>> {
+        Ok(self.lock().versions.get(name).cloned())
+    }
+
+    async fn delete_version(&self, name: &str) -> Result<()> {
+        self.lock().versions.remove(name);
+        Ok(())
     }
 
     async fn set_version(&self, name: &str, state: HashState) -> Result<()> {
@@ -487,7 +495,7 @@ impl ProtocolStore for MemoryStore {
     }
 
     async fn update_device_list(&self, record: DeviceListRecord) -> Result<()> {
-        self.lock().device_lists.insert(record.user.clone(), record);
+        self.lock().device_lists.insert(Arc::clone(&record.user), record);
         Ok(())
     }
 
