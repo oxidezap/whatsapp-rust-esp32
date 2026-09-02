@@ -72,23 +72,31 @@ cmd_image() {
     ls -l "$FLASH_IMAGE"
 }
 
+# Fills QEMU_CMD, the invocation as an array, so a path with whitespace in
+# QEMU_XTENSA, QEMU_TARGET_DIR or PROFILE stays one argument.
+#
+# -m sets the emulated PSRAM size (the board has 8 MB). `open_eth` is the only
+# NIC model the esp32s3 machine wires up. The serial console is the stdio.
+# QEMU_GDB=1 adds a gdb stub on :1234 and holds the CPUs until a debugger
+# continues them: `xtensa-esp32s3-elf-gdb <elf> -ex 'target remote :1234'`,
+# then `info threads` / `thread apply all bt` shows every FreeRTOS task,
+# which is how the hardware-AES stall in sdkconfig.qemu was found.
 qemu_cmd() {
-    # -m sets the emulated PSRAM size (the board has 8 MB). `open_eth` is the only
-    # NIC model the esp32s3 machine wires up. The serial console is the stdio.
-    # QEMU_GDB=1 adds a gdb stub on :1234 and holds the CPUs until a debugger
-    # continues them: `xtensa-esp32s3-elf-gdb <elf> -ex 'target remote :1234'`,
-    # then `info threads` / `thread apply all bt` shows every FreeRTOS task,
-    # which is how the hardware-AES stall in sdkconfig.qemu was found.
-    echo "$QEMU_XTENSA" -nographic -M esp32s3 -m 8M \
-        -drive "file=$FLASH_IMAGE,if=mtd,format=raw" \
-        -nic "user,model=open_eth,hostfwd=tcp::${ADMIN_PORT}-:8081" \
-        -serial mon:stdio ${QEMU_GDB:+-s -S}
+    QEMU_CMD=(
+        "$QEMU_XTENSA" -nographic -M esp32s3 -m 8M
+        -drive "file=$FLASH_IMAGE,if=mtd,format=raw"
+        -nic "user,model=open_eth,hostfwd=tcp::${ADMIN_PORT}-:8081"
+        -serial mon:stdio
+    )
+    if [[ -n "${QEMU_GDB:-}" ]]; then
+        QEMU_CMD+=(-s -S)
+    fi
 }
 
 cmd_run() {
     test -f "$FLASH_IMAGE" || cmd_image
-    # shellcheck disable=SC2046
-    exec $(qemu_cmd)
+    qemu_cmd
+    exec "${QEMU_CMD[@]}"
 }
 
 cmd_test() {
@@ -96,8 +104,8 @@ cmd_test() {
     local serial="$OUT_DIR/qemu-serial.log"
     : > "$serial"
     log "booting; serial log at $serial (timeout ${TEST_TIMEOUT}s)"
-    # shellcheck disable=SC2046
-    $(qemu_cmd) > "$serial" 2>&1 < /dev/null &
+    qemu_cmd
+    "${QEMU_CMD[@]}" > "$serial" 2>&1 < /dev/null &
     # Not `local`: the EXIT trap runs after this function has returned, and
     # `set -u` would otherwise abort the trap and leave QEMU running.
     QEMU_PID=$!
