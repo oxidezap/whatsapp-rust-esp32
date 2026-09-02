@@ -194,7 +194,7 @@ jobs:
           echo "Mock server did not become ready"; exit 1
 
       - name: Pair, reboot, and message between two boards
-        run: scripts/qemu.sh image a && scripts/qemu.sh image b && scripts/qemu.sh test
+        run: scripts/qemu.sh test
 
       - name: Upload serial logs
         if: always()

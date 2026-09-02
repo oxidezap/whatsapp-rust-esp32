@@ -1070,19 +1070,21 @@ impl DeviceStatus {
     }
 
     pub fn record_message(&self, mut entry: MessageLogEntry) {
+        const ELLIPSIS: char = '…';
         // Edition 2021 here, so no let-chain.
         if let Some(text) = entry
             .text
             .as_mut()
             .filter(|t| t.len() > MAX_LOGGED_TEXT_BYTES)
         {
-            // Cut on a character boundary; the byte cap is the budget, not an index.
-            let end = (0..=MAX_LOGGED_TEXT_BYTES)
+            // Reserve space for the ellipsis so the preview never exceeds MAX_LOGGED_TEXT_BYTES.
+            let budget = MAX_LOGGED_TEXT_BYTES.saturating_sub(ELLIPSIS.len_utf8());
+            let end = (0..=budget)
                 .rev()
                 .find(|&i| text.is_char_boundary(i))
                 .unwrap_or(0);
             text.truncate(end);
-            text.push('…');
+            text.push(ELLIPSIS);
         }
         let mut s = self.lock();
         if s.messages.len() == MESSAGE_LOG_CAPACITY {
@@ -1367,10 +1369,14 @@ impl AppSyncStore for NvsStore {
         let logical_key = key_id.to_vec();
         let latest = key_id.to_vec();
         self.flash.run(move |flash| {
-            flash.put_record(&flash.sync_keys, &logical_key, &payload, "sync key")?;
-            // `get_latest_sync_key_id` means the one written last, which nothing
-            // in the records themselves records, so it is stored explicitly.
-            flash.save_latest_sync_key_id(&latest)
+            // Persist the latest-ID marker first: `open` verifies that the key it
+            // names is actually present (`.filter(|id| inner.sync_keys.contains_key(id))`).
+            // If power fails before `put_record` commits, the orphan marker is
+            // ignored and `open` falls back to `timestamp_latest`. If `put_record`
+            // were first, an interrupted write would leave the old marker valid,
+            // selecting an outdated sync key on reboot.
+            flash.save_latest_sync_key_id(&latest)?;
+            flash.put_record(&flash.sync_keys, &logical_key, &payload, "sync key")
         })?;
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);

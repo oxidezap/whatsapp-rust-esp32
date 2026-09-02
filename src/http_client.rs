@@ -176,16 +176,28 @@ fn connect_stream(
         )?)
     } else {
         // `TcpStream::connect` has no deadline of its own, so resolve first and
-        // dial with one: the socket timeouts below only start applying once a
-        // connection exists.
-        let address = format!("{host}:{port}")
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("{host}:{port} did not resolve"))?;
-        HttpStream::Tcp(std::net::TcpStream::connect_timeout(
-            &address,
-            HTTP_IO_TIMEOUT,
-        )?)
+        // dial each candidate with one: preserve fallback across multiple resolved
+        // addresses (e.g. IPv4/IPv6 or multi-homed hosts).
+        let addrs = format!("{host}:{port}").to_socket_addrs()?;
+        let mut last_err = None;
+        let mut stream = None;
+        for address in addrs {
+            match std::net::TcpStream::connect_timeout(&address, HTTP_IO_TIMEOUT) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+        let stream = match (stream, last_err) {
+            (Some(s), _) => s,
+            (None, Some(e)) => return Err(e.into()),
+            (None, None) => anyhow::bail!("{host}:{port} did not resolve to any addresses"),
+        };
+        HttpStream::Tcp(stream)
     };
     stream.set_timeouts()?;
     Ok(stream)
@@ -391,7 +403,25 @@ fn parse_http_response(response_buf: &[u8]) -> Result<HttpResponse> {
         .ok_or_else(|| anyhow::anyhow!("Malformed HTTP response"))?;
 
     let status_code = parse_status_code(&response_buf[..header_end])?;
-    let body = response_buf[header_end + 4..].to_vec();
+    let content_length = parse_streaming_body_length(&response_buf[..header_end])?;
+    let body_slice = &response_buf[header_end + 4..];
+    if let Some(expected_len) = content_length {
+        let expected_usize = usize::try_from(expected_len)
+            .map_err(|_| anyhow::anyhow!("Content-Length {expected_len} exceeds address space"))?;
+        if body_slice.len() < expected_usize {
+            anyhow::bail!(
+                "HTTP response truncated: expected {expected_usize} bytes, got {}",
+                body_slice.len()
+            );
+        }
+        return Ok(HttpResponse {
+            status_code,
+            body: body_slice[..expected_usize].to_vec(),
+        });
+    }
 
-    Ok(HttpResponse { status_code, body })
+    Ok(HttpResponse {
+        status_code,
+        body: body_slice.to_vec(),
+    })
 }

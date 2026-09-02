@@ -324,6 +324,6 @@ case "${1:-}" in
     image) cmd_image "${2:-a}" ;;
     run) cmd_run "${2:-a}" ;;
     test) cmd_test ;;
-    all) cmd_build; cmd_image a; cmd_image b; cmd_test ;;
+    all) cmd_build; cmd_test ;;
     *) sed -n '2,25p' "$0"; exit 2 ;;
 esac

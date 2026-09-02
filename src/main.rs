@@ -239,12 +239,30 @@ fn main() -> Result<()> {
     let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
-    let push_name = nvs_string(&nvs, "push_name")
-        .inspect(|name| info!("Push name from NVS: {name}"))
-        .unwrap_or_else(|| DEFAULT_PUSH_NAME.to_string());
+    let push_name = match nvs_string(&nvs, "push_name") {
+        Ok(Some(name)) => {
+            info!("Push name from NVS: {name}");
+            name
+        }
+        Ok(None) => DEFAULT_PUSH_NAME.to_string(),
+        Err(e) => {
+            warn!("Could not read 'push_name' from NVS ({e}); falling back to default");
+            DEFAULT_PUSH_NAME.to_string()
+        }
+    };
     // Never logged: it is a shared secret, and the boot log is not private.
-    let admin_token = nvs_string(&nvs, "admin_token")
-        .or_else(|| Some(DEFAULT_ADMIN_TOKEN.to_string()).filter(|t| !t.is_empty()));
+    // If an admin token was configured in NVS but cannot be read (corrupt NVS or
+    // type error), fail startup instead of silently disabling authentication.
+    let admin_token = match nvs_string(&nvs, "admin_token") {
+        Ok(Some(token)) => Some(token),
+        Ok(None) => Some(DEFAULT_ADMIN_TOKEN.to_string()).filter(|t| !t.is_empty()),
+        Err(e) => {
+            error!(
+                "Configured admin_token in NVS could not be read: {e}. Failing startup to prevent unauthenticated admin access."
+            );
+            return Err(e);
+        }
+    };
 
     // The network handle must stay alive for the rest of main(): dropping it tears
     // the interface down. Which interface that is depends on where the firmware runs.
@@ -333,18 +351,20 @@ fn main() -> Result<()> {
 /// Provisioning is a plain NVS record written with `nvs_partition_gen` at flash
 /// time or by any tool that can write that partition, which is how one firmware
 /// image can be flashed to several boards that differ only in these values.
-fn nvs_string(nvs: &EspDefaultNvsPartition, key: &str) -> Option<String> {
+fn nvs_string(nvs: &EspDefaultNvsPartition, key: &str) -> Result<Option<String>> {
     // A read-only open of a namespace that was never written fails with
     // NVS_NOT_FOUND. That is the unprovisioned case, not an error.
-    let namespace = EspNvs::new(nvs.clone(), "wa", false).ok()?;
-    let mut buf = [0u8; 128];
+    let namespace = match EspNvs::new(nvs.clone(), "wa", false) {
+        Ok(ns) => ns,
+        Err(e) if e.code() == esp_idf_svc::sys::ESP_ERR_NVS_NOT_FOUND => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("Failed to open NVS namespace 'wa': {e}")),
+    };
+    let mut buf = [0u8; 512];
     match namespace.get_str(key, &mut buf) {
-        Ok(Some(value)) if !value.is_empty() => Some(value.to_string()),
-        Ok(_) => None,
-        Err(e) => {
-            warn!("Could not read '{key}' from NVS: {e}");
-            None
-        }
+        Ok(Some(value)) if !value.is_empty() => Ok(Some(value.to_string())),
+        Ok(_) => Ok(None),
+        Err(e) if e.code() == esp_idf_svc::sys::ESP_ERR_NVS_NOT_FOUND => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("Failed to read '{key}' from NVS: {e}")),
     }
 }
 
@@ -501,6 +521,8 @@ fn run_executor(
 async fn feed_task_watchdog() {
     /// Well inside `CONFIG_ESP_TASK_WDT_TIMEOUT_S` (30 s in sdkconfig.defaults).
     const FEED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+    /// Delay between retries when timer creation or wait fails.
+    const ERROR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
     /// About a minute of consecutive failures before giving the watchdog up.
     const MAX_CONSECUTIVE_FAILURES: u32 = 12;
 
@@ -509,25 +531,31 @@ async fn feed_task_watchdog() {
         // Feed first: the point of this task is that the watchdog gets fed even
         // on an iteration where arming the next timer went wrong.
         let result = unsafe { esp_idf_svc::sys::esp_task_wdt_reset() };
-        if result == esp_idf_svc::sys::ESP_OK {
-            failures = 0;
-        } else {
+        if result != esp_idf_svc::sys::ESP_OK {
             failures += 1;
             error!("Failed to feed the wa-main task watchdog: ESP error {result}");
         }
 
-        match esp_idf_svc::timer::EspTaskTimerService::new().and_then(|s| s.timer_async()) {
-            Ok(mut timer) => match timer.after(FEED_INTERVAL).await {
-                Ok(()) => continue,
+        let feed_cycle_ok =
+            match esp_idf_svc::timer::EspTaskTimerService::new().and_then(|s| s.timer_async()) {
+                Ok(mut timer) => match timer.after(FEED_INTERVAL).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        failures += 1;
+                        error!("Task-watchdog feed timer failed: {error}");
+                        false
+                    }
+                },
                 Err(error) => {
                     failures += 1;
-                    error!("Task-watchdog feed timer failed: {error}");
+                    error!("Could not arm the task-watchdog feed timer: {error}");
+                    false
                 }
-            },
-            Err(error) => {
-                failures += 1;
-                error!("Could not arm the task-watchdog feed timer: {error}");
-            }
+            };
+
+        if feed_cycle_ok && result == esp_idf_svc::sys::ESP_OK {
+            failures = 0;
+            continue;
         }
 
         if failures >= MAX_CONSECUTIVE_FAILURES {
@@ -539,13 +567,9 @@ async fn feed_task_watchdog() {
             unsafe { esp_idf_svc::sys::esp_task_wdt_delete(core::ptr::null_mut()) };
             return;
         }
-        // The timer is unusable this round; yield so a broken timer service
-        // cannot spin this task on the single executor thread.
-        futures::future::poll_fn(|cx| {
-            cx.waker().wake_by_ref();
-            std::task::Poll::Pending
-        })
-        .await
+        // The timer is unusable this round; back off with a real delay so transient
+        // timer-allocation failures do not busy-spin and starve the executor.
+        std::thread::sleep(ERROR_RETRY_DELAY);
     }
 }
 
@@ -632,6 +656,8 @@ async fn run_whatsapp(
         };
         if let Ok(mut t) = timer_service.timer_async() {
             let _ = t.after(std::time::Duration::from_secs(delay)).await;
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
         }
     }
 }

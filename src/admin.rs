@@ -37,7 +37,9 @@ pub struct AdminAuth {
 impl AdminAuth {
     pub fn new(token: Option<String>) -> Self {
         match &token {
-            Some(_) => info!("Admin API: token required on the sensitive routes"),
+            Some(_) => info!(
+                "Admin API: token required on sensitive routes. NOTE: Admin API is served over plaintext HTTP on port {ADMIN_PORT}; restrict access to trusted networks (e.g. isolated LAN) to prevent token interception."
+            ),
             None => warn!(
                 "Admin API: no token configured, so anyone who can reach port {ADMIN_PORT} can read recent messages, send as this account and factory-reset it. Set ADMIN_TOKEN (see README \"Configure\") to require one."
             ),
@@ -85,7 +87,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ESP32 WhatsApp</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js" integrity="sha384-Izc791esqyEy3BEIC42q7jbE0AaOkACziN+dyyXgYeDmpeMCLz0xA+xYN3aCd5zz" crossorigin="anonymous"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0;padding:20px;max-width:600px;margin:0 auto}
@@ -174,7 +176,7 @@ input{width:100%;background:#111;color:#fff;border:1px solid #444;border-radius:
 
 <div class="card"><h2>Admin token</h2>
 <input id="token" type="password" placeholder="Only if this device was flashed with one" oninput="saveToken()">
-<div class="hint">Stored in this browser only. Leave empty if the device has no token.</div>
+<div class="hint">Stored in this browser session only. Leave empty if the device has no token.</div>
 </div>
 
 <div class="card"><h2>Actions</h2>
@@ -185,8 +187,8 @@ input{width:100%;background:#111;color:#fff;border:1px solid #444;border-radius:
 <div id="log"></div>
 
 <script>
-function tok(){try{return localStorage.getItem('adminToken')||''}catch(e){return ''}}
-function saveToken(){try{localStorage.setItem('adminToken',document.getElementById('token').value)}catch(e){}}
+function tok(){try{return sessionStorage.getItem('adminToken')||''}catch(e){return ''}}
+function saveToken(){try{sessionStorage.setItem('adminToken',document.getElementById('token').value)}catch(e){}}
 // Every request carries the token; the device ignores it when it has none.
 function authHeaders(extra){const h=Object.assign({},extra||{});const t=tok();if(t)h['X-Admin-Token']=t;return h}
 function get(url){return fetch(url,{headers:authHeaders()})}
@@ -787,13 +789,17 @@ pub fn start_admin_server(
         )?;
     }
 
-    // GET /sessions
+    // GET /sessions: list Signal session addresses (requires auth)
     {
+        let auth = auth.clone();
         let store = store.clone();
         server.fn_handler::<anyhow::Error, _>(
             "/sessions",
             esp_idf_svc::http::Method::Get,
             move |req| {
+                if let Err((status, body)) = auth.check(&req) {
+                    return json_response_status(req, status, body);
+                }
                 let sessions = store.list_sessions();
                 let body = serde_json::json!({
                     "count": sessions.len(),

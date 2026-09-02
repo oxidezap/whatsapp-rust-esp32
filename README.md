@@ -159,11 +159,11 @@ shared secret you can require:
 ADMIN_TOKEN=something-long-and-random
 ```
 
-With one set, `/send`, `/messages`, `/pair-code`, `/reset`, `/reboot` and
-`DELETE /sessions` answer `401` unless the request carries `X-Admin-Token`. The
-dashboard has a field for it and keeps it in that browser's local storage. The
-status routes (`/`, `/device`, `/metrics`, `/health`) stay open so the page can
-render before you type it in.
+With one set, `/send`, `/messages`, `/pair-code`, `/reset`, `/reboot`, and
+`/sessions` (both GET and DELETE) answer `401` unless the request carries
+`X-Admin-Token`. The dashboard has a field for it and keeps it in that browser's
+session storage. The status routes (`/`, `/device`, `/metrics`, `/health`) stay
+open so the page can render before you type it in.
 
 Leave it unset and the device behaves as it always has, with a warning in the
 boot log naming what is exposed. Like the push name, it can also be provisioned
@@ -171,9 +171,10 @@ at flash time as an `admin_token` string in the `wa` NVS namespace, which keeps
 it out of the firmware image.
 
 Two things a token does not fix: the API is plain HTTP, so the token and
-everything else crosses the LAN in cleartext, and the `wa_store` partition is
-unencrypted, so anyone who can read the flash can read the pairing and the
-Signal state. Treat physical access to the board as full access to the account.
+everything else crosses the LAN in cleartext (restrict device access to trusted,
+isolated local networks), and the `wa_store` partition is unencrypted, so anyone
+who can read the flash can read the pairing and the Signal state. Treat physical
+access to the board as full access to the account.
 
 ## Build
 
@@ -365,7 +366,7 @@ itself pulls `qrcode.min.js` from a CDN, so the browser needs internet access):
 | POST | `/pair-code` | `{"phone_number":"+15551234567"}`: request a linking code; poll `/device` for it. Needs the token. |
 | GET | `/metrics` | Live system telemetry (see Diagnostics below). |
 | GET | `/health` | Liveness check (`ok`). |
-| GET | `/sessions` | List Signal session addresses. |
+| GET | `/sessions` | List Signal session addresses. Needs the token. |
 | DELETE | `/sessions` | Disconnect, erase all Signal sessions from flash, reboot. Needs the token. |
 | POST | `/reset` | Factory reset: log out, erase `wa_store`, reboot to re-pair. Needs the token. |
 | POST | `/reboot` | Disconnect cleanly and reboot. Needs the token. |
