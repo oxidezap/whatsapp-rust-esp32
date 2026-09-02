@@ -51,6 +51,12 @@ the target triple and one chip-specific `sdkconfig.defaults.<chip>` overlay (PSR
 mode, console, cache layout), which `esp-idf-sys` picks up from the `MCU` it is
 building for. Adding a board is adding that one file.
 
+Which other Espressif parts could host this firmware, what each would cost, and
+which emulator can stand in for it in CI: [docs/board-support-map.md](docs/board-support-map.md).
+There is a hard floor: the chip needs PSRAM (the Rust heap and the 256 KB
+executor stack live there) and at least 8 MB of flash (the app image alone is
+4.5 MB), which rules out the whole C2/C3/C6/H2 line.
+
 ## How it works
 
 `whatsapp-rust` is platform-agnostic: the protocol engine is written against
