@@ -103,9 +103,12 @@ jobs:
       - name: Build
         run: ${{ matrix.build }}
 
-      # The library is also consumed without the dashboard or the mock server;
-      # that configuration has no other build. Same profile as the build above so
-      # esp-idf-sys reuses its output instead of building ESP-IDF a second time.
+      # Three configurations the board builds never compile: the library without
+      # the dashboard or the mock server (how a product firmware consumes it), the
+      # unit tests (default features; they cannot run on the target, but they must
+      # keep compiling), and the documented example, also without default
+      # features. Same profile as the build above so esp-idf-sys reuses its output
+      # instead of building ESP-IDF a second time.
       - name: Check the library without default features, the unit tests and the example
         if: matrix.flavor == 'esp32s3'
         run: |
