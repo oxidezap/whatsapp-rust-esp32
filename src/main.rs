@@ -1,12 +1,3 @@
-mod admin;
-mod crash;
-mod http_client;
-mod metrics;
-mod psram_alloc;
-mod runtime;
-mod storage;
-mod transport;
-
 use anyhow::Result;
 #[cfg(not(feature = "qemu"))]
 use esp_idf_svc::wifi::{
@@ -22,22 +13,31 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 // Single upstream dependency: whatsapp-rust re-exports wacore/waproto/buffa and
 // the shared support crates, so there is no way for them to drift out of sync.
-use whatsapp_rust::async_channel;
 use whatsapp_rust::bytes;
 use whatsapp_rust::prelude::{wa, Bot, Event, MessageContext, MessageExt as _, MessageField};
 use whatsapp_rust::wacore::net::{HttpClient as _, HttpRequest};
+use whatsapp_rust::wacore::runtime::Runtime as _;
 use whatsapp_rust::wacore::store::DevicePropsOverride;
 use whatsapp_rust::wacore::types::events::{
     ConnectFailureReason, EventHandler, EventInterest, EventKind,
 };
 
-use crate::http_client::EspHttpClient;
-use crate::runtime::{BlockingWorker, BoxedTask, Esp32Runtime};
-use crate::storage::{
-    ActiveClient, DeviceStatus, MaintenanceAction, MaintenanceCoordinator, MaintenanceRequest,
-    MessageLogEntry, NvsStore,
+#[cfg(feature = "admin")]
+use whatsapp_esp32::admin;
+use whatsapp_esp32::runtime::spawn_thread;
+use whatsapp_esp32::supervisor::{
+    run_maintenance, ActiveClient, DeviceStatus, MaintenanceAction, MaintenanceCoordinator,
+    MaintenanceRequest, MessageLogEntry,
 };
-use crate::transport::Esp32TransportFactory;
+use whatsapp_esp32::{
+    crash, metrics, Esp32Executor, Esp32Runtime, Esp32TransportFactory, EspHttpClient, NvsStore,
+};
+
+// The whole Rust heap goes to PSRAM; internal DRAM is left to FreeRTOS, DMA
+// and mbedTLS. The library only defines the allocator, the firmware installs it.
+#[global_allocator]
+static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
+    whatsapp_esp32::psram_alloc::PsramAllocator;
 
 // WiFi + server come from .env at build time (see .env.example). option_env! keeps
 // a fresh clone with no .env compiling; the firmware reports missing WiFi at runtime.
@@ -55,20 +55,23 @@ const WIFI_PASS: &str = match option_env!("WIFI_PASS") {
 // WebSocket URL of the mock server or WhatsApp gateway. Override via WHATSAPP_WS_URL in .env.
 // Under the `qemu` feature the default is the emulator's view of the host: QEMU's user-mode
 // network hands the guest 10.0.2.15 and exposes the host as 10.0.2.2, so a mock server
-// listening on the host's port 8080 is reachable without any forwarding rule.
+// listening on the host's port 8080 is reachable without any forwarding rule. Without
+// `mock-server` the default is the real gateway, matching the verification that build does.
 const MOCK_SERVER_WS: &str = match option_env!("WHATSAPP_WS_URL") {
     Some(u) => u,
     None if cfg!(feature = "qemu") => "wss://10.0.2.2:8080/ws/chat",
-    None => "wss://192.168.0.4:8080/ws/chat",
+    None if cfg!(feature = "mock-server") => "wss://192.168.0.4:8080/ws/chat",
+    None => whatsapp_rust::wacore::net::WHATSAPP_WEB_WS_URL,
 };
-// Accept the bundled self-signed CA (mock server). Set false for the real WhatsApp gateway.
-const SKIP_TLS_VERIFY: bool = true;
+// Accept whatever certificate the server presents. The mock server mints a fresh
+// self-signed one on every start; the real gateway must be verified.
+const SKIP_TLS_VERIFY: bool = cfg!(feature = "mock-server");
 
 // DEV-ONLY auto-pair: when the bot emits a pairing QR, POST it to the bartender mock
 // server's `/admin/mock-phone/scan-qr` endpoint, which completes pairing as if a phone
 // scanned it (mirrors whatsapp-rust e2e `spawn_qr_autoresponder_http`). Set false for the
 // real WhatsApp gateway (no such endpoint exists there; you scan with your phone).
-const MOCK_AUTOPAIR: bool = true;
+const MOCK_AUTOPAIR: bool = cfg!(feature = "mock-server");
 
 // The name this device pairs under. Against the mock server the push name is also
 // what selects the account, so two boards with the same name share one number.
@@ -84,6 +87,7 @@ const DEFAULT_PUSH_NAME: &str = match option_env!("WHATSAPP_PUSH_NAME") {
 /// Same two sources as the push name: `.env` at build time, or the `wa`
 /// namespace of the default NVS partition (key `admin_token`) at flash time.
 /// Empty means unset, which keeps the historical unauthenticated behavior.
+#[cfg(feature = "admin")]
 const DEFAULT_ADMIN_TOKEN: &str = match option_env!("ADMIN_TOKEN") {
     Some(t) => t,
     None => "",
@@ -92,13 +96,15 @@ const DEFAULT_ADMIN_TOKEN: &str = match option_env!("ADMIN_TOKEN") {
 /// What Linked Devices shows as the device's OS.
 const DEVICE_OS: &str = "whatsapp-esp32";
 
+/// Where the dashboard answers: `http://<MDNS_HOSTNAME>.local:<ADMIN_PORT>/dashboard`.
+#[cfg(feature = "admin")]
+const MDNS_HOSTNAME: &str = "esp32-whatsapp";
+#[cfg(feature = "admin")]
+const ADMIN_PORT: u16 = admin::DEFAULT_ADMIN_PORT;
+
 const PING_TRIGGER: &str = "\u{1f980}ping"; // 🦀ping
 const PONG_TEXT: &str = "\u{1f3d3} Pong!"; // 🏓 Pong!
 const REACTION_EMOJI: &str = "\u{1f3d3}"; // 🏓
-
-/// Stack for the main async executor thread, in PSRAM (so 256 KB is cheap). The full
-/// send path (reaction + quoted reply + edit) has deep frames and needs every byte.
-const MAIN_TASK_STACK_SIZE: usize = 256 * 1024;
 
 /// Why the last client instance stopped, and what the supervisor does about it.
 /// Ordered by severity so concurrent events keep the strongest outcome.
@@ -227,7 +233,7 @@ fn main() -> Result<()> {
     // The credentials come up before the network: a store that cannot be opened
     // is not something to pair over, and a reboot is the only recovery that
     // does not erase it (see NvsStore::open on why it never self-repairs).
-    let store = match NvsStore::open("wa_store") {
+    let store = match NvsStore::open_default() {
         Ok(store) => Arc::new(store),
         Err(error) => {
             error!("Failed to open WhatsApp NVS: {error}; rebooting to retry");
@@ -253,6 +259,7 @@ fn main() -> Result<()> {
     // Never logged: it is a shared secret, and the boot log is not private.
     // If an admin token was configured in NVS but cannot be read (corrupt NVS or
     // type error), fail startup instead of silently disabling authentication.
+    #[cfg(feature = "admin")]
     let admin_token = match nvs_string(&nvs, "admin_token") {
         Ok(Some(token)) => Some(token),
         Ok(None) => Some(DEFAULT_ADMIN_TOKEN.to_string()).filter(|t| !t.is_empty()),
@@ -267,39 +274,44 @@ fn main() -> Result<()> {
     // The network handle must stay alive for the rest of main(): dropping it tears
     // the interface down. Which interface that is depends on where the firmware runs.
     #[cfg(not(feature = "qemu"))]
-    let (_net, ip) = bring_up_wifi(peripherals.modem, sysloop.clone(), nvs)?;
+    let (_net, _ip) = bring_up_wifi(peripherals.modem, sysloop.clone(), nvs)?;
     #[cfg(feature = "qemu")]
-    let (_net, ip) = bring_up_ethernet(peripherals.mac, sysloop.clone(), nvs)?;
+    let (_net, _ip) = bring_up_ethernet(peripherals.mac, sysloop.clone(), nvs)?;
 
     let _sntp = esp_idf_svc::sntp::EspSntp::new_default()?;
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    // mDNS: reachable at http://esp32-whatsapp.local:8081/dashboard
+    #[cfg(feature = "admin")]
     let _mdns = {
         let mut mdns = esp_idf_svc::mdns::EspMdns::take()?;
-        mdns.set_hostname("esp32-whatsapp")?;
+        mdns.set_hostname(MDNS_HOSTNAME)?;
         mdns.set_instance_name("ESP32 WhatsApp")?;
-        mdns.add_service(None, "_http", "_tcp", 8081, &[("path", "/dashboard")])?;
+        mdns.add_service(None, "_http", "_tcp", ADMIN_PORT, &[("path", "/dashboard")])?;
         mdns
     };
 
     let device_status = Arc::new(DeviceStatus::new());
     let active_client = Arc::new(ActiveClient::new());
     let maintenance = Arc::new(MaintenanceCoordinator::new());
-    // Channel for Runtime::spawn() and the admin server -> main executor.
-    // async_channel's recv() has a waker, so the executor parks when idle and a
-    // spawn unparks it.
-    let (task_tx, task_rx) = async_channel::unbounded::<BoxedTask>();
+    // The runtime every Bot is built with, and the executor that runs them.
+    let (runtime, executor) = Esp32Runtime::create_default()?;
+    // The admin server spawns onto the same executor (send, pair code,
+    // maintenance), through the runtime's queue so it can tell when a spawn
+    // was refused.
+    #[cfg(feature = "admin")]
     let _admin_server = admin::start_admin_server(
         store.clone(),
         device_status.clone(),
         active_client.clone(),
         maintenance.clone(),
-        task_tx.clone(),
+        runtime.spawner(),
         Arc::new(admin::AdminAuth::new(admin_token)),
+        ADMIN_PORT,
     )?;
-    info!("Admin: http://esp32-whatsapp.local:8081/dashboard");
-    info!("Admin: http://{}:8081/dashboard", ip);
+    #[cfg(feature = "admin")]
+    info!("Admin: http://{MDNS_HOSTNAME}.local:{ADMIN_PORT}/dashboard");
+    #[cfg(feature = "admin")]
+    info!("Admin: http://{_ip}:{ADMIN_PORT}/dashboard");
 
     info!(
         "Free heap: {} bytes (internal: {} bytes)",
@@ -307,38 +319,17 @@ fn main() -> Result<()> {
         unsafe { esp_idf_svc::sys::esp_get_free_internal_heap_size() }
     );
 
-    // Started before the executor's spawn configuration below: each `set()`
-    // configures the next thread this thread spawns.
-    let blocking_worker = BlockingWorker::start()?;
-
-    // Configure PSRAM stack for the main async thread
-    esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
-        name: Some(c"wa-main"),
-        stack_size: MAIN_TASK_STACK_SIZE,
-        priority: 5,
-        inherit: false,
-        pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
-        stack_alloc_caps: enumset::enum_set!(
-            esp_idf_hal::task::thread::MallocCap::Spiram
-                | esp_idf_hal::task::thread::MallocCap::Cap8bit
-        ),
-    }
-    .set()?;
-
-    let jh = std::thread::Builder::new()
-        .stack_size(MAIN_TASK_STACK_SIZE)
-        .spawn(move || {
-            run_executor(
-                task_tx,
-                task_rx,
-                store,
-                device_status,
-                active_client,
-                maintenance,
-                blocking_worker,
-                push_name,
-            );
-        })?;
+    let jh = spawn_thread(&Esp32Executor::default_thread_config(), move || {
+        run_executor(
+            executor,
+            runtime,
+            store,
+            device_status,
+            active_client,
+            maintenance,
+            push_name,
+        );
+    })?;
 
     if let Err(e) = jh.join() {
         error!("Executor thread panicked: {:?}", e);
@@ -458,23 +449,17 @@ fn bring_up_ethernet(
     Ok((eth, ip))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The `wa-main` thread body: the executor, with the supervisor as its main
+/// future. `block_on` returns only if the supervisor does, which it never does.
 fn run_executor(
-    task_tx: async_channel::Sender<BoxedTask>,
-    task_rx: async_channel::Receiver<BoxedTask>,
+    executor: Esp32Executor,
+    runtime: Esp32Runtime,
     store: Arc<NvsStore>,
     device_status: Arc<DeviceStatus>,
     active_client: Arc<ActiveClient>,
     maintenance: Arc<MaintenanceCoordinator>,
-    blocking_worker: BlockingWorker,
     push_name: String,
 ) {
-    // `UnboundQueue` (a growable VecDeque) rather than the default 64-slot
-    // `BoundQueue`: a burst of more than 64 runnable tasks must queue, not fail
-    // the spawn and take the firmware down with it.
-    let executor: edge_executor::LocalExecutor<'_, edge_executor::UnboundQueue> =
-        edge_executor::LocalExecutor::new();
-
     // Register this thread with the task watchdog: with the idle-task check off
     // for this core (sdkconfig.defaults), a wedged event loop is otherwise
     // invisible. The feed runs as a task, so it stops exactly when the loop does.
@@ -482,32 +467,19 @@ fn run_executor(
         esp_idf_svc::sys::esp_task_wdt_add(core::ptr::null_mut()) == esp_idf_svc::sys::ESP_OK
     };
     if watchdog_registered {
-        executor.spawn(feed_task_watchdog()).detach();
+        runtime.spawn(Box::pin(feed_task_watchdog())).detach();
     } else {
         error!("Failed to register wa-main with the task watchdog");
     }
 
-    executor
-        .spawn(run_whatsapp(
-            task_tx,
-            store,
-            device_status,
-            active_client,
-            maintenance,
-            blocking_worker,
-            push_name,
-        ))
-        .detach();
-
-    // run() polls the spawned bot task plus the spawn-pump below, and PARKS the OS
-    // thread whenever every task is waiting (transport recv / esp_timer sleep),
-    // unparking when a real waker fires. Replaces the old try_tick + yield_now loop
-    // that pinned the core at 100%.
-    futures::executor::block_on(executor.run(async {
-        while let Ok(future) = task_rx.recv().await {
-            executor.spawn(future).detach();
-        }
-    }));
+    executor.block_on(run_whatsapp(
+        runtime,
+        store,
+        device_status,
+        active_client,
+        maintenance,
+        push_name,
+    ));
 }
 
 /// Feeds the task watchdog `wa-main` registered itself with, at a fraction of
@@ -588,36 +560,24 @@ async fn feed_task_watchdog() {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_whatsapp(
-    task_tx: async_channel::Sender<BoxedTask>,
+    runtime: Esp32Runtime,
     store: Arc<NvsStore>,
     device_status: Arc<DeviceStatus>,
     active_client: Arc<ActiveClient>,
     maintenance: Arc<MaintenanceCoordinator>,
-    blocking_worker: BlockingWorker,
     push_name: String,
 ) {
-    let timer_service = match esp_idf_svc::timer::EspTaskTimerService::new() {
-        Ok(t) => t,
-        Err(e) => {
-            error!("Failed to create timer service: {e}");
-            return;
-        }
-    };
-
     // Supervisor loop: the firmware must never let app_main() return (that tears down
     // WiFi/admin and halts the chip). whatsapp-rust reconnects forever internally, but
     // if the bot future ever does end, re-create it after a short delay. This task also
-    // keeps `task_tx` alive, so the executor's spawn channel never closes.
+    // keeps `runtime` alive, so the executor's spawn channel never closes.
     loop {
         let outcome = run_whatsapp_inner(
-            task_tx.clone(),
+            runtime.clone(),
             store.clone(),
             device_status.clone(),
             active_client.clone(),
-            timer_service.clone(),
-            blocking_worker.clone(),
             push_name.clone(),
         )
         .await;
@@ -669,20 +629,23 @@ async fn run_whatsapp(
                 5
             }
         };
+        // `Runtime::sleep` fails open (returns at once if no esp_timer could be
+        // armed), so check the clock: a restart storm must not follow a timer
+        // allocation failure. The fallback waits on the blocking worker, never
+        // on the executor thread, so the watchdog feed keeps running meanwhile.
         let delay_dur = std::time::Duration::from_secs(delay);
         let start = std::time::Instant::now();
         while start.elapsed() < delay_dur {
-            let remaining = delay_dur.saturating_sub(start.elapsed());
-            if let Ok(mut t) = timer_service.timer_async() {
-                let _ = t.after(remaining).await;
-                break;
+            runtime
+                .sleep(delay_dur.saturating_sub(start.elapsed()))
+                .await;
+            if start.elapsed() < delay_dur {
+                runtime
+                    .spawn_blocking(Box::new(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(250))
+                    }))
+                    .await;
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            futures::future::poll_fn(|cx| {
-                cx.waker().wake_by_ref();
-                std::task::Poll::Ready(())
-            })
-            .await;
         }
     }
 }
@@ -692,17 +655,16 @@ async fn run_whatsapp(
 static TEMPORARY_BAN_WAIT: AtomicU32 = AtomicU32::new(0);
 
 async fn run_whatsapp_inner(
-    task_tx: async_channel::Sender<BoxedTask>,
+    runtime: Esp32Runtime,
     backend: Arc<NvsStore>,
     device_status: Arc<DeviceStatus>,
     active_client: Arc<ActiveClient>,
-    timer_service: esp_idf_svc::timer::EspTaskTimerService,
-    blocking_worker: BlockingWorker,
     push_name: String,
 ) -> Result<ClientExit> {
+    // Both would be `::default()` against the real gateway; the demo points them
+    // at the mock server and accepts its self-signed certificate.
     let transport_factory = Esp32TransportFactory::new(MOCK_SERVER_WS, SKIP_TLS_VERIFY);
     let http_client = EspHttpClient::new(SKIP_TLS_VERIFY);
-    let runtime = Esp32Runtime::new(task_tx, timer_service, blocking_worker);
 
     // One-shot guard so dev auto-pair POSTs the QR only once per bot session.
     let scanned = Arc::new(AtomicBool::new(false));
@@ -856,107 +818,13 @@ async fn run_whatsapp_inner(
     Ok(outcome)
 }
 
-/// The one path that erases or reboots, shared by the dashboard actions and
-/// the supervisor's response to being unlinked. Stops the live client first
-/// (a logout for a reset, a disconnect otherwise), applies the highest action
-/// requested by the time it gets there, and reboots on the NVS worker's stack.
-pub(crate) async fn run_maintenance(
-    store: Arc<NvsStore>,
-    device_status: Arc<DeviceStatus>,
-    active_client: Arc<ActiveClient>,
-    maintenance: Arc<MaintenanceCoordinator>,
-) {
-    let initial = maintenance.requested();
-    let client = active_client.current();
-    let mut logout_attempted = false;
-    if let Some(client) = &client {
-        match initial {
-            MaintenanceAction::Reset => {
-                info!("Maintenance: logging out before factory reset");
-                client.logout().await;
-                logout_attempted = true;
-            }
-            MaintenanceAction::ClearSessions | MaintenanceAction::Reboot => {
-                info!("Maintenance: disconnecting WhatsApp client");
-                client.disconnect().await;
-            }
-        }
-        active_client.clear_if(client);
-    }
-
-    let mut applied = MaintenanceAction::Reboot;
-    loop {
-        let requested = maintenance.requested();
-        if requested > applied {
-            let succeeded = match requested {
-                MaintenanceAction::Reset => {
-                    if !logout_attempted {
-                        // A reset may upgrade a session-clear/reboot while its
-                        // disconnect is in flight. The remote IQ is best-effort
-                        // once offline, but local credential removal remains safe.
-                        if let Some(client) = &client {
-                            info!("Maintenance: reset upgrade, attempting logout");
-                            client.logout().await;
-                        }
-                        logout_attempted = true;
-                    }
-                    device_status.set_logged_out();
-                    store.seal_writes();
-                    match store.reset() {
-                        Ok(()) => {
-                            info!("Maintenance: persistent WhatsApp data cleared");
-                            true
-                        }
-                        Err(error) => {
-                            error!("Maintenance: factory reset failed: {error}; retrying");
-                            false
-                        }
-                    }
-                }
-                MaintenanceAction::ClearSessions => {
-                    store.seal_writes();
-                    match store.clear_sessions() {
-                        Ok(count) => {
-                            info!("Maintenance: cleared {count} persistent sessions");
-                            true
-                        }
-                        Err(error) => {
-                            error!("Maintenance: session clear failed: {error}; retrying");
-                            false
-                        }
-                    }
-                }
-                MaintenanceAction::Reboot => true,
-            };
-            if succeeded {
-                applied = requested;
-            } else {
-                // A blocking sleep on the executor thread, deliberately: this is
-                // only reached when erasing flash has already failed its own
-                // retries, the device is on its way to a reboot either way, and
-                // there is nothing else worth running in the meantime.
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        }
-        if maintenance.begin_reboot(applied) {
-            break;
-        }
-    }
-
-    if let Err(error) = store.restart() {
-        error!("Maintenance: could not schedule restart: {error}");
-        futures::future::pending::<()>().await;
-    }
-}
-
 /// DEV-ONLY: POST the pairing QR to the bartender mock server's scan-qr admin
 /// endpoint, completing pairing without a phone. Derives the admin URL from
 /// `MOCK_SERVER_WS` (ws→http / wss→https, path `/admin/mock-phone/scan-qr`),
 /// matching whatsapp-rust's e2e helper. The request is blocking HTTP done inline;
 /// it briefly stalls the executor once, which is fine for a one-shot pairing step.
 async fn auto_scan_qr(code: &str) {
-    let (host, port, _path, tls) = match crate::http_client::parse_url(MOCK_SERVER_WS) {
+    let (host, port, _path, tls) = match whatsapp_esp32::http_client::parse_url(MOCK_SERVER_WS) {
         Ok(v) => v,
         Err(e) => {
             error!("auto-pair: bad mock URL: {e}");

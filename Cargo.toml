@@ -13,15 +13,22 @@ keywords = ["whatsapp", "esp32", "embedded", "esp-idf", "iot"]
 categories = ["embedded"]
 readme = "README.md"
 
+[lib]
+name = "whatsapp_esp32"
+path = "src/lib.rs"
+
+[[bin]]
+name = "whatsapp-esp32"
+path = "src/main.rs"
+
 [dependencies]
 # `critical-section`: edge-executor 0.5 guards its run-queue with embassy-sync's
 # CriticalSectionRawMutex, which links against a `critical-section` provider.
 # esp-idf-hal's is an ESP-IDF spinlock, correct across both cores and ISRs.
 esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
-esp-idf-hal = "0.46"
 # `Headers` for the admin server's POST handlers (Content-Length / Content-Type);
 # the `Request` type esp-idf-svc re-exports implements it but does not re-export it.
-embedded-svc = { version = "0.29", default-features = false }
+embedded-svc = { version = "0.29", default-features = false, optional = true }
 
 log = "0.4"
 # anyhow stays a direct dependency: esp-idf-svc errors are converted with `?`,
@@ -51,14 +58,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-#
-# DANGER: `danger-skip-cert-chain-verify` disables Noise server-certificate (XEdDSA)
-# verification. Needed to connect to the local mock server (its cert isn't signed by
-# WhatsApp's production key). REMOVE this feature before connecting to the real
-# WhatsApp gateway. Without it the server cert chain is unverified (MITM risk).
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "ec72862c315cfea50c27404a0777a6f9bfae4d84", default-features = false, features = [
-    "danger-skip-cert-chain-verify",
-] }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "ec72862c315cfea50c27404a0777a6f9bfae4d84", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing
@@ -79,13 +79,31 @@ codegen-units = 1
 strip = false
 panic = "abort"
 
+[lints.rust]
+# ldproxy announces itself on stderr ("[ldproxy] Running ldproxy"); rustc's
+# `linker_messages` lint would otherwise report that on every link.
+linker_messages = "allow"
+
 [features]
+# The dashboard only. `mock-server` is deliberately not a default: a consumer
+# that forgets `default-features = false` must still get a verified connection.
+default = ["admin"]
+# The HTTP dashboard and API (`admin` module): status, send, pairing code,
+# maintenance. The demo firmware serves it; a library consumer can leave it out.
+admin = ["dep:embedded-svc"]
+# Everything the demo needs to talk to the local mock server, none of which may
+# reach the real gateway: the demo accepts any TLS certificate (the mock mints a
+# fresh self-signed one per start), auto-scans its own pairing QR, and
+# whatsapp-rust skips Noise server-certificate (XEdDSA) verification, since the
+# mock's certificate is not signed by WhatsApp's production key. Off, the
+# firmware verifies both layers.
+mock-server = ["whatsapp-rust/danger-skip-cert-chain-verify"]
 # Run inside Espressif's QEMU instead of on a board: brings the network up over the
 # emulated OpenCores Ethernet MAC instead of WiFi, and points the default server URL
 # at the QEMU host (10.0.2.2). Build with `scripts/qemu.sh build`, which also layers
 # `sdkconfig.qemu` on top of `sdkconfig.defaults`; the feature alone is not enough,
 # because `peripherals.mac` only exists once `CONFIG_ETH_USE_OPENETH=y` is set.
-qemu = []
+qemu = ["mock-server"]
 
 [build-dependencies]
 embuild = "0.33"

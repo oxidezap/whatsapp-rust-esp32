@@ -75,6 +75,13 @@ impl EspHttpClient {
     }
 }
 
+/// Server certificates verified against ESP-IDF's root bundle.
+impl Default for EspHttpClient {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
 #[async_trait]
 impl HttpClient for EspHttpClient {
     async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
@@ -465,4 +472,78 @@ fn parse_http_response(response_buf: &[u8]) -> Result<HttpResponse> {
         status_code,
         body: body_slice.to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_url_variants() {
+        // HTTP default port
+        let (host, port, path, tls) = parse_url("http://example.com").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 80);
+        assert_eq!(path, "/");
+        assert!(!tls);
+
+        // HTTPS with path
+        let (host, port, path, tls) = parse_url("https://api.whatsapp.com/v1/sync").unwrap();
+        assert_eq!(host, "api.whatsapp.com");
+        assert_eq!(port, 443);
+        assert_eq!(path, "/v1/sync");
+        assert!(tls);
+
+        // WS with explicit port
+        let (host, port, path, tls) = parse_url("ws://192.168.1.100:8080/ws/chat").unwrap();
+        assert_eq!(host, "192.168.1.100");
+        assert_eq!(port, 8080);
+        assert_eq!(path, "/ws/chat");
+        assert!(!tls);
+
+        // WSS with custom port
+        let (host, port, path, tls) = parse_url("wss://10.0.2.2:4433/socket").unwrap();
+        assert_eq!(host, "10.0.2.2");
+        assert_eq!(port, 4433);
+        assert_eq!(path, "/socket");
+        assert!(tls);
+
+        // Invalid scheme
+        assert!(parse_url("ftp://server.com").is_err());
+        assert!(parse_url("invalid_url").is_err());
+    }
+
+    #[test]
+    fn test_exact_length_reader_contract() {
+        use std::io::Read;
+
+        let data = b"hello world from esp32";
+        let mut cursor = std::io::Cursor::new(data);
+        let mut reader = ExactLengthReader {
+            inner: &mut cursor,
+            remaining: data.len() as u64,
+        };
+
+        // Contract: empty buffer read must return Ok(0) without consuming remaining bytes
+        let mut empty_buf = [];
+        assert_eq!(reader.read(&mut empty_buf).unwrap(), 0);
+        assert_eq!(reader.remaining, data.len() as u64);
+
+        // Small read
+        let mut buf = [0u8; 5];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"hello");
+        assert_eq!(reader.remaining, (data.len() - 5) as u64);
+
+        // Remainder read
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(&rest, b" world from esp32");
+        assert_eq!(reader.remaining, 0);
+
+        // Subsequent read after EOF returns 0
+        let mut after_eof = [0u8; 10];
+        assert_eq!(reader.read(&mut after_eof).unwrap(), 0);
+    }
 }

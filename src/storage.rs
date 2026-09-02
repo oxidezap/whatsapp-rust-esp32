@@ -17,10 +17,10 @@
 //! write updates flash first and the mirror only once flash has committed, so
 //! RAM never claims more than flash holds.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use esp_idf_svc::handle::RawHandle;
 use esp_idf_svc::nvs::{EspCustomNvs, EspCustomNvsPartition, EspNvs, NvsDataType};
@@ -28,7 +28,6 @@ use sha2::{Digest, Sha256};
 use whatsapp_rust::async_trait;
 use whatsapp_rust::bytes::Bytes;
 use whatsapp_rust::serde_json;
-use whatsapp_rust::Client;
 
 use whatsapp_rust::wacore::appstate::hash::HashState;
 use whatsapp_rust::wacore::appstate::processor::AppStateMutationMAC;
@@ -53,15 +52,6 @@ const MAX_SENDER_KEYS: usize = 2048;
 // accumulate, and the write that hits this cap fails app-state sync for good.
 // They are ~200 bytes each, so a generous bound costs a rounding error of flash.
 const MAX_SYNC_KEYS: usize = 256;
-
-/// Longest message text kept per entry. The log is a dashboard preview, and the
-/// text is whatever a remote sender chose to send, so it is truncated rather
-/// than retained whole: a handful of maximum-size messages would otherwise pin
-/// megabytes of PSRAM for a panel that shows one line each.
-pub const MAX_LOGGED_TEXT_BYTES: usize = 256;
-
-/// How many inbound messages `/messages` keeps for the dashboard and the tests.
-const MESSAGE_LOG_CAPACITY: usize = 16;
 
 /// Flash-backed storage for the linked device and its cryptographic state.
 pub struct NvsStore {
@@ -95,10 +85,8 @@ impl FlashWorker {
         let (jobs, receiver) = mpsc::sync_channel::<FlashJob>(1);
         // Writing flash switches the cache off, so every byte this thread touches
         // has to be in internal RAM; a stack in PSRAM would fault the moment the
-        // write begins. `ThreadSpawnConfiguration` applies to the next thread the
-        // calling thread spawns, and the other workers set it to Spiram, so state
-        // it here rather than depending on this being constructed first.
-        esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
+        // write begins. Not configurable for that reason.
+        let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
             stack_size: 32 * 1024,
             priority: 5,
@@ -108,17 +96,13 @@ impl FlashWorker {
                 esp_idf_svc::hal::task::thread::MallocCap::Internal
                     | esp_idf_svc::hal::task::thread::MallocCap::Cap8bit
             ),
-        }
-        .set()
-        .map_err(|error| anyhow::anyhow!("could not configure the NVS worker: {error}"))?;
-        std::thread::Builder::new()
-            .name("wa-nvs".to_string())
-            .stack_size(32 * 1024)
-            .spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    job(&flash);
-                }
-            })?;
+        };
+        crate::runtime::spawn_thread(&thread, move || {
+            while let Ok(job) = receiver.recv() {
+                job(&flash);
+            }
+        })
+        .map_err(|error| anyhow::anyhow!("could not start the NVS worker: {error}"))?;
         Ok(Self { jobs })
     }
 
@@ -581,7 +565,7 @@ fn ensure_insert_capacity(exists: bool, len: usize, max: usize, label: &str) -> 
 
 /// Recover from mutex poisoning (a thread panicked while holding the lock).
 /// Logs the event so panics don't go unnoticed.
-fn recover_poisoned<T>(
+pub(crate) fn recover_poisoned<T>(
     e: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>,
 ) -> std::sync::MutexGuard<'_, T> {
     log::warn!("Mutex was poisoned (a thread panicked), recovering");
@@ -604,7 +588,15 @@ fn msg_secret_key(chat: &str, sender: &str, msg_id: &str) -> MsgSecretKey {
     (Arc::from(chat), Arc::from(sender), Arc::from(msg_id))
 }
 
+/// Default NVS partition name for WhatsApp credentials and Signal state.
+pub const DEFAULT_PARTITION_NAME: &str = "wa_store";
+
 impl NvsStore {
+    /// Open the WhatsApp store from the default partition (`wa_store`).
+    pub fn open_default() -> anyhow::Result<Self> {
+        Self::open(DEFAULT_PARTITION_NAME)
+    }
+
     pub fn open(partition_name: &str) -> anyhow::Result<Self> {
         // EspCustomNvsPartition::take() repairs NO_FREE_PAGES/NEW_VERSION by erasing.
         // Credential loss must never be an implicit recovery policy, so preflight
@@ -819,355 +811,6 @@ pub struct StoreStats {
     pub prekeys: usize,
     pub sender_keys: usize,
     pub device_exists: bool,
-}
-
-/// The client the supervisor loop is currently running, so the admin server can
-/// send through it and events from a superseded instance can be ignored.
-pub struct ActiveClient {
-    inner: Mutex<Option<Arc<Client>>>,
-}
-
-impl ActiveClient {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(None),
-        }
-    }
-
-    pub fn set(&self, client: Arc<Client>) {
-        *self.inner.lock().unwrap_or_else(recover_poisoned) = Some(client);
-    }
-
-    pub fn current(&self) -> Option<Arc<Client>> {
-        self.inner.lock().unwrap_or_else(recover_poisoned).clone()
-    }
-
-    pub fn is_current(&self, client: &Arc<Client>) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(recover_poisoned)
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, client))
-    }
-
-    pub fn clear_if(&self, client: &Arc<Client>) {
-        let mut current = self.inner.lock().unwrap_or_else(recover_poisoned);
-        if current
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, client))
-        {
-            *current = None;
-        }
-    }
-}
-
-/// What a maintenance request asks for, ordered by how much it destroys: a
-/// request can only be upgraded, never downgraded, while one is in flight.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MaintenanceAction {
-    Reboot,
-    ClearSessions,
-    Reset,
-}
-
-pub enum MaintenanceRequest {
-    /// The caller must start the maintenance task.
-    Start,
-    /// A task is already running and will pick this request up.
-    Queued,
-    /// The reboot is under way; nothing more can be queued.
-    Rejected,
-}
-
-#[derive(Default)]
-struct MaintenanceState {
-    requested: Option<MaintenanceAction>,
-    running: bool,
-    accepting: bool,
-}
-
-/// Arbitrates every operation that ends in a reboot. Requests can only upgrade
-/// in priority, so a server-forced credential reset wins over a concurrent
-/// session clear or plain reboot, and two dashboard clicks never race two
-/// erase-and-reboot sequences against each other.
-pub struct MaintenanceCoordinator {
-    inner: Mutex<MaintenanceState>,
-}
-
-impl MaintenanceCoordinator {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(MaintenanceState {
-                accepting: true,
-                ..Default::default()
-            }),
-        }
-    }
-
-    pub fn request(&self, action: MaintenanceAction) -> MaintenanceRequest {
-        let mut state = self.inner.lock().unwrap_or_else(recover_poisoned);
-        if !state.accepting {
-            return MaintenanceRequest::Rejected;
-        }
-        state.requested = Some(
-            state
-                .requested
-                .map_or(action, |current| current.max(action)),
-        );
-        if state.running {
-            MaintenanceRequest::Queued
-        } else {
-            state.running = true;
-            MaintenanceRequest::Start
-        }
-    }
-
-    pub fn requested(&self) -> MaintenanceAction {
-        self.inner
-            .lock()
-            .unwrap_or_else(recover_poisoned)
-            .requested
-            .unwrap_or(MaintenanceAction::Reboot)
-    }
-
-    /// Atomically closes the request window once the highest requested action
-    /// has been applied. A concurrent higher-priority request makes the caller
-    /// loop and apply it before rebooting.
-    pub fn begin_reboot(&self, applied: MaintenanceAction) -> bool {
-        let mut state = self.inner.lock().unwrap_or_else(recover_poisoned);
-        if state.requested.is_some_and(|requested| requested > applied) {
-            return false;
-        }
-        state.accepting = false;
-        true
-    }
-
-    pub fn is_idle(&self) -> bool {
-        let state = self.inner.lock().unwrap_or_else(recover_poisoned);
-        state.accepting && !state.running
-    }
-
-    /// The task that `Start` asked for could not be queued; reopen the window.
-    pub fn cancel_start(&self) {
-        let mut state = self.inner.lock().unwrap_or_else(recover_poisoned);
-        state.running = false;
-        state.requested = None;
-    }
-}
-
-/// One inbound message as the dashboard and `/messages` show it.
-pub struct MessageLogEntry {
-    pub id: String,
-    pub chat: String,
-    pub sender: String,
-    pub text: Option<String>,
-    pub timestamp: i64,
-    pub from_me: bool,
-}
-
-enum PairCodeState {
-    Idle,
-    Pending { request_id: u32 },
-    Ready { code: String, expires_at: Instant },
-    Error { message: String },
-}
-
-/// Shared state between the event handler, the admin server and the tests.
-pub struct DeviceStatus {
-    inner: Mutex<DeviceStatusInner>,
-}
-
-struct DeviceStatusInner {
-    qr_code: Option<String>,
-    connected: bool,
-    pn: Option<String>,
-    lid: Option<String>,
-    pair_code: PairCodeState,
-    next_pair_code_request: u32,
-    messages: VecDeque<MessageLogEntry>,
-}
-
-impl DeviceStatus {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(DeviceStatusInner {
-                qr_code: None,
-                connected: false,
-                pn: None,
-                lid: None,
-                pair_code: PairCodeState::Idle,
-                next_pair_code_request: 1,
-                messages: VecDeque::with_capacity(MESSAGE_LOG_CAPACITY),
-            }),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, DeviceStatusInner> {
-        self.inner.lock().unwrap_or_else(recover_poisoned)
-    }
-
-    pub fn set_qr_code(&self, code: String) {
-        let mut s = self.lock();
-        s.qr_code = Some(code);
-        s.connected = false;
-    }
-
-    pub fn clear_qr_code(&self) {
-        self.lock().qr_code = None;
-    }
-
-    pub fn set_connected(&self, pn: Option<String>, lid: Option<String>) {
-        let mut s = self.lock();
-        s.qr_code = None;
-        s.connected = true;
-        s.pn = pn;
-        s.lid = lid;
-        s.pair_code = PairCodeState::Idle;
-    }
-
-    /// Socket dropped. Keeps pn/lid: the device is still paired, just offline,
-    /// and the dashboard should keep showing which account it is.
-    pub fn set_disconnected(&self) {
-        self.lock().connected = false;
-    }
-
-    /// Unpaired by the server (or locally). The identity is gone, so clear it —
-    /// otherwise the dashboard would show a stale account next to the new QR.
-    pub fn set_logged_out(&self) {
-        let mut s = self.lock();
-        s.connected = false;
-        s.pn = None;
-        s.lid = None;
-        s.messages.clear();
-    }
-
-    /// Reserve a phone-number pairing attempt. Only one can be pending or
-    /// unexpired at a time; a second request would generate a second code the
-    /// server then rejects the first one for.
-    pub fn begin_pair_code(&self) -> std::result::Result<u32, &'static str> {
-        let mut s = self.lock();
-        match &s.pair_code {
-            PairCodeState::Pending { .. } => return Err("A linking code is being generated"),
-            PairCodeState::Ready { expires_at, .. } if *expires_at > Instant::now() => {
-                return Err("A linking code is already active");
-            }
-            _ => {}
-        }
-        let request_id = s.next_pair_code_request;
-        s.next_pair_code_request = s.next_pair_code_request.wrapping_add(1);
-        s.pair_code = PairCodeState::Pending { request_id };
-        Ok(request_id)
-    }
-
-    fn pair_code_request_is(state: &PairCodeState, wanted: u32) -> bool {
-        matches!(state, PairCodeState::Pending { request_id } if *request_id == wanted)
-    }
-
-    pub fn complete_pair_code(&self, request_id: u32, code: String, valid_for: Duration) {
-        let mut s = self.lock();
-        if Self::pair_code_request_is(&s.pair_code, request_id) {
-            s.pair_code = PairCodeState::Ready {
-                code,
-                expires_at: Instant::now() + valid_for,
-            };
-        }
-    }
-
-    pub fn fail_pair_code(&self, request_id: u32, message: &str) {
-        let mut s = self.lock();
-        if Self::pair_code_request_is(&s.pair_code, request_id) {
-            s.pair_code = PairCodeState::Error {
-                message: message.to_string(),
-            };
-        }
-    }
-
-    pub fn record_message(&self, mut entry: MessageLogEntry) {
-        const ELLIPSIS: char = '…';
-        // Edition 2021 here, so no let-chain.
-        if let Some(text) = entry
-            .text
-            .as_mut()
-            .filter(|t| t.len() > MAX_LOGGED_TEXT_BYTES)
-        {
-            // Reserve space for the ellipsis so the preview never exceeds MAX_LOGGED_TEXT_BYTES.
-            let budget = MAX_LOGGED_TEXT_BYTES.saturating_sub(ELLIPSIS.len_utf8());
-            let end = (0..=budget)
-                .rev()
-                .find(|&i| text.is_char_boundary(i))
-                .unwrap_or(0);
-            text.truncate(end);
-            text.push(ELLIPSIS);
-        }
-        let mut s = self.lock();
-        if s.messages.len() == MESSAGE_LOG_CAPACITY {
-            s.messages.pop_front();
-        }
-        s.messages.push_back(entry);
-    }
-
-    #[allow(dead_code)]
-    pub fn to_json(&self) -> String {
-        self.to_json_authenticated(true)
-    }
-
-    pub fn to_json_authenticated(&self, authenticated: bool) -> String {
-        let s = self.lock();
-        let pair_code = if !authenticated {
-            serde_json::json!({ "state": "redacted" })
-        } else {
-            match &s.pair_code {
-                PairCodeState::Idle => serde_json::json!({ "state": "idle" }),
-                PairCodeState::Pending { .. } => serde_json::json!({ "state": "pending" }),
-                PairCodeState::Ready { code, expires_at } => {
-                    let remaining = expires_at.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        serde_json::json!({ "state": "expired" })
-                    } else {
-                        serde_json::json!({
-                            "state": "ready",
-                            "code": code,
-                            "expires_in_seconds": remaining.as_secs(),
-                        })
-                    }
-                }
-                PairCodeState::Error { message } => {
-                    serde_json::json!({ "state": "error", "message": message })
-                }
-            }
-        };
-        serde_json::json!({
-            "qr_code": if authenticated { s.qr_code.as_deref() } else { None },
-            "connected": s.connected,
-            "pn": s.pn,
-            "lid": s.lid,
-            "pair_code": pair_code,
-        })
-        .to_string()
-    }
-
-    pub fn messages_json(&self) -> String {
-        let s = self.lock();
-        let messages: Vec<serde_json::Value> = s
-            .messages
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "id": m.id,
-                    "chat": m.chat,
-                    "sender": m.sender,
-                    "text": m.text,
-                    "timestamp": m.timestamp,
-                    "from_me": m.from_me,
-                })
-            })
-            .collect();
-        serde_json::json!({
-            "count": messages.len(),
-            "messages": messages,
-        })
-        .to_string()
-    }
 }
 
 #[async_trait]
