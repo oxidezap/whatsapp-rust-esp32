@@ -15,6 +15,10 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes to the repository; the token only needs to read it.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Pinned Xtensa Rust release (esp-rs/rust-build). Bump deliberately: it moves the
@@ -44,7 +48,9 @@ jobs:
             build: scripts/qemu.sh build
             out: target/qemu/xtensa-esp32s3-espidf/release
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Host tools the ESP-IDF build needs
         run: |
@@ -55,7 +61,7 @@ jobs:
       # Installs the `esp` Rust toolchain (Xtensa-enabled rustc + GCC) with espup and
       # ldproxy, the linker wrapper .cargo/config.toml names.
       - name: Xtensa Rust toolchain
-        uses: esp-rs/xtensa-toolchain@v1.7
+        uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7
         with:
           default: true
           buildtargets: esp32s3
@@ -66,7 +72,7 @@ jobs:
       # under .embuild). Cache it with the target dir; the key covers everything
       # that changes what esp-idf-sys produces.
       - name: Cache ESP-IDF and build outputs
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -88,7 +94,7 @@ jobs:
           scripts/check-app-size.sh "${{ matrix.out }}/whatsapp-esp32.bin" partitions.csv
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-${{ matrix.flavor }}
           if-no-files-found: error
@@ -121,9 +127,11 @@ jobs:
           --log-opt max-size=10m
           --log-opt max-file=1
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: firmware-qemu
           path: target/qemu/xtensa-esp32s3-espidf/release
@@ -155,7 +163,7 @@ jobs:
 
       - name: Upload serial log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qemu-serial-log
           if-no-files-found: ignore

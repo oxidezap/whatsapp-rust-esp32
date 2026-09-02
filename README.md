@@ -130,7 +130,7 @@ is enough.
 ## Test without hardware
 
 Two layers stand in for a board, and both run in CI (`.github/workflows/ci.yml`)
-on every push and pull request:
+on pull requests and on pushes to `main`:
 
 1. **Build for the real target.** The `build` job compiles the firmware for
    `xtensa-esp32s3-espidf` with the pinned `esp` toolchain in two flavors, the
@@ -165,7 +165,7 @@ What the `qemu` feature changes, and nothing else: the network comes up over the
 emulated Ethernet MAC instead of WiFi (QEMU has no radio), so no `.env` is needed,
 and the default server URL becomes `wss://10.0.2.2:8080/ws/chat`, the host as seen
 from QEMU's user-mode network. `WHATSAPP_WS_URL` still overrides it. The dashboard
-is forwarded to `http://localhost:8081`. The overlay `sdkconfig.qemu` enables the
+is forwarded to `http://localhost:8081`, on loopback only, since it is unauthenticated. The overlay `sdkconfig.qemu` enables the
 OpenCores driver, switches the PSRAM probe to quad mode (what QEMU's generic SPI
 PSRAM answers), and moves mbedTLS's AES and SHA to software, because the emulated
 AES block never completes a DMA transfer and every TLS connect would spin forever

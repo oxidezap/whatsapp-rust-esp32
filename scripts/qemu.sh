@@ -15,7 +15,8 @@
 # Guest networking is QEMU user-mode (slirp): the guest gets 10.0.2.15 by DHCP and
 # reaches the host as 10.0.2.2, which is what the firmware's `qemu` feature uses as
 # the default WhatsApp server URL. The admin dashboard is forwarded to host port
-# ${ADMIN_PORT:-8081} so `test` can read it with curl.
+# ${ADMIN_PORT:-8081}, bound to loopback only (it has no authentication and can
+# factory-reset or reboot the device), so `test` can read it with curl.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -89,7 +90,7 @@ qemu_cmd() {
     QEMU_CMD=(
         "$QEMU_XTENSA" -nographic -M esp32s3 -m 8M
         -drive "file=$FLASH_IMAGE,if=mtd,format=raw"
-        -nic "user,model=open_eth,hostfwd=tcp::${ADMIN_PORT}-:8081"
+        -nic "user,model=open_eth,hostfwd=tcp:127.0.0.1:${ADMIN_PORT}-:8081"
         -serial mon:stdio
     )
     if [[ -n "${QEMU_GDB:-}" ]]; then
