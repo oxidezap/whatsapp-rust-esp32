@@ -273,9 +273,11 @@ fn run_executor(
     store: std::sync::Arc<MemoryStore>,
     device_status: std::sync::Arc<storage::DeviceStatus>,
 ) {
-    // With the `unbounded` feature the const generic is nominal: the run-queue is a
-    // growable SegQueue, so >64 simultaneously-runnable tasks no longer panic.
-    let executor: edge_executor::LocalExecutor<'_, 64> = edge_executor::LocalExecutor::new();
+    // `UnboundQueue` (a growable VecDeque) rather than the default 64-slot
+    // `BoundQueue`: a burst of more than 64 runnable tasks must queue, not fail
+    // the spawn and take the firmware down with it.
+    let executor: edge_executor::LocalExecutor<'_, edge_executor::UnboundQueue> =
+        edge_executor::LocalExecutor::new();
 
     executor
         .spawn(run_whatsapp(task_tx, store, device_status))

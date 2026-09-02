@@ -14,7 +14,10 @@ categories = ["embedded"]
 readme = "README.md"
 
 [dependencies]
-esp-idf-svc = { version = "0.52", features = ["binstart"] }
+# `critical-section`: edge-executor 0.5 guards its run-queue with embassy-sync's
+# CriticalSectionRawMutex, which links against a `critical-section` provider.
+# esp-idf-hal's is an ESP-IDF spinlock, correct across both cores and ISRs.
+esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
 esp-idf-hal = "0.46"
 
 log = "0.4"
@@ -26,14 +29,14 @@ anyhow = "1"
 # whatsapp-rust does not enable, so this one is also declared directly.
 futures = "0.3"
 
-# Lightweight async executor for ESP32. `unbounded` backs the run-queue with a
-# growable SegQueue (infallible push) instead of a fixed 64-slot ArrayQueue whose
-# push().unwrap() would panic/abort the firmware if >64 tasks are runnable at once.
-edge-executor = { version = "0.4", features = ["unbounded"] }
+# Lightweight async executor for ESP32. Since 0.5 the run-queue is always a
+# growable queue (the old `unbounded` feature is gone), so more than 64 runnable
+# tasks at once can no longer panic the firmware on a full fixed-size queue.
+edge-executor = "0.5"
 enumset = "1"
 
 # WebSocket framing (no TLS features - we use ESP-IDF mbedTLS)
-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 # WhatsApp protocol. Single dependency: since 0.7.0 the crate re-exports
 # everything a consumer needs (`whatsapp_rust::{wacore, waproto, buffa,
@@ -47,7 +50,7 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 # verification. Needed to connect to the local mock server (its cert isn't signed by
 # WhatsApp's production key). REMOVE this feature before connecting to the real
 # WhatsApp gateway. Without it the server cert chain is unverified (MITM risk).
-whatsapp-rust = { version = "0.7.0", default-features = false, features = [
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "ec72862c315cfea50c27404a0777a6f9bfae4d84", default-features = false, features = [
     "danger-skip-cert-chain-verify",
 ] }
 
