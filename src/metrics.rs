@@ -109,11 +109,18 @@ pub fn system_metrics_json() -> String {
     let stack_wa_main = stack_free_min(c"wa-main");
     let stack_ws_transport = stack_free_min(c"ws-transport");
 
-    let mut rssi: core::ffi::c_int = 0;
-    let rssi = if unsafe { sys::esp_wifi_sta_get_rssi(&mut rssi) } == sys::ESP_OK {
-        Some(rssi)
-    } else {
-        None
+    // No radio under QEMU (the network is the emulated Ethernet MAC), so the
+    // WiFi driver is never initialized there and this query has nothing to ask.
+    #[cfg(feature = "qemu")]
+    let rssi: Option<core::ffi::c_int> = None;
+    #[cfg(not(feature = "qemu"))]
+    let rssi = {
+        let mut rssi: core::ffi::c_int = 0;
+        if unsafe { sys::esp_wifi_sta_get_rssi(&mut rssi) } == sys::ESP_OK {
+            Some(rssi)
+        } else {
+            None
+        }
     };
 
     serde_json::json!({

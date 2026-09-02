@@ -148,8 +148,15 @@ cmd_test() {
     device="$(curl -sS --max-time 10 "http://127.0.0.1:${ADMIN_PORT}/device")"
     log "GET /device -> $device"
     grep -q '"connected":true' <<<"$device" || { log "dashboard does not report connected"; return 1; }
-    curl -sS --max-time 10 "http://127.0.0.1:${ADMIN_PORT}/metrics" | tee "$OUT_DIR/qemu-metrics.json" >&2
-    echo >&2
+    # Diagnostic only: heap, stack and PSRAM numbers for the log. The pass/fail
+    # decision above is /device; a slow or failed metrics read must not turn a
+    # connected session into a red run.
+    if curl -sS --max-time 20 "http://127.0.0.1:${ADMIN_PORT}/metrics" > "$OUT_DIR/qemu-metrics.json"; then
+        cat "$OUT_DIR/qemu-metrics.json" >&2
+        echo >&2
+    else
+        log "metrics unavailable (ignored)"
+    fi
     log "PASS"
 }
 
