@@ -142,10 +142,14 @@ jobs:
           password: ${{ secrets.BARTENDER_GHCR_TOKEN }}
         ports:
           - 8080:8080
+        # `local` compresses rotated files by default and refuses to start with
+        # max-file=1 unless compression is off; same three options as the
+        # whatsapp-rust E2E job.
         options: >-
           --log-driver local
           --log-opt max-size=10m
           --log-opt max-file=1
+          --log-opt compress=false
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
