@@ -85,10 +85,21 @@ impl FlashWorker {
         let (jobs, receiver) = mpsc::sync_channel::<FlashJob>(1);
         // Writing flash switches the cache off, so every byte this thread touches
         // has to be in internal RAM; a stack in PSRAM would fault the moment the
-        // write begins. Not configurable for that reason.
+        // write begins. Not configurable for that reason, and the one stack that
+        // costs internal DRAM on every board.
+        //
+        // Which is why it is also the one worth measuring. The jobs that run here
+        // are shallow and bounded -- put/delete one record, or erase a namespace
+        // -- and none of them puts a record on the stack: `read_blob` and
+        // `encode_record` both build `Vec`s. The boot replay, the only thing that
+        // walks the whole store, runs on the ESP-IDF main task before this worker
+        // exists (hence CONFIG_ESP_MAIN_TASK_STACK_SIZE), not here. Measured peak
+        // on the emulated ESP32-C3 across pairing writes and a factory reset is
+        // in docs/esp32c3.md; 12 KB keeps a wide multiple of it, and a board with
+        // PSRAM keeps the 32 KB it was tested on since it has DRAM to spare.
         let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
-            stack_size: 32 * 1024,
+            stack_size: crate::runtime::by_ram(32 * 1024, 12 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: None,

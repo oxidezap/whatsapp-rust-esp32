@@ -171,8 +171,8 @@ variant, so there was nothing to restructure, only sizes to choose. The one real
 bug was in a dependency's defaults, and no amount of reading would have found it.
 Booting it did.
 
-Free heap on the emulated C3 with the network up, the dashboard bound, the `Bot`
-built and the transport connected: **173,880 bytes**, of which 166,396 internal.
+On the emulated C3 with the network up, the dashboard bound, the `Bot` built and
+the transport connected, the all-time heap low-water mark is **57,016 bytes**.
 That is the number to watch, and the honest caveat is that QEMU has no radio, so
 it does not include what the Wi-Fi driver holds on a real board.
 

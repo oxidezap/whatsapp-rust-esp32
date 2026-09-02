@@ -36,6 +36,7 @@ change even though the C3 differs from the others in the deepest possible way.
 | `wa-main` executor stack | 256 KB | 64 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. |
 | `wa-blocking` worker stack | 32 KB | 20 KB | Prekey batches: CPU-bound, not deep. |
 | `ws-transport` stack | 16 KB | 12 KB | mbedTLS records and `tungstenite` framing; neither recurses. |
+| `wa-nvs` worker stack | 32 KB | 12 KB | Internal DRAM on every board (see below), so the one stack worth measuring. Peak use 2,868 B. |
 | tungstenite read buffer | 128 KB | 8 KB | See below. |
 | tungstenite write buffer | 128 KB | 8 KB | See below. |
 
@@ -46,9 +47,17 @@ buffer counts from 10/32/32 to 4/8/8, and mbedTLS gets `DYNAMIC_BUFFER` plus
 asymmetric record buffers (16 KB in, 4 KB out) since it can no longer allocate
 from external memory.
 
-The `wa-nvs` stack is unchanged at 32 KB of **internal** DRAM on every board: it
-must be internal everywhere, because writing flash disables the cache and a stack
-in PSRAM would fault mid-write.
+`wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
+disables the cache, so a stack in PSRAM would fault mid-write -- which makes it
+the one worth measuring rather than guessing at. Its jobs are shallow and
+bounded: put or delete one record, or erase a namespace, and none of them puts a
+record on the stack (`read_blob` and `encode_record` both build `Vec`s). The boot
+replay, the only thing that walks the whole store, runs on the ESP-IDF main task
+before this worker exists. Measured peak is **2,868 bytes**, the same at 32 KB and
+at 12 KB, and unchanged by a `DELETE /sessions` -- which runs the deepest job,
+`erase_namespace` -- and the reboot that follows it. 12 KB keeps more than three
+times the observed peak and hands 20 KB of internal DRAM back to the heap; the
+PSRAM boards keep the 32 KB they were tested on.
 
 ## The two failures worth writing down
 
@@ -95,9 +104,28 @@ Verified by building and booting the `qemu` flavour on Espressif's QEMU
 - `NvsStore` opens the `wa_store` partition and replays it.
 - DHCP over the emulated OpenCores MAC, SNTP, mDNS.
 - The admin dashboard binds and registers every route.
-- **Free heap after all of that: 173,880 bytes (166,396 internal).**
 - The `Bot` is built, the transport connects over TLS and completes the
   WebSocket handshake.
+- `DELETE /sessions` erases a namespace on the `wa-nvs` worker, the firmware
+  reboots itself, and the store comes back `device=true`: what the first boot
+  wrote survived in the emulated flash.
+
+Heap, with the network up, the dashboard bound, the `Bot` built and the transport
+connected:
+
+| | Free | All-time low |
+| --- | --- | --- |
+| At `Free heap:` in the boot log | 173,880 (166,396 internal) | -- |
+| Steady state | 64,680 | **57,016** |
+
+Stack high-water marks from `GET /metrics` (bytes still free at the deepest point):
+
+| Thread | Size | Free at peak | Used |
+| --- | --- | --- | --- |
+| `wa-main` | 64 KB | 45,004 | 20,532 |
+| `wa-nvs` | 12 KB | 9,724 | 2,868 |
+| `ws-transport` | 12 KB | 6,588 | 5,700 |
+| `wa-blocking` | 20 KB | 19,568 | 912 (no prekey batch yet) |
 
 Not verified, and it matters:
 
