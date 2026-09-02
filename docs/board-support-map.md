@@ -72,9 +72,18 @@ claim in the README.
 What has to be checked, in order:
 
 1. **4 MB of mapped PSRAM, not 8.** The ESP32 MMU maps at most 4 MB of PSRAM into
-   the data address space; anything above needs the `himem` bank-switching API,
-   which the Rust global allocator cannot use. *Estimated*: the ~0.5 MB live plus
-   ~342 KB of stacks fit, but the margin is the whole question — instrument
+   the data address space at a time. Reaching past that needs `himem`, an
+   ESP32-only bank-switching API: it reserves a window of 32 KB banks inside those
+   4 MB and swaps which physical bank is visible there
+   (`esp_himem_alloc` / `esp_himem_map` / `esp_himem_unmap`,
+   `CONFIG_SPIRAM_BANKSWITCH_ENABLE`). It is not an option here, for three
+   independent reasons: himem memory is not part of `heap_caps_malloc`, so
+   `src/psram_alloc.rs` cannot hand out pointers from it and the 256 KB executor
+   stack certainly cannot live in a bank that may be unmapped under it; enabling
+   it *reduces* the malloc-able PSRAM, since the reserved window comes out of the
+   same 4 MB; and QEMU does not emulate the PSRAM MMU anyway. So the budget on
+   this chip is a flat 4 MB, even on an 8 MB module. *Estimated*: the ~0.5 MB live
+   plus ~342 KB of stacks fit, but the margin is the whole question — instrument
    `psram_free` at the peak of first pairing, not at idle.
 2. **No `SPIRAM_FETCH_INSTRUCTIONS` / `SPIRAM_RODATA`.** Those are S2/S3 knobs;
    the classic runs code from the flash cache only. This removes the S3's
