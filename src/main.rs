@@ -195,11 +195,17 @@ fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // Verbose by design: surface whatsapp-rust's DEBUG decrypt/session/protocol logs
-    // on the serial monitor (the compile-time default is INFO). The C log macros are
-    // compiled out above INFO, so this only unmasks the Rust-side debug records routed
-    // through esp_log_write. It keeps the demo's protocol flow visible on the wire;
-    // drop to LevelFilter::Info for a quieter, slightly faster build.
+    // Raise the RUNTIME filter to DEBUG, which surfaces whatsapp-rust's decrypt,
+    // session and protocol records on the serial monitor. The C log macros are
+    // compiled out above INFO, so this only unmasks the Rust-side records routed
+    // through esp_log_write.
+    //
+    // In a RELEASE build there are none left to unmask: `log`'s
+    // `release_max_level_info` feature (see Cargo.toml) compiles every
+    // `debug!`/`trace!` call site and its format string out of the binary, which
+    // is 83,456 bytes of app image. So this line is what makes `cargo build`
+    // without `--release` the way to watch the protocol flow, and it stays a
+    // no-op cost in the image that ships.
     log::set_max_level(log::LevelFilter::Debug);
     unsafe {
         esp_idf_svc::sys::esp_log_level_set(

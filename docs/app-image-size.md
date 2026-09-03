@@ -6,8 +6,11 @@ image fills 82.6% of it, and no 4 MB board can hold it at all. This is a
 measurement of what is actually in there, and of what the obvious levers are
 really worth.
 
-Nothing here is applied. Every number below was produced by building and
-measuring; the recommendations at the end are proposals.
+Three of the levers measured below are now **applied as defaults** (A, B and D),
+taking the image from 4,112,672 to **3,879,360 bytes -- 233,312 fewer, 5.7%**,
+and the factory partition from 82.6% to 77.9% full. Every number here was
+produced by building and measuring, not estimated. What is left un-applied, and
+why, is at the end.
 
 ## Method
 
@@ -180,28 +183,54 @@ speed/size tradeoff owned upstream.
 Each was built and imaged; each row is a real image size, not an estimate.
 Baseline **4,112,672**.
 
-| # | Change | Image | Delta | What it costs |
-| --- | --- | --- | --- | --- |
-| **D** | `std` built without the `backtrace` feature (`-Zbuild-std-features=compiler-builtins-mem`) | 4,024,880 | **−87,792 (−2.1%)** | **Nothing.** Verified: zero `gimli::` symbols remain, and panic messages still come from the hook in `crash.rs`. |
-| **A** | `log` with `release_max_level_info` | 4,029,216 | **−83,456 (−2.0%)** | All `debug!`/`trace!` call sites and their format strings, across every crate. The demo deliberately runs at DEBUG to show the protocol flow. |
-| **B** | `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y` | 4,072,640 | **−40,032 (−1.0%)** | The full root bundle drops to the common CAs. Needs checking against the real gateway's chain before adoption; irrelevant to `mock-server` builds, which verify nothing. |
-| **C** | `panic = "immediate-abort"` | 3,921,760 | **−190,912 (−4.6%)** | **Panic messages and locations, entirely.** Directly defeats `src/crash.rs`. Includes D's saving. |
-| | **D + A + B** (keeps panic capture) | 3,879,360 | **−233,312 (−5.7%)** | debug logs + bundle scope |
-| | A + B + C (loses panic capture) | 3,776,016 | **−336,656 (−8.2%)** | the above plus panic diagnostics |
+| # | Change | Image | Delta | What it costs | |
+| --- | --- | --- | --- | --- | --- |
+| **D** | `std` built without the `backtrace` feature (`build-std-features` in `.cargo/config.toml`) | 4,024,880 | **−87,792 (−2.1%)** | **Nothing.** Verified: zero `gimli::` symbols remain, and panic capture is unaffected. | **applied** |
+| **A** | `log` with `release_max_level_info` | 4,029,216 | **−83,456 (−2.0%)** | All `debug!`/`trace!` call sites and their format strings, in **release** builds. A debug build still traces the protocol flow. | **applied** |
+| **B** | `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y` | 4,072,640 | **−40,032 (−1.0%)** | The full root bundle drops to 43 common CAs. Production builds only. | **applied** |
+| **C** | `panic = "immediate-abort"` | 3,921,760 | **−190,912 (−4.6%)** | **Panic messages and locations, entirely.** Defeats `src/crash.rs`. | not applied |
+| | **A + B + D**, what this tree now builds | **3,879,360** | **−233,312 (−5.7%)** | | |
+| | A + B + C | 3,776,016 | −336,656 (−8.2%) | the above plus panic diagnostics | |
 
-Two things follow.
+### Why A, B and D and not C
 
-**D is free and should just be done.** 88 KB for a symbolizer that cannot
-symbolize anything in this firmware. It is one line in `.cargo/config.toml`
-(`build-std-features`), and it is worth more than the certificate bundle.
+**D costs nothing at all.** 88 KB for a symbolizer that cannot symbolize anything
+in this firmware: it aborts on panic, reboots, and reports through the hook in
+`src/crash.rs` and the ESP-IDF core dump. Naming a `build-std-features` list is
+what drops it, because that overrides `std`'s defaults, of which `backtrace` is
+one.
 
-**No combination of build switches gets this under 4 MB.** Everything above,
-including the option that throws away panic diagnostics, lands at 3.78 MB. The
-8 MB flash floor is structural.
+**A only affects release builds.** `release_max_level_info` leaves `cargo build`
+without `--release` fully verbose, so the protocol-level tracing the demo is
+built to show is one flag away rather than gone. Every marker the QEMU
+end-to-end suite waits on is `info!`, checked before applying: `whatsapp-esp32
+starting`, `Ethernet connected! IP:`, `WhatsApp NVS loaded`, `QR CODE`,
+`Connected to WhatsApp!`, `Bot built, starting run loop`, `Reaction sent`, `Send
+took`.
+
+**B is the one with a real caveat.** It narrows which roots the device will
+trust. The common set is 43 CAs including 11 DigiCert roots -- the family Meta
+issues from -- plus Amazon, GlobalSign, Google Trust Services, ISRG, Sectigo,
+GoDaddy and IdenTrust. It could not be verified against the live gateway from
+here, and neither CI nor the QEMU suite covers it, because a `mock-server` build
+configures no CA at all. The failure mode if the chain ever falls outside the set
+is a loud TLS handshake failure at connect, not a silent downgrade, and the fix
+is one line. **A production build should still be smoke-tested against the real
+gateway once.**
+
+**C is refused.** 191 KB is the largest single saving available, and it is the
+only one that would delete a feature this firmware was deliberately built around:
+`crash.rs` exists to capture the panic message and location into RTC RAM so the
+*next* boot can report why the last one died. Trading that for 4.6% of flash on a
+device with no console attached is the wrong way round.
+
+**And none of it changes the shape of the problem.** Even A+B+C lands at 3.78 MB.
+No combination of build switches gets under 4 MB; the 8 MB flash floor is
+structural.
 
 ## Where the remaining mass is, and who owns it
 
-The measured levers are worth ~8% between them. `waproto` alone is ~15%, and
+The measured levers are worth ~8% between them, and 5.7% is now taken. `waproto` alone is ~15%, and
 `whatsapp_rust::client` another ~15%. Both are upstream in
 [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust), and that is where a
 step change would have to come from:
@@ -226,9 +255,11 @@ directly comparable.
 
 - Sizes are from the ESP32-C3 build; the S3 image is ~10% larger with the same
   composition.
-- Each experiment was built and imaged, **not booted**. They are size
-  measurements. D is the only one recommended for adoption, and it should be
-  booted on QEMU before it is.
-- B changes which CAs the device trusts. That is a security-relevant change and
-  needs a real-gateway handshake, which neither QEMU nor the mock server can
-  provide.
+- The applied combination (A+B+D) was **booted on QEMU**, not only imaged: it
+  reaches `WebSocket connected` with every end-to-end marker present, and the
+  smaller image also returns RAM -- free heap at the `Free heap:` line goes from
+  173,880 to 196,392 bytes, and the all-time low under load from 57,016 to
+  59,088. Experiment C was imaged only; it is not applied.
+- B changes which CAs the device trusts. That is security-relevant, and it needs
+  a real-gateway handshake that neither QEMU nor the mock server can provide, so
+  it is the one item here still owed a check on hardware.
