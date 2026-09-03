@@ -38,9 +38,9 @@ than assume:
 BOARD=esp32c3
 source scripts/boards.sh && board_select "$BOARD"
 OUT=$(board_out_dir)                       # the triple lives in the board table
-case "$BOARD_TARGET" in                     # the GCC prefix ESP-IDF installs
-  riscv32*) PREFIX=riscv32-esp-elf ;;      # one for every RISC-V chip
-  xtensa-*) PREFIX=${BOARD_TARGET%-espidf}-elf ;;   # xtensa-esp32s3-elf
+case "$BOARD_TARGET" in       # the GCC prefix ESP-IDF installs, per tools.json:
+  riscv32*) PREFIX=riscv32-esp-elf ;;   # one for every RISC-V chip
+  xtensa-*) PREFIX=xtensa-esp-elf ;;    # likewise one for esp32/s2/s3 since v5.0
 esac
 BIN=$(dirname "$(find .embuild -name "$PREFIX-nm" | head -1)")
 IDFPY=$(find .embuild -path '*idf*_env/bin/python' | head -1)
