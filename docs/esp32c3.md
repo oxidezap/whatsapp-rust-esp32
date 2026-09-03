@@ -35,7 +35,7 @@ C3 differs from the others in the deepest possible way.
 
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
-| `wa-main` executor stack | 256 KB | 28 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. Measured peak 21,608 B. |
+| `wa-main` executor stack | 256 KB | 32 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. Measured peak 26,564 B against the streaming decode. |
 | `wa-blocking` worker stack | 32 KB | 6 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,404 B. |
 | `ws-transport` stack | 16 KB | 8 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
 | `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,644 B. |
@@ -552,39 +552,48 @@ point in the run:
 | the decoder's 28,772-byte copy | **aborted** | fits |
 | the abort | `28772 bytes failed` | `64 bytes failed` |
 
-The copy that had aborted four runs in a row now fits, and the firmware gets
-past it for the first time. It then dies on a **64-byte** allocation with
-52,924 free twenty milliseconds earlier: not fragmentation this time but
-exhaustion, some 50 KB taken in one step by whatever consumes the props payload
-next. That is `unpack_bytes`: the frame's format byte says the node is
-zlib-compressed, and `decompress_zlib_pooled` inflates it.
+The copy that had aborted four runs in a row now fitted, and the firmware got
+past it for the first time -- then died on a **64-byte** allocation, because
+`unpack_bytes` found the props node zlib-compressed and
+`zlib_rs::Inflate::new(true, 15)` wants **48,576 bytes** (measured on a host
+with a counting allocator) before producing a byte, with the output buffer
+pre-sized to twice the compressed length on top.
 
-What inflating costs, measured on a host with a counting allocator rather than
-taken from a comment: `zlib_rs::Inflate::new(true, 15)` allocates **48,576
-bytes** before it has produced a byte -- the 32 KB LZ77 window the compressor
-used plus the state -- and the pool keeps that alive on the thread afterwards.
-The output buffer is pre-sized to **twice the compressed length**, 56,408 here,
-a guess tuned for multi-megabyte history-sync chunks. With the 28,204-byte
-ciphertext still alive during inflation that is ~133 KB of demand against the
-~93 KB this chip has free at that moment. No arrangement of the receive path
-closes a gap of that shape; the decoder patch removes 28 KB of it and leaves
-the wall where it is.
+## How it was actually resolved
 
-So the boundary is now exact. Everything up to the props response works on
-the C3 without PSRAM, and the props response cannot be inflated in memory on
-it. The two ways through are both upstream, and neither is a resize:
+Both halves landed upstream, and the second one is the reason this section can
+be written at all.
 
-- **Stream it.** `wacore_binary::zlib_pool::InflateReader` already decompresses
-  history sync incrementally, holding one record at a time; parsing the props
-  node's children the same way would bound the peak at one property, not the
-  whole response.
-- **Make the fetch optional.** AB props are experiment flags; `fetch_props` is
-  a best-effort background query whose failure is a warning. A client option to
-  skip it on a target that cannot hold the answer is a configuration, not a
-  workaround, and it is the smaller change by far.
+`whatsapp-rust` at `bb5aa3a` consumes the props response as a **stream** rather
+than inflating it whole, and `FrameDecoder::feed_owned` adopts a uniquely-owned
+`Bytes` instead of copying it -- which is exactly what the WebSocket client in
+`src/ws.rs` hands over, so the transport-side work and the library-side work
+turned out to be the two ends of the same allocation. `main` also warms the
+inflate pool on the executor thread, so the ~47.5 KB of inflate state is built
+on a fresh heap instead of next to a resident 28 KB frame.
 
-## The board
+That removed the decompression wall. It did not, on its own, make the C3 green:
+with the state parked, free heap at the props read fell from 58,580 to 38,996,
+and the run then failed allocating the **frame itself** --
 
-`partitions.csv` is unchanged, so a C3 board needs **at least 8 MB of flash**
-(4.11 MB app, 1 MB `wa_store`) and the table as written assumes 16 MB. The common
-4 MB devkits (ESP32-C3-DevKitM-1, DevKitC-02) cannot hold this image at all.
+```text
+<-- WS recv 35 bytes    heap=38996/28672
+--> WS send 297 bytes   heap=38996/28672
+memory allocation of 28205 bytes failed
+```
+
+28,672 contiguous against 28,205 wanted, and lost by a few hundred bytes. The
+erosion is visible in the lines above it: the largest block goes 45,056 ->
+38,912 -> 34,816 -> 28,672 as upstream's background init fires Props, Blocklist,
+Privacy, Digest and Devices concurrently and each reply takes its own buffers.
+
+So the last step is the other option upstream shipped: `with_ab_props_fetch`.
+The catalog is experiment flags; the query is optional, and when it is off it is
+simply not sent -- the flags stay at their registry defaults and nothing else
+about the connection changes. **The board that cannot hold the answer does not
+ask the question**, and the PSRAM boards keep the default they were tested with.
+
+The other thing that run measured is the executor stack. `wa-main`'s peak rose
+from 21,608 to **26,564** against the streaming decode, leaving 2,108 bytes
+clear of the 28 KB it had been trimmed to. It goes back to 32 KB: the peak grew
+because the code did, and a 2 KB margin is not one.

@@ -724,6 +724,20 @@ async fn run_whatsapp_inner(
         // pool, which lives in the backend. The floor upstream is 5; 20 keeps
         // four times that, and the client re-uploads when the server runs low.
         .with_wanted_pre_key_count(20)
+        // The AB-props catalog is experiment flags, and its response is by far
+        // the largest frame this firmware ever receives: 28,204 bytes, against
+        // a largest free block that the concurrent background init has eroded
+        // to ~28.6 KB by the time it lands. Upstream now streams the inflate
+        // rather than buffering it whole, which removed the decompression wall
+        // -- but the frame itself still has to be materialised contiguously,
+        // and on the C3 it misses by a few hundred bytes.
+        //
+        // So the boards that cannot hold the answer do not ask the question.
+        // Turning the fetch off is a supported client option, not a workaround:
+        // the query is simply not sent, the flags stay at their registry
+        // defaults, and nothing else about the connection changes. PSRAM boards
+        // keep the default they were tested with.
+        .with_ab_props_fetch(crate::runtime::HAS_PSRAM)
         // Message history is not persisted (only identity and Signal state are),
         // so a history sync buys this firmware nothing and costs it a lot:
         // upstream measures the drain at ~14 MB of allocation churn, more than
