@@ -14,16 +14,22 @@ why, is at the end.
 
 ## Method
 
-Measured on the **ESP32-C3 release build** (`scripts/build.sh --board esp32c3
---release --features mock-server`, from the port in
-[#7](https://github.com/oxidezap/whatsapp-rust-esp32/pull/7)), because that is
-the build whose image size was the open question. The ESP32-S3 image is larger
-(~4.5 MB) but the composition is the same: the difference is instruction
-encoding, not content.
+Measured on the **ESP32-C3 release build**, because that is the build whose image
+size was the open question. The ESP32-S3 image is larger (~4.5 MB) but the
+composition is the same: the difference is instruction encoding, not content, and
+all three applied levers are chip-independent.
+
+```bash
+scripts/build.sh --board esp32c3 --release --features mock-server
+```
+
+Substitute any board in `scripts/boards.sh` and the rest of this section follows;
+`board_out_dir` in that file is what turns a board name into the paths below.
 
 Tools, all from the toolchain the build already installs under `.embuild`:
 
 ```bash
+# Or: source scripts/boards.sh; board_select esp32c3; OUT=$(board_out_dir)
 OUT=target/riscv32imc-esp-espidf/release
 BIN=.embuild/tools/riscv32-esp-elf/*/riscv32-esp-elf/bin
 MAP=$OUT/build/esp-idf-sys/*/out/build/libespidf.map
@@ -224,9 +230,14 @@ only one that would delete a feature this firmware was deliberately built around
 *next* boot can report why the last one died. Trading that for 4.6% of flash on a
 device with no console attached is the wrong way round.
 
-**And none of it changes the shape of the problem.** Even A+B+C lands at 3.78 MB.
-No combination of build switches gets under 4 MB; the 8 MB flash floor is
-structural.
+**And none of it changes the shape of the problem.** The smallest image measured
+here, A+B+C at 3,776,016 bytes, is itself under 4 MB -- but the board is not the
+image. A 4 MB part has 4,194,304 bytes for the bootloader, the partition table,
+the `nvs` partition, the app, the 64 KB core dump *and* the 1 MB `wa_store`. At
+3.78 MB of app that is over by more than a megabyte, and re-cutting
+`partitions.csv` does not close it: even with the core dump gone and the store
+down to 256 KB the total is still past 4 MB. The 8 MB flash floor is structural,
+and no build switch reaches it.
 
 ## Where the remaining mass is, and who owns it
 
