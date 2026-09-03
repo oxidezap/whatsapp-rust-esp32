@@ -1,16 +1,16 @@
-# Where the 4.1 MB app image goes
+# Where the app image goes
 
 The firmware is large enough that flash size, not RAM, is what rules boards out:
-`partitions.csv` gives the app a 0x4C0000 (4,980,736 byte) factory partition, the
-image fills 82.6% of it, and no 4 MB board can hold it at all. This is a
-measurement of what is actually in there, and of what the obvious levers are
-really worth.
+`partitions.csv` gives the app a 0x4C0000 (4,980,736 byte) factory partition, and
+no 4 MB board can hold the image at all. This is a measurement of what is
+actually in there, and of what the obvious levers are really worth.
 
-Three of the levers measured below are now **applied as defaults** (A, B and D),
-taking the image from 4,112,672 to **3,879,360 bytes -- 233,312 fewer, 5.7%**,
-and the factory partition from 82.6% to 77.9% full. Every number here was
-produced by building and measuring, not estimated. What is left un-applied, and
-why, is at the end.
+The image measured throughout is the **4,112,672-byte baseline** this analysis
+started from. Three of the levers found here are now applied as defaults (A, B
+and D), so the tree currently builds **3,879,360 bytes -- 233,312 fewer, 5.7%**,
+and the factory partition went from 82.6% to 77.9% full. The composition tables
+below are the baseline's; the levers and what they cost are at the end. Every
+number was produced by building and measuring, not estimated.
 
 ## Method
 
