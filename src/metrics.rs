@@ -155,7 +155,7 @@ pub mod alloc_note {
 /// that prints four lines per call pushes the evidence out of it. That is not
 /// hypothetical -- an earlier `memory_report()` probe in this investigation
 /// answered its question and displaced the run-up to the crash doing it.
-pub fn heap_now() -> (u32, u32) {
+pub fn heap_now() -> (usize, usize) {
     // SAFETY: read-only ESP-IDF accessors, safe from any context.
     let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
     unsafe {
