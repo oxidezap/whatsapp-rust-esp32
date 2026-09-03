@@ -58,7 +58,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "059978a7bc38904eed566c4a5530db6cd7b48dc1", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "b03a3defae85f44df2f877ce131e79a7b39fae90", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing

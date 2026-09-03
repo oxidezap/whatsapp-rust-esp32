@@ -83,7 +83,7 @@ own documentation for everything else.
 # Both from git, at the same whatsapp-rust revision this crate's Cargo.toml
 # names: two different whatsapp_rust packages in one build would give the
 # Bot builder trait objects the platform types do not implement.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "059978a7bc38904eed566c4a5530db6cd7b48dc1", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "b03a3defae85f44df2f877ce131e79a7b39fae90", default-features = false }
 whatsapp-esp32 = { git = "https://github.com/oxidezap/whatsapp-rust-esp32", default-features = false }
 esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
 anyhow = "1"
