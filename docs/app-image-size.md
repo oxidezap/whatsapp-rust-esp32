@@ -28,6 +28,16 @@ For another board, substitute it in **both** places -- the build and the `BOARD`
 below -- since the output directory and the `riscv32-`/`xtensa-` tool prefix both
 follow from it.
 
+`mock-server` is in the command because it is what CI builds, so the numbers here
+are the ones the size gate reports, and it does **not** change the image's
+composition. It selects the CA source at *run time*: `EspTlsStream::connect`
+takes `skip_tls_verify` as an ordinary argument and sets `crt_bundle_attach` in
+the branch it does not take (`src/transport.rs`), so the reference to
+`esp_crt_bundle_attach` is compiled either way and `--gc-sections` keeps
+`x509_crt_bundle.S.obj` alive. The 68,987 bytes below and lever B's -40,032 both
+reproduce from this command; what a `mock-server` build cannot exercise is the
+production trust path itself, which is the caveat under **B** at the end.
+
 Tools, all from the toolchain the build already installs under `.embuild`. Its
 layout is not fixed -- esp-idf-sys puts things under `.embuild/` or
 `.embuild/espressif/` depending on whether `ESP_IDF_TOOLS_INSTALL_DIR` was set,
