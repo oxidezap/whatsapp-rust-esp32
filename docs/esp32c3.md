@@ -374,6 +374,67 @@ The general lesson is the one this port keeps repeating: the numbers that matter
 here are the *peak contiguous* ones, not the totals. 194 KB free with a 28 KB
 largest block is a different machine from 194 KB free with a 100 KB one.
 
+## What the measurement said once the log stopped hiding it
+
+Every paragraph above this one was inference, and two of its conclusions were
+wrong. The reason is worth stating plainly: on a crash the QEMU harness printed
+`tail -n 80` of the serial log, and an ESP32 panic dumps registers plus hundreds
+of lines of stack hex. The tail was *all* hexdump. The line that says why had
+already scrolled past, so each round guessed a size, changed it, and read the
+same silence back. `scripts/qemu.sh` now anchors on the crash signature and
+prints the 60 lines *ending* at it, and the first run with that in place settled
+the question:
+
+```text
+--> WS send  297 bytes                            heap=71984/59392
+persistence_manager: Device state is dirty, saving to disk.
+storage: device record: 2839 bytes (2828 payload) heap=20464/7168
+<-- WS recv 28205 bytes                           heap=32560/13824
+<-- WS recv    40 bytes                           heap=32560/13824
+<-- WS recv   108 bytes                           heap=32560/13824
+<-- WS recv   355 bytes                           heap=35704/13824
+storage: device record: 2840 bytes (2829 payload) heap=35648/20480
+memory allocation of 28775 bytes failed
+```
+
+Three things fall out of it.
+
+**The device-state save is not the culprit.** The record is 2,839 bytes. The
+theory that it held the contiguous block during the props read cannot survive a
+2.8 KB measurement, and neither can the idea that fewer prekeys would shrink it:
+`wacore::store::Device` holds identity and the key pairs, and the prekey pool
+lives in the backend, not in the record. Cutting the count from 50 to 20 in fact
+moved the crash *earlier*, which is evidence against the prekey burst being the
+trigger at all.
+
+**The 28,205-byte AB-props frame is received successfully.** It is not the
+allocation that fails. `ws.read()` returns it, three small frames follow, and
+only then does a **28,775**-byte request abort the chip -- on `wa-main`, while
+that payload is being decrypted and parsed, with 35,648 bytes free but only
+**20,480 contiguous**. So the peak is not one buffer but the payload plus a
+second full-size copy of it, and the failure is contiguity again, one level up
+from where the earlier rounds were looking.
+
+**The heap collapses in a single 30 ms window.** Free goes 71,984 -> 20,464 and
+the largest block 59,392 -> 7,168 between the 297-byte send and the next log
+line. That window is upstream's background init: `node_io.rs` fires Props,
+Blocklist, Privacy, Digest and Devices concurrently through `futures::join!`, so
+the 28 KB props response lands while four other replies are in flight. There is
+no knob on that from this crate.
+
+That leaves the honest conclusion. Receiving a 28 KB WebSocket frame costs this
+firmware the frame buffer, the split-off payload (which shares that same
+allocation -- `BytesMut::split_to` is refcounted, so the larger buffer is held
+for as long as the message is), and a further ~28 KB to decode it: on the order
+of 90 KB of a heap that has ~72 KB free at that moment, and far less than that
+contiguous. No amount of resizing on this side closes a gap that shape. The fix
+belongs where the copies are made -- decoding the props response without
+materialising a second full-size buffer -- which is upstream in `whatsapp-rust`,
+not in this port. What this port can still do is stop losing the 54 KB the
+session spends between connect (126,348/114,688) and the props read
+(71,984/59,392), which is why the generic event arm now logs a full per-task
+profile: those events bracket exactly that window.
+
 ## The board
 
 `partitions.csv` is unchanged, so a C3 board needs **at least 8 MB of flash**

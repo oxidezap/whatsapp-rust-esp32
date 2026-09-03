@@ -809,6 +809,13 @@ async fn run_whatsapp_inner(
                     }
                     other => {
                         info!("event: {:?}", other.kind());
+                        // These fire either side of the background init burst
+                        // (Props, Blocklist, Privacy, Digest, Devices go out
+                        // together via `futures::join!`), which is where the C3
+                        // loses ~54 KB between connect and the props response.
+                        // A per-task profile here says which stack or which
+                        // pool is holding it, instead of leaving it inferred.
+                        crate::metrics::log_memory_profile("event");
                     }
                 }
             }
