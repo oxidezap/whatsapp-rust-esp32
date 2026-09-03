@@ -315,47 +315,47 @@ fn ws_thread(
     // either figure. The default is kept where there is PSRAM to spend, so the
     // boards this was tuned on keep the behaviour they were tested with.
     //
-    // `read_buffer_size` is NOT just a syscall-granularity knob here, and shrinking
-    // it was this port's mistake. tungstenite's `FrameCodec` allocates
-    // `in_buffer: BytesMut::with_capacity(read_buffer_size)` once, then on each
-    // frame header calls `in_buffer.reserve(frame_len)` -- the whole frame at
-    // once. `BytesMut::reserve_inner` grows by `max(len + additional, cap * 2)`
-    // and *reallocates and copies*, so it needs the entire new size contiguous.
+    // These four numbers are the most-measured thing in this port, and two
+    // attempts at them were wrong in opposite directions. The mechanism, finally:
     //
-    // At 4 KB the buffer reached capacity 16,150 with 4,096 bytes in it, and the
-    // 28,205-byte props response asked for 4,096 + 28,205 = **32,301** -- which is
-    // exactly the allocation that aborted the ESP32-C3, resolved from the stack
-    // dump against the CI firmware:
+    // tungstenite's `FrameCodec` allocates `in_buffer: BytesMut::with_capacity(
+    // read_buffer_size)` once, then calls `in_buffer.reserve(frame_len)` per frame
+    // header. `BytesMut::reserve_inner` reallocates to
+    // `max(len + additional, cap * 2)` and copies, so it needs the whole new size
+    // *contiguous* -- and note the `cap * 2` term: **the starting capacity is the
+    // floor of the next request.**
     //
-    //     0x4202815a  <bytes::bytes_mut::BytesMut>::reserve_inner
-    //     0x42161fa6  Esp32TransportFactory::create_transport::{closure#0}
-    //     0x42075b28  std::alloc::rust_oom::{closure#0}
+    // At `read_buffer_size` = 4 KB the 28,205-byte AB-props frame asked for
+    // 4,096 + 28,205 = 32,301 and aborted the chip. Reading that as "the buffer is
+    // too small" and raising it to 40 KB made it strictly worse: the buffer then
+    // held ~13 KB when the frame arrived, 13k + 28,205 just cleared 40,960, and
+    // `cap * 2` took over -- `memory allocation of 81920 bytes failed`. Raising the
+    // starting capacity cannot remove the reallocation, only enlarge it, and the
+    // smallest possible request is what a small buffer gives. Hence 4 KB.
     //
-    // It failed with 51,200 bytes contiguous at the last logged frame, because the
-    // prekey upload's device-state save lands in the same instant and takes the
-    // block. A small starting buffer does not save memory on this chip; it defers
-    // the same allocation to the least predictable moment.
+    // The caps are the other half, and they bound what a peer can make this
+    // allocate at all -- tungstenite checks `max_frame_size` before reserving, and
+    // fragmented messages accumulate in a `Vec` that grows the same amortised way,
+    // so the worst-case contiguous request is about **twice** the cap, not the cap.
+    // 32 KB per frame and per message therefore projects a ~64 KB worst case,
+    // against the 110,592 bytes contiguous this chip has at its first connect. The
+    // largest legitimate message is the 28,205-byte AB-props response, which
+    // `fetch_props` requests unconditionally at every login and which arrives as a
+    // single frame, so 32 KB clears it. Still ~500x tighter than tungstenite's
+    // 16 MiB / 64 MiB defaults, which is what keeps a hostile peer a clean
+    // protocol error the supervisor reconnects from rather than an abort.
     //
-    // So the no-PSRAM read buffer is 40 KB, taken once inside the handshake when
-    // 114,688 bytes are contiguous, and large enough that `reserve` for the
-    // largest legitimate frame never reallocates. This is the same argument that
-    // turned CONFIG_MBEDTLS_DYNAMIC_BUFFER off for this chip: a peak that fits
-    // beats a peak that is small. The write buffer stays at 4 KB -- the largest
-    // send observed is 2,718 bytes and `out_buffer` grows only to what it writes.
+    // Not covered: a hostile peer that *fragments* an oversize message. The bound
+    // above is arithmetic, not a tested guarantee -- the QEMU mock server sends
+    // this message as a single frame and the harness cannot inject fragments.
     //
-    // The CAPS are a separate thing: tungstenite checks `max_frame_size` before
-    // reserving, so they bound what a peer can make this allocate at all. They sit
-    // above the largest legitimate message (28,205 B, the `<iq xmlns="abt">`
-    // AB-props table that `fetch_props` requests unconditionally at every login)
-    // and far below what the heap serves -- still ~1000x tighter than
-    // tungstenite's 16 MiB / 64 MiB defaults, so a hostile peer gets a clean
-    // protocol error the supervisor reconnects from rather than an abort. PSRAM
-    // boards keep the defaults throughout.
+    // PSRAM boards keep tungstenite's defaults throughout: 64 MiB is merely
+    // unreachable there rather than fatal.
     let ws_config = tungstenite::protocol::WebSocketConfig::default()
-        .read_buffer_size(crate::runtime::by_ram(128 * 1024, 40 * 1024))
+        .read_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
         .write_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
-        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 64 * 1024)))
-        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 48 * 1024)));
+        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 32 * 1024)))
+        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 32 * 1024)));
 
     let (mut ws, _response) =
         match tungstenite::client::client_with_config(request, stream, Some(ws_config)) {

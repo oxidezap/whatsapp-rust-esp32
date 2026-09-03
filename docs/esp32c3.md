@@ -39,9 +39,9 @@ C3 differs from the others in the deepest possible way.
 | `wa-blocking` worker stack | 32 KB | 10 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,504 B. |
 | `ws-transport` stack | 16 KB | 10 KB | mbedTLS records and `tungstenite` framing; neither recurses. Measured peak 5,632 B. |
 | `wa-nvs` worker stack | 32 KB | 6 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
-| tungstenite read buffer | 128 KB | 40 KB | Sized so `reserve` for the largest legitimate frame never reallocates. See below. |
+| tungstenite read buffer | 128 KB | 4 KB | Small on purpose: the starting capacity is the floor of the next reallocation. See below. |
 | tungstenite write buffer | 128 KB | 4 KB | Largest observed send is 2,718 B. |
-| tungstenite frame / message cap | 16 MiB / 64 MiB | 48 KB / 64 KB | Above the largest legitimate message (28,205 B), far below what the heap serves. See below. |
+| tungstenite frame / message cap | 16 MiB / 64 MiB | 32 KB / 32 KB | Above the largest legitimate message (28,205 B); worst case is ~2x the cap. See below. |
 | admin HTTP sessions | 16 | 4 | One browser tab; the QEMU suite drives it with one `curl` at a time. |
 
 The four **stack** figures are measured peaks with headroom, not estimates -- how
@@ -285,16 +285,15 @@ It cannot be declined, it is legitimate, and it arrives when 73,728 bytes are
 contiguous. The cap rejected it anyway, and the reconnect loop that followed
 ground the largest free block to 8,704 -- worse than what the cap prevented.
 
-**The read buffer was too small, and that is the subtler one.**
-`read_buffer_size` reads like a syscall-granularity knob, so this port shrank it
-to 4 KB to save memory. It is not. tungstenite's `FrameCodec` allocates
-`in_buffer: BytesMut::with_capacity(read_buffer_size)` once and then calls
-`in_buffer.reserve(frame_len)` per frame header -- the whole frame at once --
-and `BytesMut::reserve_inner` grows by `max(len + additional, cap * 2)`,
-*reallocating and copying*. At 4 KB the buffer reached capacity 16,150 holding
-4,096 bytes, so the props frame asked for 4,096 + 28,205 = **32,301**: exactly
-the allocation that aborted the chip, confirmed by resolving the stack dump
-against the CI firmware.
+**The read buffer, in both directions.** `read_buffer_size` reads like a
+syscall-granularity knob. It is not: tungstenite's `FrameCodec` allocates
+`in_buffer: BytesMut::with_capacity(read_buffer_size)` once and calls
+`in_buffer.reserve(frame_len)` per frame header, and `BytesMut::reserve_inner`
+reallocates to `max(len + additional, cap * 2)`, copying, so it needs the whole
+new size contiguous.
+
+At 4 KB the props frame asked for 4,096 + 28,205 = **32,301**, and the chip
+aborted:
 
 ```text
 0x4202815a  <bytes::bytes_mut::BytesMut>::reserve_inner
@@ -302,15 +301,28 @@ against the CI firmware.
 0x42075b28  std::alloc::rust_oom::{closure#0}
 ```
 
-It failed with 51,200 bytes still contiguous at the last logged frame, because
-the prekey upload's device-state save lands in the same instant and takes the
-block. **A small starting buffer saves nothing here; it defers the same
-allocation to the least predictable moment.** So the read buffer is 40 KB,
-taken once inside the handshake when 114,688 bytes are contiguous and large
-enough that `reserve` for the largest legitimate frame never reallocates --
-the same argument that turned `CONFIG_MBEDTLS_DYNAMIC_BUFFER` off for this chip.
-A peak that fits beats a peak that is small.
+Reading that as "the buffer is too small" and raising it to 40 KB made it
+strictly worse. The buffer then held ~13 KB when the frame arrived, 13k + 28,205
+just cleared 40,960, and the `cap * 2` term took over:
 
+```text
+memory allocation of 81920 bytes failed
+```
+
+81,920 is exactly 2 x 40,960. **The starting capacity is the floor of the next
+request**, so raising it cannot remove the reallocation, only enlarge it. The
+smallest possible request is what a small buffer gives, which is why the read
+buffer is back to 4 KB. The remaining problem is not the size of the request but
+what else holds the heap when it lands -- the prekey upload's device-state save
+is in flight at that moment.
+
+The same arithmetic sets the caps. A fragmented message accumulates in a `Vec`
+that grows the same amortised way, so the worst-case contiguous request is about
+**twice** the cap. At 32 KB per frame and per message that projects a ~64 KB
+worst case, against the 110,592 bytes contiguous at the first connect, and still
+clears the 28,205-byte AB-props response. It is arithmetic, not a tested
+guarantee: the mock server sends that message as a single frame, so the
+fragmented path has no regression coverage and the harness cannot inject one.
 
 ## Naming the allocation instead of guessing at it
 
