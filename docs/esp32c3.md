@@ -24,10 +24,12 @@ cfg, and the firmware reads it in exactly three places:
 | `runtime::stack_caps` | `MallocCap::Spiram` | `MallocCap::Internal` |
 | `runtime::by_ram(a, b)` | `a` | `b` |
 
-There is no chip name anywhere in `src/`. A board declares PSRAM or does not
-(`scripts/boards.sh` layers `sdkconfig.psram` for the boards that have it), and
-the firmware follows. That is also why adding a fourth board stays a one-row
-change even though the C3 differs from the others in the deepest possible way.
+No logic in `src/` branches on chip identity -- chip names appear only in
+comments explaining why a number is what it is. A board declares PSRAM or does
+not (`scripts/boards.sh` layers `sdkconfig.psram` for the boards that have it),
+and the firmware follows. That is why adding a fourth board is still a row in
+`scripts/boards.sh` plus its `sdkconfig.defaults.<mcu>` overlay, even though the
+C3 differs from the others in the deepest possible way.
 
 ## What `by_ram` actually decides
 
@@ -36,7 +38,7 @@ change even though the C3 differs from the others in the deepest possible way.
 | `wa-main` executor stack | 256 KB | 64 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. |
 | `wa-blocking` worker stack | 32 KB | 20 KB | Prekey batches: CPU-bound, not deep. |
 | `ws-transport` stack | 16 KB | 12 KB | mbedTLS records and `tungstenite` framing; neither recurses. |
-| `wa-nvs` worker stack | 32 KB | 12 KB | Internal DRAM on every board (see below), so the one stack worth measuring. Peak use 2,868 B. |
+| `wa-nvs` worker stack | 32 KB | 12 KB | Internal DRAM on every board (see below), so the one stack worth measuring. Peak use 2,564 B. |
 | tungstenite read buffer | 128 KB | 8 KB | See below. |
 | tungstenite write buffer | 128 KB | 8 KB | See below. |
 
@@ -53,11 +55,13 @@ the one worth measuring rather than guessing at. Its jobs are shallow and
 bounded: put or delete one record, or erase a namespace, and none of them puts a
 record on the stack (`read_blob` and `encode_record` both build `Vec`s). The boot
 replay, the only thing that walks the whole store, runs on the ESP-IDF main task
-before this worker exists. Measured peak is **2,868 bytes**, the same at 32 KB and
-at 12 KB, and unchanged by a `DELETE /sessions` -- which runs the deepest job,
-`erase_namespace` -- and the reboot that follows it. 12 KB keeps more than three
-times the observed peak and hands 20 KB of internal DRAM back to the heap; the
-PSRAM boards keep the 32 KB they were tested on.
+before this worker exists. Measured peak is **2,564 bytes**: 2,416 with a 32 KB
+stack, and 2,564 with a 12 KB one after a `DELETE /sessions` (which runs the
+deepest job, `erase_namespace`) and the reboot that follows it. Shrinking the
+stack by 20 KB moved the peak by 148 bytes, which is the point: this worker's
+depth is bounded by what its jobs do, not by what it is given. 12 KB keeps nearly
+four times the observed peak and hands that 20 KB of internal DRAM back to the
+heap; the PSRAM boards keep the 32 KB they were tested on.
 
 ## The two failures worth writing down
 
@@ -123,7 +127,7 @@ Stack high-water marks from `GET /metrics` (bytes still free at the deepest poin
 | Thread | Size | Free at peak | Used |
 | --- | --- | --- | --- |
 | `wa-main` | 64 KB | 45,004 | 20,532 |
-| `wa-nvs` | 12 KB | 9,724 | 2,868 |
+| `wa-nvs` | 12 KB | 9,724 | 2,564 |
 | `ws-transport` | 12 KB | 6,588 | 5,700 |
 | `wa-blocking` | 20 KB | 19,568 | 912 (no prekey batch yet) |
 

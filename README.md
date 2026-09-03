@@ -19,8 +19,10 @@
 > status dashboard over HTTP. All of that on a chip with thousands of times less
 > RAM and a small fraction of the clock speed a phone takes for granted.
 
-A WhatsApp client running on **ESP32-S3** and **ESP32-C5** microcontrollers,
-built on top of [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
+A WhatsApp client running on **ESP32-S3**, **ESP32-C5** and **ESP32-C3**
+microcontrollers -- the last of those with no PSRAM at all, on ~400 KB of on-chip
+SRAM -- built on top of
+[`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
 
 It pairs over QR code or a phone-number linking code, keeps the pairing and its
 Signal state in flash so a reboot comes back as the same linked device, connects
@@ -55,8 +57,8 @@ PSRAM is not required, but its absence is the interesting case. On the S3 and th
 C5 the whole Rust heap, the 256 KB executor stack and every worker stack live in
 8 MB of external RAM. The **ESP32-C3 has none**: ~400 KB of on-chip SRAM is the
 entire memory system, ESP-IDF hands about 314 KB of it to the heap, and the
-firmware adapts by reading `CONFIG_SPIRAM` -- no chip name appears anywhere in
-`src/`. What that changes, what it cost, and what is and is not verified:
+firmware adapts by reading `CONFIG_SPIRAM`; no logic in `src/` branches on chip
+identity. What that changes, what it cost, and what is and is not verified:
 [docs/esp32c3.md](docs/esp32c3.md).
 
 Flash is the one hard floor: the app image is 4.1--4.5 MB and `partitions.csv`
@@ -364,20 +366,23 @@ on pull requests and on pushes to `main`:
 The same flow runs locally with `scripts/qemu.sh`:
 
 ```bash
-# once: Espressif's QEMU (the esp32s3 machine is not in upstream QEMU) and esptool
+# once: Espressif's QEMU (these machines are not in upstream QEMU) and esptool.
+# The release ships one binary per architecture: xtensa for the S3, riscv32 for
+# the C3. Fetch the one for the board you want to emulate.
 curl -sSfL -o qemu.tar.xz https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-xtensa-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz
 mkdir -p ~/qemu && tar -xJf qemu.tar.xz -C ~/qemu     # needs libsdl2, libslirp, glib, pixman at runtime
-export QEMU_XTENSA=~/qemu/qemu/bin/qemu-system-xtensa
+export QEMU_XTENSA=~/qemu/qemu/bin/qemu-system-xtensa   # QEMU_RISCV32 for the C3
 pip install esptool esp-idf-nvs-partition-gen   # the ESP-IDF python env under .embuild already has both
 
-scripts/qemu.sh build      # release build with --features qemu and sdkconfig.qemu, into target/qemu/
+scripts/qemu.sh build      # release build with --features qemu and sdkconfig.qemu, into target/qemu-esp32s3/
+BOARD=esp32c3 scripts/qemu.sh all   # the same, end to end, on the emulated ESP32-C3
 scripts/qemu.sh image a    # 16 MB flash image for board "a": bootloader + partition table + its NVS + app
 scripts/qemu.sh run a      # interactive: serial console on the terminal, Ctrl-A X quits
 scripts/qemu.sh test       # headless: the three stages above (needs images a and b)
 ```
 
 `run` reuses the image, so a board you paired interactively stays paired across
-runs, exactly as a real one would; delete `target/qemu/.../flash_image-a.bin` (or
+runs, exactly as a real one would; delete `target/qemu-<board>/.../flash_image-a.bin` (or
 `scripts/qemu.sh image a`) for a fresh one.
 
 What the `qemu` feature changes, and nothing else: the network comes up over the

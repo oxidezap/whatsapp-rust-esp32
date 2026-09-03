@@ -3,12 +3,13 @@
 What the firmware needs from a chip, which Espressif parts meet it, which ones
 could with work, and which emulator can stand in for each in CI.
 
-The two boards in [the README's Hardware table](../README.md#hardware) (ESP32-S3
-N16R8, ESP32-C5 N16R8) are the ones actually built and, for the S3, booted in CI.
-Everything below is a survey done to decide **which board to add next and on which
-emulator**; nothing here has been built or booted yet. Rows are marked
-*measured* (a number from this repo), *documented* (a vendor spec) or
-*estimated* (an inference from the two).
+The three boards in [the README's Hardware table](../README.md#hardware)
+(ESP32-S3 N16R8, ESP32-C5 N16R8, ESP32-C3) are the ones actually built; the S3
+and the C3 are also booted, in the `qemu-e2e` CI job. This document was written
+as a survey to decide **which board to add next and on which emulator**, and §5
+is the one row that has since been acted on -- the ESP32-C3 port. Everything else
+is still survey. Rows are marked *measured* (a number from this repo),
+*documented* (a vendor spec) or *estimated* (an inference from the two).
 
 ## 1. The requirement profile
 
@@ -17,7 +18,7 @@ Every number is from this tree, so it moves when the firmware moves.
 | Requirement | Value | Where it comes from |
 | --- | --- | --- |
 | Mapped PSRAM | **≥ 2 MB, 4 MB comfortable** | *measured*: the dashboard sample in the README reports `psram_free: 3463948` out of the ~4 MB the S3 maps for data, i.e. ~0.5 MB live at idle, on top of the stacks below. |
-| PSRAM presence | **mandatory** | *measured*: `src/psram_alloc.rs` routes the whole Rust heap to `MALLOC_CAP_SPIRAM`, and `MAIN_TASK_STACK_SIZE` (`src/main.rs`) is a 256 KB stack no internal SRAM can provide. |
+| PSRAM presence | **not required**, but everything above assumes it | *measured*: with PSRAM the Rust heap goes to `MALLOC_CAP_SPIRAM` (`src/psram_alloc.rs`) and the executor takes a 256 KB stack; without it both come out of internal DRAM at the sizes in `runtime::by_ram`. The ESP32-C3 does this and runs, at ~314 KB of total heap (§5). |
 | Flash | **≥ 8 MB** (16 MB assumed by `partitions.csv`) | *measured*: 4.5 MB app image (`App/part. size 4,503,680`), a 0x4C0000 factory partition and a 1 MB `wa_store` NVS partition. 4 MB parts are out without a rewrite. |
 | Internal DRAM | **~300 KB, of which ≥ 64 KB in stacks** | *measured*: `CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768` plus the 32 KB **internal** `wa-nvs` stack (`src/storage.rs`; it must be internal because writing flash disables the cache). `internal_min_free` runs at a few KB on the S3. |
 | PSRAM-resident stacks | **~342 KB** | *measured*: `wa-main` 256 KB + `wa-blocking` 32 KB + `ws-transport` 16 KB + `httpd` 6 KB (`src/main.rs`, `src/runtime.rs`, `src/transport.rs`, `src/admin.rs`), all with `MallocCap::Spiram`. Needs `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`. |
@@ -28,9 +29,14 @@ Every number is from this tree, so it moves when the firmware moves.
 
 Two consequences worth stating plainly, because they decide most of the table:
 
-- **No PSRAM, no port.** Not a tuning problem — the allocator, the executor stack
-  and the identity cache all assume an external heap.
-- **A 4 MB-flash part cannot hold this app.** The image is 4.5 MB before the store.
+- **A 4 MB-flash part cannot hold this app**, and this is the hard one. The image
+  is 3.9--4.5 MB depending on the chip, before the 1 MB store.
+- **No PSRAM is survivable, but it is a different budget.** The rows above are
+  the PSRAM profile; a chip without it trades the 8 MB external heap for whatever
+  internal SRAM is left after Wi-Fi, lwIP and mbedTLS, which on the C3 is about
+  314 KB. That is enough (§5), with no headroom to spare. When reading the table
+  below, "no PSRAM" moves a chip from comfortable to tight, not from possible to
+  impossible -- what still rules a chip out is flash size and the radio.
 
 ## 2. The whole family, scored
 
@@ -47,15 +53,22 @@ against ESP-IDF `latest`.
 | **ESP32-S2** | Xtensa LX7 ×1, 240 MHz | 320 KB | quad, up to 10.5 MB of address space | Wi-Fi 4, no BT | `xtensa-esp32s2-espidf` | no | plausible, tight on internal DRAM |
 | **ESP32-C61** | RISC-V ×1, 160 MHz | 320 KB | quad, 2/8 MB | Wi-Fi 6 + BLE | `riscv32imac-esp-espidf` (as the C5) | no | plausible — the cheap C5 |
 | **ESP32-P4** | RISC-V ×2, 360–400 MHz | 768 KB | up to **32 MB** | **none** (Ethernet MAC; Wi-Fi via ESP-Hosted) | `riscv32imafc-esp-espidf` | no | special case, see §4 |
-| ESP32-C6 | RISC-V ×1, 160 MHz | 512 KB | **none** | Wi-Fi 6 + BLE + 802.15.4 | `riscv32imac-esp-espidf` | no | **blocked**: no PSRAM in the memory map |
+| **ESP32-C6** | RISC-V ×1, 160 MHz | 512 KB | **none** | Wi-Fi 6 + BLE + 802.15.4 | `riscv32imac-esp-espidf` | no | plausible — **more** SRAM than the C3, but no QEMU machine |
 | **ESP32-C3** | RISC-V ×1, 160 MHz | 400 KB | **none** | Wi-Fi 4 + BLE | `riscv32imc-esp-espidf` | **yes** | **shipping** — see §5 and [docs/esp32c3.md](esp32c3.md) |
-| ESP32-C2 | RISC-V ×1, 120 MHz | 272 KB | **none** | Wi-Fi 4 + BLE | `riscv32imc-esp-espidf` | no | blocked |
+| ESP32-C2 | RISC-V ×1, 120 MHz | 272 KB | **none** | Wi-Fi 4 + BLE | `riscv32imc-esp-espidf` | no | below the floor: 272 KB against the C3's 314 KB of heap |
 | ESP32-H2 | RISC-V ×1, 96 MHz | 320 KB | **none** | BLE + 802.15.4, **no Wi-Fi** | `riscv32imac-esp-espidf` | no | blocked twice over |
 
 Espressif's own answer on the C-series is that the C6 and its siblings "lack the
 internal hardware to incorporate PSRAM into their memory map"; the C61 is the
-variant that adds it back to compensate for a smaller SRAM. That is the single
-line that sorts this table.
+variant that adds it back to compensate for a smaller SRAM.
+
+Before the ESP32-C3 port that fact sorted this whole table, because the firmware
+could not run without PSRAM. It no longer does. What sorts the table now is
+**flash first** (nothing under 8 MB can hold the image), then **the radio**, and
+only then internal SRAM -- where the C3's ~314 KB of heap is the working
+reference for how little is enough. The rows above are updated accordingly: the
+C6, with 512 KB of SRAM, has more room than the chip that is already shipping,
+and is held back only by having no QEMU machine to prove it on.
 
 ## 3. Candidates, in the order worth attempting
 
