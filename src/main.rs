@@ -472,6 +472,14 @@ fn run_executor(
         error!("Failed to register wa-main with the task watchdog");
     }
 
+    // The zlib inflate state (one ~47.5 KB block) is built on this thread the
+    // first time a compressed frame is decoded, which on a board without PSRAM
+    // is the moment the login's largest frame is already sitting in the heap:
+    // the ESP32-C3 has ~58 KB free then, so the block never fits next to it.
+    // Built here, on a fresh heap, it is parked in the thread's pool and reused
+    // by every compressed frame this executor ever decodes.
+    whatsapp_rust::wacore_binary::zlib_pool::warm_pool();
+
     executor.block_on(run_whatsapp(
         runtime,
         store,
