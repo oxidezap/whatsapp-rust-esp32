@@ -181,7 +181,10 @@ impl BlockingWorker {
                 (job.run)();
                 let elapsed = started.elapsed();
                 if elapsed >= Duration::from_millis(100) {
-                    log::info!("Blocking job completed in {elapsed:.2?} (queued {queue_time:.2?})");
+                    log::info!(
+                        "Blocking job completed in {elapsed:.2?} (queued {queue_time:.2?}){}",
+                        crate::metrics::heap_note()
+                    );
                 }
                 let _ = job.done.send_blocking(());
             }

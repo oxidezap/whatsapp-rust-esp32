@@ -84,6 +84,52 @@ fn stack_free_min(name: &core::ffi::CStr) -> Option<u32> {
     }
 }
 
+/// `free/largest` for the internal heap, as a short string for an existing log line.
+///
+/// The per-frame logs in `transport` carry this on a board without PSRAM. A
+/// once-per-connect snapshot was enough to show that the ESP32-C3 arrives at its
+/// first connect with far less heap than the boot-time total suggests, but not
+/// to show *where* it goes: between one connect and the abort the heap fell from
+/// 101,356 free / 63,488 largest to less than the 32,300 bytes the next
+/// allocation asked for, in 320 ms and a handful of frames. Attaching it to the
+/// frames themselves is what makes that interval readable, and it costs two
+/// accessor calls on a line that was already being formatted.
+///
+/// Empty where there is PSRAM: those boards have an 8 MB heap and the numbers
+/// are noise on every frame.
+pub fn heap_note() -> alloc_note::Note {
+    alloc_note::Note::new()
+}
+
+/// Wrapper so the `Display` impl can decide, at no cost on a PSRAM board,
+/// whether to read the heap at all.
+pub mod alloc_note {
+    use super::sys;
+
+    /// Renders as ` heap=<free>/<largest>` without PSRAM, and as nothing with it.
+    pub struct Note(());
+
+    impl Note {
+        #[allow(clippy::new_without_default)]
+        pub fn new() -> Self {
+            Self(())
+        }
+    }
+
+    impl core::fmt::Display for Note {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            if crate::runtime::HAS_PSRAM {
+                return Ok(());
+            }
+            let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+            // SAFETY: read-only ESP-IDF accessors, safe from any context.
+            let free = unsafe { sys::heap_caps_get_free_size(cap) };
+            let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
+            write!(f, " heap={free}/{largest}")
+        }
+    }
+}
+
 /// Log every worker stack's high-water mark together with the internal heap.
 ///
 /// The four worker stacks are `by_ram` constants in `runtime`, `transport` and

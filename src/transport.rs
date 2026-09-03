@@ -361,7 +361,11 @@ fn ws_thread(
         }
 
         while let Ok(data) = data_rx.try_recv() {
-            log::debug!("--> WS send {} bytes", data.len());
+            log::debug!(
+                "--> WS send {} bytes{}",
+                data.len(),
+                crate::metrics::heap_note()
+            );
             if let Err(e) = ws.send(Message::Binary(data)) {
                 log::error!("WS send error: {}", e);
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(
@@ -374,7 +378,11 @@ fn ws_thread(
         match ws.read() {
             Ok(msg) => match msg {
                 Message::Binary(data) => {
-                    log::debug!("<-- WS recv {} bytes", data.len());
+                    log::debug!(
+                        "<-- WS recv {} bytes{}",
+                        data.len(),
+                        crate::metrics::heap_note()
+                    );
                     let _ = event_tx.send_blocking(TransportEvent::DataReceived(data));
                 }
                 Message::Ping(data) => {
