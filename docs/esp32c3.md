@@ -45,9 +45,8 @@ C3 differs from the others in the deepest possible way.
 Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack drops from
 32 KB to 20 KB (it is held for the life of the firmware and is only large for the
 one-time NVS replay), the default pthread stack from 32 KB to 8 KB, the Wi-Fi
-buffer counts from 10/32/32 to 4/8/8, and mbedTLS gets asymmetric record
-buffers (16 KB in, 4 KB out) -- but deliberately not `DYNAMIC_BUFFER`, for the
-reasons below -- since it can no longer allocate
+buffer counts from 10/32/32 to 4/8/8, and mbedTLS gets `DYNAMIC_BUFFER` plus
+asymmetric record buffers (16 KB in, 4 KB out) since it can no longer allocate
 from external memory.
 
 `wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
@@ -182,32 +181,42 @@ The size is `record_length + 341`, taken from the header the **peer** sent:
 16,749 is 16408 + 341, not 16384 + 365. No sdkconfig value bounds it, which is
 why lowering the ceiling changed nothing.
 
-**The actual fix** is to stop asking. `CONFIG_MBEDTLS_DYNAMIC_BUFFER` frees the
-receive buffer after every record and allocates the next one on demand; that is
-the feature ESP-IDF added for exactly this class of chip, and it is now off here.
-Two reasons:
+**Turning the dynamic allocator off does not fix it either**, and finding that
+out is what produced the number this port had been missing. Static record
+buffers are taken once inside the handshake, when the heap is least fragmented,
+which sounds strictly better. It is not, because of what the heap actually looks
+like by then:
 
-- *Heap.* An on-demand 16 KB contiguous request lands mid-session, against a heap
-  that by then holds a live TLS session, a tearing-down one and the protocol on
-  top of both. Static buffers are taken once inside the handshake, when the heap
-  is at its least fragmented, and never asked for again. That costs ~21 KB held
-  for the life of the session instead of ~4 KB between records; half of it is
-  paid back by dropping the WebSocket read and write buffers from 8 KB to 4 KB.
-- *Correctness.* This transport polls with a 100 ms read timeout, so
-  `esp_tls_conn_read` returns `WANT_READ` in the middle of a record routinely, and
-  rebuilding the receive buffer around a partially-read header is the fragile path
-  in that implementation. A claimed record length of 16408 on a connection whose
-  largest frame the server ever sent was 634 bytes is what a desynchronised header
-  looks like.
+```
+I (4415) whatsapp_esp32::transport: WS thread: internal heap 53332 free, largest block 31744
+```
 
-The incoming ceiling therefore goes back to the full 16384: with static buffers a
-larger record is a hard protocol failure, and the ceiling is the peer's to choose.
-RFC 6066's max_fragment_length would cap it at 4096, but it needs the server to
-honour the extension and neither peer here does.
+**53 KB**, not the 194 KB the boot-time `Free heap:` line reports -- that line is
+printed before the bot is built. Holding ~21 KB of record buffers for the life of
+the session out of 53 KB left the OpenCores MAC unable to allocate receive
+buffers:
 
-Every WebSocket connect now logs free bytes *and* the largest free block, because
-the second number is the one that decided this and only the first was being
-printed.
+```
+opencores.emac: no mem for receive buffer          (×3.8 million)
+task_wdt: Task watchdog got triggered ... CPU 0: emac_rx
+```
+
+A 206 MB serial log and a ten-minute job timeout, instead of the previous
+abort at seven seconds. `CONFIG_MBEDTLS_DYNAMIC_BUFFER` is therefore back on: a
+peak that fits is worth more here than a peak that is early.
+
+**So the constraint is neither knob.** The firmware arrives at its first connect
+with 53 KB, and roughly 108 KB of the heap went into four worker stacks --
+`wa-main` 64 KB, `wa-blocking` 20 KB, `ws-transport` 12 KB, `wa-nvs` 12 KB. Every
+one of those is a `by_ram` constant chosen by reasoning, and nothing had ever
+measured whether it is right. `/metrics` has reported the high-water marks all
+along, but the end-to-end run never reads it, so the one build where the sizing
+bites is the build where nobody was looking.
+
+That is now logged directly: `metrics::log_memory_profile` prints free bytes, the
+largest free block and all four stacks' never-used bytes, on every WebSocket
+connect and on every read error. Free *and* largest, because the two diverge
+under fragmentation and only the second decides whether a 16 KB record fits.
 
 The general lesson is the one this port keeps repeating: the numbers that matter
 here are the *peak contiguous* ones, not the totals. 194 KB free with a 28 KB

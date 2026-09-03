@@ -287,17 +287,7 @@ fn ws_thread(
     };
 
     log::info!("WS thread: TLS connected, starting WebSocket handshake...");
-    // Free bytes AND the largest contiguous block, on every connect. The two
-    // diverge under fragmentation, and it was that gap -- not the total -- that
-    // decided the ESP32-C3 end-to-end failures: a 16,749-byte request refused
-    // while 194 KB was free. One line per connection also makes the trajectory
-    // across a reconnect loop readable, which a single boot-time total was not.
-    {
-        let cap = esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT;
-        let free = unsafe { esp_idf_svc::sys::heap_caps_get_free_size(cap) };
-        let largest = unsafe { esp_idf_svc::sys::heap_caps_get_largest_free_block(cap) };
-        log::info!("WS thread: internal heap {free} free, largest block {largest}");
-    }
+    crate::metrics::log_memory_profile("websocket connect");
 
     let request = tungstenite::http::Request::builder()
         .uri(ws_url)
@@ -413,6 +403,10 @@ fn ws_thread(
             }
             Err(e) => {
                 log::error!("WS read error: {}", e);
+                // The other end of the story: a read that fails for want of
+                // memory is the failure mode this chip actually hits, so record
+                // what the heap looked like when it did.
+                crate::metrics::log_memory_profile("websocket read error");
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(
                     DisconnectReason::ReadError(format!("WS read error: {e}")),
                 ));

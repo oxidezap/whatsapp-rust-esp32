@@ -174,7 +174,7 @@ What the estimate got right, and what it got wrong:
 | `wa-main` stack | "~32–48 KB, means flattening the send path" | **64 KB, no restructuring.** The estimate was pessimistic. |
 | Other stacks | "~100 KB total" | 20 KB blocking + 12 KB transport + 6 KB httpd + 12 KB `wa-nvs` (internal on every board; 32 KB where there is PSRAM). |
 | Identity/session store | "read-through from NVS, no full cache" | **Not needed.** The RAM cache fits. |
-| mbedTLS buffers | "4–8 KB content length, risky" | **The estimate aimed at the wrong number.** Shrinking the content length did not help: the 16,749-byte allocation that broke the end-to-end run is sized from the record the peer sends, not from the configured ceiling. What fixed it was turning `CONFIG_MBEDTLS_DYNAMIC_BUFFER` off, so the buffers are taken once in the handshake instead of on demand mid-session -- 16 KB in / 4 KB out, ~21 KB held. See [docs/esp32c3.md](esp32c3.md). |
+| mbedTLS buffers | "4–8 KB content length, risky" | **The estimate aimed at the wrong number, and so did two fixes.** The 16,749-byte allocation that breaks the end-to-end run is sized from the record the *peer* sends, so lowering the content length changes nothing; taking the buffers statically instead starves the Ethernet driver. The real figure is that the chip reaches its first connect with 53 KB free, ~108 KB of it already spent on four worker stacks nobody had measured. See [docs/esp32c3.md](esp32c3.md). |
 | App image | "4.5 MB, fits fine" | 4.11 MB, 82.6% of the factory partition. |
 | — | not foreseen | **`tungstenite`'s default 128 KB read *and* write buffers.** A single 128 KB allocation, invisible on 8 MB of PSRAM, is most of the C3's free heap; it killed the firmware after a *successful* TLS and WebSocket handshake. |
 

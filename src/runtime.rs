@@ -101,6 +101,7 @@ pub const fn by_ram(psram: usize, no_psram: usize) -> usize {
 /// calling thread spawns from then on. This applies it for the one spawn and
 /// restores what was there before, so a caller's own thread configuration is
 /// never silently replaced by a worker's.
+
 pub fn spawn_thread(
     config: &ThreadSpawnConfiguration,
     f: impl FnOnce() + Send + 'static,

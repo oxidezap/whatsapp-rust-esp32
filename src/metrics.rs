@@ -84,6 +84,41 @@ fn stack_free_min(name: &core::ffi::CStr) -> Option<u32> {
     }
 }
 
+/// Log every worker stack's high-water mark together with the internal heap.
+///
+/// The four worker stacks are `by_ram` constants in `runtime`, `transport` and
+/// `storage`, chosen by reasoning rather than measurement, and on a board with
+/// no PSRAM they are the largest single claim on the heap: 64 + 20 + 12 + 12 KB
+/// out of ~314 KB. `/metrics` has reported the same numbers all along, but the
+/// QEMU end-to-end run never reads it, so the one build where the sizing
+/// actually bites is the one where nobody was looking.
+///
+/// It bites concretely. The ESP32-C3 reaches its first WebSocket connect with
+/// 53,332 bytes free and a 31,744-byte largest block, and whether a stack is
+/// twice the size it needs is the difference between a 16 KB TLS record fitting
+/// and the Ethernet driver failing to allocate receive buffers.
+///
+/// Free bytes *and* largest block, because the two diverge under fragmentation
+/// and it is the second that decides whether a large allocation succeeds.
+pub fn log_memory_profile(at: &str) {
+    // SAFETY: read-only ESP-IDF accessors, safe from any context.
+    let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    let free = unsafe { sys::heap_caps_get_free_size(cap) };
+    let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
+    let fmt = |v: Option<u32>| match v {
+        Some(v) => v.to_string(),
+        None => "-".to_string(),
+    };
+    log::info!(
+        "memory at {at}: internal heap {free} free, largest block {largest}; \
+         stack never-used wa-main={} wa-blocking={} ws-transport={} wa-nvs={}",
+        fmt(stack_free_min(c"wa-main")),
+        fmt(stack_free_min(c"wa-blocking")),
+        fmt(stack_free_min(c"ws-transport")),
+        fmt(stack_free_min(c"wa-nvs")),
+    );
+}
+
 /// Snapshot of heap / DRAM / PSRAM / uptime / RSSI as JSON for `/metrics`.
 pub fn system_metrics_json() -> String {
     // SAFETY: all are read-only ESP-IDF accessors, safe to call from any context.

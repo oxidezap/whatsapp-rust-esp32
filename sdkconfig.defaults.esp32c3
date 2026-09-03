@@ -59,43 +59,40 @@ CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 # does not exist without PSRAM, so these buffers come out of internal DRAM, and
 # the only lever left is how large they are and when they are taken.
 #
-# CONFIG_MBEDTLS_DYNAMIC_BUFFER is deliberately NOT set here, and that is the
-# opposite of the obvious choice -- it is the feature ESP-IDF added for exactly
-# this class of chip, and it was enabled here first. It is off because it is what
-# broke the QEMU end-to-end run, twice.
+# DYNAMIC_BUFFER is on, and turning it OFF was tried and is what the log below
+# rules out. Under it the receive buffer is freed after each record and
+# re-allocated for the next, sized from the header just read off the wire:
+# `esp_mbedtls_add_rx_buffer` allocates `record_length + 341`. That is the peer's
+# number, not ours, which is why lowering CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN to
+# 8192 changed nothing -- the failing `alloc(16749 bytes)` is 16408 + 341, and it
+# was still exactly 16749 afterwards.
 #
-# Under that feature the receive buffer is freed after every record and
-# re-allocated for the next one, sized from the record header just read off the
-# wire: `esp_mbedtls_add_rx_buffer` allocates `record_length + 341`. Two things
-# follow. The size is the peer's choice, so no sdkconfig value bounds it -- the
-# run that asked for `alloc(16749 bytes)` asked for exactly the same 16749 after
-# CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN was lowered to 8192, because 16749 is
-# 16408 (what the header claimed) plus 341, not 16384 plus overhead. And the
-# request lands mid-session, against a heap that by then holds a live TLS
-# session, a tearing-down one and the protocol state on top of both; a 314 KB
-# heap could not produce a contiguous block that size, and the firmware went on
-# to fail a 4,192-byte allocation and abort.
+# The obvious next move was to take the buffers statically instead, once inside
+# the handshake, when the heap is least fragmented. That is worse here, and the
+# measurement says why. At the moment the WebSocket connects this chip has:
 #
-# There is a second reason, and it is a correctness one. This transport polls
-# with a 100 ms read timeout (src/transport.rs), so `esp_tls_conn_read` returns
-# WANT_READ in the middle of a record routinely. Freeing and rebuilding the
-# receive buffer around a partially-read record header is the fragile path in
-# that implementation, and a claimed record length of 16408 on a connection
-# whose largest frame the server ever sent was 634 bytes is what a desynchronised
-# header looks like.
+#     WS thread: internal heap 53332 free, largest block 31744
 #
-# Without it mbedTLS allocates its record buffers once, inside the handshake,
-# when the heap is at its least fragmented, and never asks again. That costs
-# ~21 KB held for the life of the session instead of ~4 KB between records --
-# paid for below and in the WebSocket buffers in src/transport.rs.
+# 53 KB, not the 194 KB the boot-time line reports before the bot is built.
+# Holding ~21 KB of record buffers for the life of the session out of 53 KB left
+# the OpenCores MAC unable to allocate receive buffers -- `opencores.emac: no mem
+# for receive buffer` in a tight loop until the task watchdog fired on `emac_rx`.
+# A peak that fits is worth more here than a peak that is early.
 #
+# So the real constraint is neither knob: the firmware arrives at connect with
+# 53 KB, and roughly 108 KB of that went into four worker stacks (wa-main 64 KB,
+# wa-blocking 20 KB, ws-transport 12 KB, wa-nvs 12 KB). Those are sized on
+# reasoning, never on measurement, which is what src/runtime.rs now logs.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must
 # be able to receive it, but nothing this firmware sends comes close, so the
-# outgoing buffer does not have to match. Saves 12 KB against the symmetric 16 KB
-# the shared defaults ask for. The incoming side stays at the full 16384: with
-# static buffers a record larger than the buffer is a hard protocol failure, and
-# the ceiling is the peer's to choose. MFL (RFC 6066) would cap it at 4096, but
-# it needs the server to honour the extension and neither peer here does.
+# outgoing buffer does not have to match. The incoming side stays at the full
+# 16384 -- with the dynamic allocator the value does not bound the request
+# anyway, and lowering it only risks rejecting a record the peer is entitled to
+# send. MFL (RFC 6066) would cap it at 4096, but it needs the server to honour
+# the extension and neither peer here does.
 CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
