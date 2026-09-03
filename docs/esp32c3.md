@@ -240,9 +240,53 @@ build where nobody was looking.
 
 **The heap also decays across reconnections** -- 75 KB, 49 KB, 41 KB, 27 KB --
 and the largest free block sticks at 8,192 for the last two, which is
-fragmentation rather than a shortage of total bytes. 38 KB buys room, not a fix
-for that, and whether it is a leak or the allocator settling is the next thing
-to measure rather than guess at.
+fragmentation rather than a shortage of total bytes.
+
+## Naming the allocation instead of guessing at it
+
+With the stacks resized the mbedTLS failure was gone, and the abort moved to
+`memory allocation of 32300 bytes failed` -- Rust's allocator, not mbedTLS. The
+per-frame heap note makes the run-up readable:
+
+```
+<-- WS recv  40 bytes  heap=71208/57344
+--> WS send  57 bytes  heap=53468/40960
+--> WS send 292 bytes  heap=50344/34816
+<-- WS recv  34 bytes  heap=50180/34816
+memory allocation of 32300 bytes failed
+```
+
+50 KB free, 34.8 KB contiguous, and a single request for 32.3 KB. The stack dump
+names it, resolved against the CI firmware with `addr2line`:
+
+```
+0x4202811e  <bytes::bytes_mut::BytesMut>::reserve_inner
+0x42161fa6  Esp32TransportFactory::create_transport::{closure#0}   # the ws-transport thread
+0x42075b28  std::alloc::rust_oom::{closure#0}
+```
+
+It is `tungstenite`'s read buffer doubling: `BytesMut::reserve_inner` grows by
+`max(len + additional, cap * 2)`, and **16,150 x 2 = 32,300** exactly. Because it
+reallocates and copies, it needs the whole 32 KB *contiguous* -- which the heap
+had a moment earlier and had lost by the time it asked. `read_buffer_size` does
+not bound this: it is the chunk reads are issued in, not the buffer a whole
+message accumulates into, and a full 16 KB TLS record's worth of WebSocket
+payload is what pushes it over.
+
+So the remaining work is contiguity, not total bytes, and the second round of
+stack cuts is sized for it. The peaks measured twice, on the resized build:
+
+| stack | after round 1 | measured peak | now |
+| --- | --- | --- | --- |
+| `wa-main` | 40,960 | 21,608 | 32,768 |
+| `wa-blocking` | 12,288 | 896 | 10,240 |
+| `ws-transport` | 10,240 | 3,956 | 10,240 (left alone) |
+| `wa-nvs` | 8,192 | 2,532 | 6,144 |
+
+`ws-transport` keeps its size deliberately: it is the thread that ran out of
+*heap*, and shrinking its stack would confuse the next measurement for nothing.
+The admin server's session table also drops from 16 to 4 without PSRAM -- the
+dashboard is one browser tab and the suite drives it with one `curl` at a time.
 
 The general lesson is the one this port keeps repeating: the numbers that matter
 here are the *peak contiguous* ones, not the totals. 194 KB free with a 28 KB

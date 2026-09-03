@@ -96,11 +96,11 @@ impl FlashWorker {
         // exists (hence CONFIG_ESP_MAIN_TASK_STACK_SIZE), not here. Measured peak
         // on the emulated ESP32-C3 across pairing writes and a factory reset is
         // in docs/esp32c3.md: 2,596 bytes across pairing writes and a factory
-        // reset, so 8 KB keeps three times the measured peak, and a board with
+        // reset: 2,596 bytes, so 6 KB keeps well over twice it, and a board with
         // PSRAM keeps the 32 KB it was tested on since it has DRAM to spare.
         let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
-            stack_size: crate::runtime::by_ram(32 * 1024, 8 * 1024),
+            stack_size: crate::runtime::by_ram(32 * 1024, 6 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: None,

@@ -142,7 +142,7 @@ pub struct BlockingWorker {
 }
 
 impl BlockingWorker {
-    /// The thread [`BlockingWorker::start`] creates: 32 KB of stack (12 KB
+    /// The thread [`BlockingWorker::start`] creates: 32 KB of stack (10 KB
     /// without PSRAM, see [`HAS_PSRAM`]), pinned to core 0 below the network
     /// and executor threads (priority 5) so a long key batch never delays a
     /// socket read, and above idle, which the task watchdog must therefore not
@@ -150,7 +150,7 @@ impl BlockingWorker {
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-blocking"),
-            stack_size: by_ram(32 * 1024, 12 * 1024),
+            stack_size: by_ram(32 * 1024, 10 * 1024),
             priority: 1,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
@@ -284,20 +284,22 @@ impl Esp32Executor {
     /// 256 KB of PSRAM stack (the send path with a quoted reply and an edit has
     /// deep frames), core 0, priority 5. Spawn it with [`spawn_thread`].
     ///
-    /// Without PSRAM this is 40 KB of internal DRAM instead, and it is the
+    /// Without PSRAM this is 32 KB of internal DRAM instead, and it is the
     /// single largest concession the ESP32-C3 port makes. That number is
     /// measured, not reasoned: `metrics::log_memory_profile` on the emulated C3
     /// reports 43,932 of the previous 65,536 bytes never touched across the
-    /// pairing flow, a 515 reconnect and the prekey upload -- a peak of 21,604.
-    /// 40 KB keeps 85% headroom over that while returning 24 KB to a heap that
-    /// reaches its first WebSocket connect with 75 KB free. A firmware that adds
+    /// pairing flow, a 515 reconnect and the prekey upload -- a peak of 21,604,
+    /// confirmed a second time at 21,608 once the size was cut. 32 KB keeps 52%
+    /// headroom over that while returning 32 KB to a heap whose largest free
+    /// block, not whose total, is what decides whether the next allocation
+    /// fits. A firmware that adds
     /// deeper work to the executor should watch `stack_wa_main_min` in
     /// `GET /metrics` on that chip, or read the line this crate now logs on
     /// every connect.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-main"),
-            stack_size: by_ram(256 * 1024, 40 * 1024),
+            stack_size: by_ram(256 * 1024, 32 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
