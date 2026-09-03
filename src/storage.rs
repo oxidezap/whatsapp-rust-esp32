@@ -95,11 +95,12 @@ impl FlashWorker {
         // walks the whole store, runs on the ESP-IDF main task before this worker
         // exists (hence CONFIG_ESP_MAIN_TASK_STACK_SIZE), not here. Measured peak
         // on the emulated ESP32-C3 across pairing writes and a factory reset is
-        // in docs/esp32c3.md; 12 KB keeps a wide multiple of it, and a board with
+        // in docs/esp32c3.md: 2,596 bytes across pairing writes and a factory
+        // reset, so 8 KB keeps three times the measured peak, and a board with
         // PSRAM keeps the 32 KB it was tested on since it has DRAM to spare.
         let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
-            stack_size: crate::runtime::by_ram(32 * 1024, 12 * 1024),
+            stack_size: crate::runtime::by_ram(32 * 1024, 8 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: None,

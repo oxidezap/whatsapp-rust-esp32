@@ -205,18 +205,44 @@ A 206 MB serial log and a ten-minute job timeout, instead of the previous
 abort at seven seconds. `CONFIG_MBEDTLS_DYNAMIC_BUFFER` is therefore back on: a
 peak that fits is worth more here than a peak that is early.
 
-**So the constraint is neither knob.** The firmware arrives at its first connect
-with 53 KB, and roughly 108 KB of the heap went into four worker stacks --
-`wa-main` 64 KB, `wa-blocking` 20 KB, `ws-transport` 12 KB, `wa-nvs` 12 KB. Every
-one of those is a `by_ram` constant chosen by reasoning, and nothing had ever
-measured whether it is right. `/metrics` has reported the high-water marks all
-along, but the end-to-end run never reads it, so the one build where the sizing
-bites is the build where nobody was looking.
+**So the constraint is neither knob**, and instrumenting it settled the sizing
+question this port had been answering by reasoning. `metrics::log_memory_profile`
+prints free bytes, the largest free block and every worker stack's never-used
+bytes on each WebSocket connect and each read error. One run:
 
-That is now logged directly: `metrics::log_memory_profile` prints free bytes, the
-largest free block and all four stacks' never-used bytes, on every WebSocket
-connect and on every read error. Free *and* largest, because the two diverge
-under fragmentation and only the second decides whether a 16 KB record fits.
+```
+memory at websocket connect:     heap  75236 free, largest 49152; never-used wa-main=43932 wa-blocking=19584 ws-transport=8340 wa-nvs=9808
+memory at websocket connect:     heap  49664 free, largest 26624; never-used wa-main=43932 wa-blocking=19584 ws-transport=8336 wa-nvs=9756
+E Dynamic Impl: alloc(16749 bytes) failed
+memory at websocket read error:  heap  13420 free, largest  7168; never-used wa-main=43932 wa-blocking=16976 ws-transport=6656 wa-nvs=9692
+memory at websocket connect:     heap  41384 free, largest  8192
+memory at websocket connect:     heap  27540 free, largest  8192
+memory allocation of 4096 bytes failed
+```
+
+Two things fall out of it.
+
+**The stacks were two to six times larger than anything they use.** Every one was
+a `by_ram` constant picked by reasoning; these are the measured peaks:
+
+| stack | was | measured peak | now |
+| --- | --- | --- | --- |
+| `wa-main` | 65,536 | **21,604** | 40,960 |
+| `wa-blocking` | 20,480 | **3,504** | 12,288 |
+| `ws-transport` | 12,288 | **5,632** | 10,240 |
+| `wa-nvs` | 12,288 | **2,596** | 8,192 |
+
+That returns **38 KB** to the heap while keeping at least 85% headroom on the
+tightest of them, and it is the lever the two TLS attempts were substitutes for.
+`/metrics` had been reporting the same high-water marks all along, but the
+end-to-end run never reads it, so the one build where the sizing bites is the
+build where nobody was looking.
+
+**The heap also decays across reconnections** -- 75 KB, 49 KB, 41 KB, 27 KB --
+and the largest free block sticks at 8,192 for the last two, which is
+fragmentation rather than a shortage of total bytes. 38 KB buys room, not a fix
+for that, and whether it is a leak or the allocator settling is the next thing
+to measure rather than guess at.
 
 The general lesson is the one this port keeps repeating: the numbers that matter
 here are the *peak contiguous* ones, not the totals. 194 KB free with a 28 KB
