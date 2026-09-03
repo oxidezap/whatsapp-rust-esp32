@@ -486,6 +486,33 @@ leaves about 30 KB, roughly 2 KB under the 32,300. So both shapes of the abort
 are the same shortfall of a few kilobytes in one block, which is what makes the
 stack reclaim worth measuring rather than dismissing.
 
+## The reclaim worked, and it did not help
+
+Those are usually assumed to be the same thing. Measured at the same point in
+the run, before and after giving back 12,288 bytes of stack:
+
+| | before | after |
+| --- | --- | --- |
+| at `--> WS send 292 bytes` | 73,004 / 59,392 | 84,688 / **69,632** |
+| at the failing allocation | 35,836 / 20,480 | 48,028 / **20,480** |
+
+The starting block gained the 10 KB it was supposed to, and total free at the
+moment of failure gained 12 KB. The **largest block at that moment did not move
+at all** -- 20,480 both times, against the same 28,772-byte request.
+
+That answers "would a little more headroom close it", and the answer is no. The
+block the decode needs is not bounded by how much memory is free; it is what
+remains of the big region after the frame buffer (~32.6 KB) and the mbedTLS
+record buffer (~16.7 KB) are carved out of it during the props read. Handing the
+allocator more memory elsewhere does not change that remainder, so no further
+trimming on this side will either. The stacks keep their reclaimed sizes because
+the never-used figures justify them on their own, not because they fixed the C3.
+
+Which leaves one specific piece of work, and it is not in this port: the
+28,772-byte request is a second full-size buffer materialised to decode a
+payload already held in memory. Decoding the props response in place, or
+streaming it, removes the failure outright.
+
 ## The board
 
 `partitions.csv` is unchanged, so a C3 board needs **at least 8 MB of flash**
