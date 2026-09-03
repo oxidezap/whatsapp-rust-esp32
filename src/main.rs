@@ -737,7 +737,7 @@ async fn run_whatsapp_inner(
         // the query is simply not sent, the flags stay at their registry
         // defaults, and nothing else about the connection changes. PSRAM boards
         // keep the default they were tested with.
-        .with_ab_props_fetch(crate::runtime::HAS_PSRAM)
+        .with_ab_props_fetch(whatsapp_esp32::runtime::HAS_PSRAM)
         // Message history is not persisted (only identity and Signal state are),
         // so a history sync buys this firmware nothing and costs it a lot:
         // upstream measures the drain at ~14 MB of allocation churn, more than
