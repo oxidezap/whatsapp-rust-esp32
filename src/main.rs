@@ -692,11 +692,21 @@ async fn run_whatsapp_inner(
                 .with_os(DEVICE_OS)
                 .with_platform_type(wa::device_props::PlatformType::CHROME),
         )
-        // 50 instead of the 812 default: generating 812 X25519 keypairs at login
+        // 20 instead of the 812 default: generating 812 X25519 keypairs at login
         // exhausts internal DRAM, and even on the blocking worker it is seconds
         // of work the first connect would wait on. Configurable upstream as of
         // whatsapp-rust PR #695, so no fork needed.
-        .with_wanted_pre_key_count(50)
+        //
+        // 50 was the first choice and it was still too many for the ESP32-C3, for
+        // a reason that is about timing rather than size: the upload's success
+        // marks the device dirty, and the persistence save then runs on `wa-nvs`
+        // at the same instant the WebSocket thread reserves for the inbound
+        // AB-props frame. That reserve wants 32,300 contiguous bytes and had
+        // 51,200 a frame earlier, so the two together are what abort the chip.
+        // Fewer keys shrinks both the upload node (2,717 bytes at 50) and the
+        // record the save serialises. The floor upstream is 5; 20 keeps four
+        // times that, and the client re-uploads when the server runs low.
+        .with_wanted_pre_key_count(20)
         // Message history is not persisted (only identity and Signal state are),
         // so a history sync buys this firmware nothing and costs it a lot:
         // upstream measures the drain at ~14 MB of allocation churn, more than

@@ -229,6 +229,18 @@ impl FlashNamespaces {
             )));
         }
         let record = encode_record(b"device", &payload)?;
+        // The device record is the largest single thing this store writes, and on
+        // a board without PSRAM it is written while the WebSocket thread may be
+        // reserving for an inbound frame -- the ESP32-C3 aborts on a 32,300-byte
+        // reserve that had 51,200 contiguous a moment earlier, with this save the
+        // only other thing in flight. Log the size so the two can be compared
+        // instead of assumed.
+        log::debug!(
+            "device record: {} bytes ({} payload){}",
+            record.len(),
+            payload.len(),
+            crate::metrics::heap_note()
+        );
         set_blob(&self.device, "current", &record)
     }
 
