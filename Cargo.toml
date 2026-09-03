@@ -55,6 +55,10 @@ enumset = "1"
 # exact versions, so nothing new is compiled.
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 sha1 = { version = "0.11", default-features = false }
+# `ws.rs` names `bytes` directly rather than through `whatsapp_rust::bytes` so
+# the module has no dependency on whatsapp-rust at all: that is what lets its
+# tests run on a host. Same crate, same version, as the re-export.
+bytes = "1.12"
 
 # WhatsApp protocol. Single dependency: since 0.7.0 the crate re-exports
 # everything a consumer needs (`whatsapp_rust::{wacore, waproto, buffa,
