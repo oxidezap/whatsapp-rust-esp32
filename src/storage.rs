@@ -100,7 +100,7 @@ impl FlashWorker {
         // has DRAM to spare.
         let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
-            stack_size: crate::runtime::by_ram(32 * 1024, 6 * 1024),
+            stack_size: crate::runtime::by_ram(32 * 1024, 4 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: None,

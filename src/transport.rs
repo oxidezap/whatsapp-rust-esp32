@@ -209,7 +209,7 @@ impl Esp32TransportFactory {
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"ws-transport"),
-            stack_size: crate::runtime::by_ram(16 * 1024, 10 * 1024),
+            stack_size: crate::runtime::by_ram(16 * 1024, 8 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),

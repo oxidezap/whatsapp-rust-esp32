@@ -422,18 +422,41 @@ Blocklist, Privacy, Digest and Devices concurrently through `futures::join!`, so
 the 28 KB props response lands while four other replies are in flight. There is
 no knob on that from this crate.
 
-That leaves the honest conclusion. Receiving a 28 KB WebSocket frame costs this
-firmware the frame buffer, the split-off payload (which shares that same
-allocation -- `BytesMut::split_to` is refcounted, so the larger buffer is held
-for as long as the message is), and a further ~28 KB to decode it: on the order
-of 90 KB of a heap that has ~72 KB free at that moment, and far less than that
-contiguous. No amount of resizing on this side closes a gap that shape. The fix
-belongs where the copies are made -- decoding the props response without
-materialising a second full-size buffer -- which is upstream in `whatsapp-rust`,
-not in this port. What this port can still do is stop losing the 54 KB the
-session spends between connect (126,348/114,688) and the props read
-(71,984/59,392), which is why the generic event arm now logs a full per-task
-profile: those events bracket exactly that window.
+Receiving a 28 KB WebSocket frame costs this firmware two blocks, not three: the
+frame buffer, and a further ~28 KB to decode it. The split-off payload is *not*
+a third copy -- `BytesMut::split_to` is refcounted, so it shares the frame
+buffer's allocation, which is why that larger block stays alive for as long as
+the message does.
+
+That distinction matters, because the totals then say the C3 is not actually out
+of memory. At the props read there are **73,004 bytes free**, and the two blocks
+want 32,612 + 28,772 = **61,384**. It fails purely on *contiguity*: the frame
+buffer is carved out of the 59,392-byte largest block, and what is left of it --
+20,480 -- is about 8 KB short of the decode. The gap is single-digit kilobytes,
+not the tens of kilobytes an earlier reading of this suggested.
+
+## Sizing the stacks from the high-water marks, second pass
+
+Which makes the per-task profile the fix rather than just the diagnosis. Logged
+at the events that bracket the window, it reports how much of each stack has
+*never been touched* since boot:
+
+| stack | size | never used | peak used | now | margin |
+| --- | --- | --- | --- | --- | --- |
+| `wa-main` | 32,768 | 11,160 | 21,608 | 28,672 | 33% |
+| `wa-blocking` | 10,240 | 6,836 | 3,404 | 6,144 | 80% |
+| `ws-transport` | 10,240 | 4,600 | 5,640 | 8,192 | 45% |
+| `wa-nvs` | 6,144 | 3,500 | 2,644 | 4,096 | 55% |
+
+26,096 bytes across the four have never been written to. Reclaiming 12,288 of
+them -- keeping at least a third clear above each measured peak -- is memory the
+allocator never takes from the heap in the first place, so it widens the largest
+free block rather than merely adding to the total. Against a shortfall of ~8 KB
+in exactly that block, that is the lever the measurement points at.
+
+If it turns out not to be enough, the next move is upstream rather than another
+resize here: decoding the props response without materialising a second
+full-size buffer would remove the 28,772-byte request altogether.
 
 ## The board
 

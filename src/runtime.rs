@@ -150,7 +150,7 @@ impl BlockingWorker {
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-blocking"),
-            stack_size: by_ram(32 * 1024, 10 * 1024),
+            stack_size: by_ram(32 * 1024, 6 * 1024),
             priority: 1,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
@@ -299,7 +299,7 @@ impl Esp32Executor {
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-main"),
-            stack_size: by_ram(256 * 1024, 32 * 1024),
+            stack_size: by_ram(256 * 1024, 28 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
