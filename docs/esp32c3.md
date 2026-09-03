@@ -539,6 +539,50 @@ upstream: `FrameDecoder::feed_owned(Bytes)` adopts a uniquely-owned buffer via
 `Bytes::try_into_mut` whenever a copy would have had to allocate, and decrypts
 in place. With both halves the props frame costs one 28 KB buffer, not two.
 
+## What the own client bought, and the wall behind it
+
+The port-side half was measured on the first run that carried it. The S3 lane
+passed end to end on the new client -- pairing, the 515 restart, persistence,
+a message and its reaction -- so the framing is right. On the C3, at the same
+point in the run:
+
+| | tungstenite | own client |
+| --- | --- | --- |
+| at `<-- WS recv 28204 bytes` | 45,144 / 20,480 | **58,580 / 29,696** |
+| the decoder's 28,772-byte copy | **aborted** | fits |
+| the abort | `28772 bytes failed` | `64 bytes failed` |
+
+The copy that had aborted four runs in a row now fits, and the firmware gets
+past it for the first time. It then dies on a **64-byte** allocation with
+52,924 free twenty milliseconds earlier: not fragmentation this time but
+exhaustion, some 50 KB taken in one step by whatever consumes the props payload
+next. That is `unpack_bytes`: the frame's format byte says the node is
+zlib-compressed, and `decompress_zlib_pooled` inflates it.
+
+What inflating costs, measured on a host with a counting allocator rather than
+taken from a comment: `zlib_rs::Inflate::new(true, 15)` allocates **48,576
+bytes** before it has produced a byte -- the 32 KB LZ77 window the compressor
+used plus the state -- and the pool keeps that alive on the thread afterwards.
+The output buffer is pre-sized to **twice the compressed length**, 56,408 here,
+a guess tuned for multi-megabyte history-sync chunks. With the 28,204-byte
+ciphertext still alive during inflation that is ~133 KB of demand against the
+~93 KB this chip has free at that moment. No arrangement of the receive path
+closes a gap of that shape; the decoder patch removes 28 KB of it and leaves
+the wall where it is.
+
+So the boundary is now exact. Everything up to the props response works on
+the C3 without PSRAM, and the props response cannot be inflated in memory on
+it. The two ways through are both upstream, and neither is a resize:
+
+- **Stream it.** `wacore_binary::zlib_pool::InflateReader` already decompresses
+  history sync incrementally, holding one record at a time; parsing the props
+  node's children the same way would bound the peak at one property, not the
+  whole response.
+- **Make the fetch optional.** AB props are experiment flags; `fetch_props` is
+  a best-effort background query whose failure is a warning. A client option to
+  skip it on a target that cannot hold the answer is a configuration, not a
+  workaround, and it is the smaller change by far.
+
 ## The board
 
 `partitions.csv` is unchanged, so a C3 board needs **at least 8 MB of flash**
