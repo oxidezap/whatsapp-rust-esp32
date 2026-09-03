@@ -84,7 +84,7 @@ binary, `whatsapp-esp32`, is the demo firmware built on it.
 | Module | Provides | `whatsapp-rust` contract |
 |--------|----------|--------------------------|
 | `storage` | `NvsStore` | `Backend`. The linked device, the Signal state and the app-state sync keys live in an NVS partition (`wa_store` by default) and survive reboots; the rest is a RAM cache. |
-| `transport` | `Esp32TransportFactory` | `TransportFactory`. ESP-IDF mbedTLS + `tungstenite` WebSocket, driven on its own thread. |
+| `transport` | `Esp32TransportFactory` | `TransportFactory`. ESP-IDF mbedTLS under the crate's own single-owner WebSocket client (`ws`), driven on its own thread. |
 | `http_client` | `EspHttpClient` | `HttpClient`. Streaming HTTP/1.1 over ESP-IDF TLS/TCP with bounded RAM (media, version fetch). |
 | `runtime` | `Esp32Runtime`, `Esp32Executor`, `BlockingWorker` | `Runtime`. `edge-executor` event loop that parks when idle; `spawn_blocking` runs on a dedicated `wa-blocking` thread so key generation never stalls the loop. |
 | `psram_alloc` | `PsramAllocator` | Optional global allocator that keeps the Rust heap in PSRAM. |

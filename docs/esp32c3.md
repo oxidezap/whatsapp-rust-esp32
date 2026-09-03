@@ -35,13 +35,11 @@ C3 differs from the others in the deepest possible way.
 
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
-| `wa-main` executor stack | 256 KB | 32 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. Measured peak 21,608 B. |
-| `wa-blocking` worker stack | 32 KB | 10 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,504 B. |
-| `ws-transport` stack | 16 KB | 10 KB | mbedTLS records and `tungstenite` framing; neither recurses. Measured peak 5,632 B. |
-| `wa-nvs` worker stack | 32 KB | 6 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
-| tungstenite read buffer | 128 KB | 4 KB | Small on purpose: the starting capacity is the floor of the next reallocation. See below. |
-| tungstenite write buffer | 128 KB | 4 KB | Largest observed send is 2,718 B. |
-| tungstenite frame / message cap | 16 MiB / 64 MiB | 32 KB / 32 KB | Above the largest legitimate message (28,205 B); worst case is ~2x the cap. See below. |
+| `wa-main` executor stack | 256 KB | 28 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. Measured peak 21,608 B. |
+| `wa-blocking` worker stack | 32 KB | 6 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,404 B. |
+| `ws-transport` stack | 16 KB | 8 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
+| `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,644 B. |
+| WebSocket frame / message cap | 16 MiB / 64 MiB | 32 KB / 32 KB | Above the largest legitimate message (28,204 B). Refused from the frame header, before any allocation. See below. |
 | admin HTTP sessions | 16 | 4 | One browser tab; the QEMU suite drives it with one `curl` at a time. |
 
 The four **stack** figures are measured peaks with headroom, not estimates -- how
@@ -508,10 +506,38 @@ allocator more memory elsewhere does not change that remainder, so no further
 trimming on this side will either. The stacks keep their reclaimed sizes because
 the never-used figures justify them on their own, not because they fixed the C3.
 
-Which leaves one specific piece of work, and it is not in this port: the
-28,772-byte request is a second full-size buffer materialised to decode a
-payload already held in memory. Decoding the props response in place, or
-streaming it, removes the failure outright.
+Which leaves one specific piece of work: the 28,772-byte request is a second
+full-size buffer materialised to decode a payload already held in memory.
+
+## Two copies, and where each one came from
+
+Following that request to its source named both halves of the problem, and
+the port owned one of them after all.
+
+The receive path was: a general-purpose WebSocket library grows its read buffer
+to hold the frame (`reserve(28,204)` -> 32,612) and hands the payload out as a
+refcounted view into that buffer, which it keeps for the life of the
+connection. `whatsapp-rust`'s `FrameDecoder::feed(&data)` then copies the
+payload into its own accumulation buffer (the 28,772), because a view it does
+not own is all it was ever given -- `node_io.rs` even says so, in a comment
+about dropping the view promptly. Two full-size copies, by construction, and
+the second one is the abort.
+
+So the port stopped using that library. `src/ws.rs` is the client half of RFC
+6455 -- upgrade, binary frames, fragmentation, ping/pong, close, size caps
+enforced from the header before anything is allocated -- and it does one thing
+differently: each payload is allocated **once, at its declared size**, read
+straight off the wire, and handed over as a `Bytes` with a single owner.
+Nothing in the transport retains it. It is generic over `Read + Write` with the
+random source injected, so its 13 tests run on a host with no ESP-IDF in sight,
+and it removed `tungstenite`, `http`, `httparse` and `data-encoding` from the
+tree while it was at it.
+
+That alone turns a permanently-held 32,612 into a 28,204 that dies as soon as
+the decoder has copied it. The decoder's copy is the other half, and it is
+upstream: `FrameDecoder::feed_owned(Bytes)` adopts a uniquely-owned buffer via
+`Bytes::try_into_mut` whenever a copy would have had to allocate, and decrypts
+in place. With both halves the props frame costs one 28 KB buffer, not two.
 
 ## The board
 

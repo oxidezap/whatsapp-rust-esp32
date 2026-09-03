@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
-use tungstenite::Message;
 // Re-exported through whatsapp-rust so the `async_channel::Receiver` handed back
 // by `create_transport` is provably the same type the client expects.
 use whatsapp_rust::async_channel::{self, Sender};
@@ -163,7 +162,8 @@ impl Drop for EspTlsStream {
     }
 }
 
-/// Transport implementation using ESP-IDF TLS + tungstenite WebSocket.
+/// Transport implementation: ESP-IDF TLS under the crate's own WebSocket
+/// client ([`crate::ws`]), driven on its own thread.
 pub struct Esp32Transport {
     data_tx: std::sync::mpsc::Sender<Bytes>,
     shutdown: Arc<AtomicBool>,
@@ -172,8 +172,8 @@ pub struct Esp32Transport {
 #[async_trait]
 impl Transport for Esp32Transport {
     async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
-        // Move the Bytes through the channel (refcount bump, no copy); tungstenite
-        // 0.29's Message::Binary takes Bytes directly, so no realloc on either end.
+        // Move the Bytes through the channel (refcount bump, no copy); the
+        // socket thread masks it straight onto the wire from the slice.
         self.data_tx
             .send(data)
             .map_err(|_| anyhow!("Transport channel closed"))
@@ -203,9 +203,9 @@ impl Esp32TransportFactory {
 
     /// The thread each connection's socket is driven on: 16 KB of stack on
     /// core 0, at the same priority as the executor. Without PSRAM the stack is
-    /// internal DRAM and 10 KB; the frames here are mbedTLS record handling and
-    /// `tungstenite` framing, neither of which recurses, and the emulated C3
-    /// measures a 5,632-byte peak across pairing and reconnection.
+    /// internal DRAM and 8 KB; the frames here are mbedTLS record handling and
+    /// [`crate::ws`] framing, neither of which recurses, and the emulated C3
+    /// measures a 5,640-byte peak across pairing and reconnection.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"ws-transport"),
@@ -263,7 +263,7 @@ fn ws_thread(
     ws_url: &str,
     skip_tls_verify: bool,
 ) {
-    let (host, port, _path, _tls) = match crate::http_client::parse_url(ws_url) {
+    let (host, port, path, _tls) = match crate::http_client::parse_url(ws_url) {
         Ok(v) => v,
         Err(e) => {
             log::error!("Invalid WS URL: {}", e);
@@ -290,75 +290,33 @@ fn ws_thread(
     log::info!("WS thread: TLS connected, starting WebSocket handshake...");
     crate::metrics::log_memory_profile("websocket connect");
 
-    let request = tungstenite::http::Request::builder()
-        .uri(ws_url)
-        .header("Origin", format!("https://{}", host))
-        .header("Host", &host)
-        .header("Upgrade", "websocket")
-        .header("Connection", "Upgrade")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-
-    // tungstenite defaults to a 128 KB read buffer AND a 128 KB write buffer.
-    // On a PSRAM board those come out of the 8 MB external heap and nobody pays
-    // attention; on the ESP32-C3 a single 128 KB request is most of the free heap
-    // and aborts the firmware ("memory allocation of 131072 bytes failed") right
-    // after the handshake succeeds. Neither buffer caps message size -- the read
-    // one is the chunk size reads are issued in, and the write one is the
-    // threshold past which tungstenite stops coalescing -- so a smaller pair
-    // costs syscalls, not capability, and WhatsApp's frames are nowhere near
-    // either figure. The default is kept where there is PSRAM to spend, so the
-    // boards this was tuned on keep the behaviour they were tested with.
+    // The size limits are the one place a peer can make this side allocate
+    // towards. They matter without PSRAM and are nearly unreachable with it.
     //
-    // These four numbers are the most-measured thing in this port, and two
-    // attempts at them were wrong in opposite directions. The mechanism, finally:
+    // 32 KB per frame and per message on the ESP32-C3: the largest legitimate
+    // message is the 28,204-byte AB-props response, which `fetch_props`
+    // requests unconditionally at every login and which arrives as a single
+    // frame. An 8 KB cap was tried and rejected that message, which put the
+    // client in a reconnect loop that ground the largest free block down to
+    // 8,704 -- worse than anything the cap prevented. The reader refuses an
+    // oversize frame from its header alone, before allocating anything, so a
+    // hostile peer costs a clean protocol error the supervisor reconnects from
+    // rather than an abort. A fragmented message is bounded the same way as it
+    // accumulates.
     //
-    // tungstenite's `FrameCodec` allocates `in_buffer: BytesMut::with_capacity(
-    // read_buffer_size)` once, then calls `in_buffer.reserve(frame_len)` per frame
-    // header. `BytesMut::reserve_inner` reallocates to
-    // `max(len + additional, cap * 2)` and copies, so it needs the whole new size
-    // *contiguous* -- and note the `cap * 2` term: **the starting capacity is the
-    // floor of the next request.**
-    //
-    // At `read_buffer_size` = 4 KB the 28,205-byte AB-props frame asked for
-    // 4,096 + 28,205 = 32,301 and aborted the chip. Reading that as "the buffer is
-    // too small" and raising it to 40 KB made it strictly worse: the buffer then
-    // held ~13 KB when the frame arrived, 13k + 28,205 just cleared 40,960, and
-    // `cap * 2` took over -- `memory allocation of 81920 bytes failed`. Raising the
-    // starting capacity cannot remove the reallocation, only enlarge it, and the
-    // smallest possible request is what a small buffer gives. Hence 4 KB.
-    //
-    // The caps are the other half, and they bound what a peer can make this
-    // allocate at all -- tungstenite checks `max_frame_size` before reserving, and
-    // fragmented messages accumulate in a `Vec` that grows the same amortised way,
-    // so the worst-case contiguous request is about **twice** the cap, not the cap.
-    // 32 KB per frame and per message therefore projects a ~64 KB worst case,
-    // against the 110,592 bytes contiguous this chip has at its first connect. The
-    // largest legitimate message is the 28,205-byte AB-props response, which
-    // `fetch_props` requests unconditionally at every login and which arrives as a
-    // single frame, so 32 KB clears it. Still ~500x tighter than tungstenite's
-    // 16 MiB / 64 MiB defaults, which is what keeps a hostile peer a clean
-    // protocol error the supervisor reconnects from rather than an abort.
-    //
-    // Not covered: a hostile peer that *fragments* an oversize message. The bound
-    // above is arithmetic, not a tested guarantee -- the QEMU mock server sends
-    // this message as a single frame and the harness cannot inject fragments.
-    //
-    // PSRAM boards keep tungstenite's defaults throughout: 64 MiB is merely
-    // unreachable there rather than fatal.
-    let ws_config = tungstenite::protocol::WebSocketConfig::default()
-        .read_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
-        .write_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
-        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 32 * 1024)))
-        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 32 * 1024)));
-
-    let (mut ws, _response) =
-        match tungstenite::client::client_with_config(request, stream, Some(ws_config)) {
+    // What this reader does *not* do, and why it exists, is documented on
+    // [`crate::ws`]: it allocates each payload once, at its declared size, and
+    // hands it over with a single owner. The general-purpose library it
+    // replaced grew its read buffer to hold the frame and kept that buffer for
+    // the life of the connection, so every large frame afterwards cost two
+    // full-size copies -- and on the C3 the second one is what aborted.
+    let limits = crate::ws::Limits {
+        max_frame_size: crate::runtime::by_ram(16 << 20, 32 * 1024),
+        max_message_size: crate::runtime::by_ram(64 << 20, 32 * 1024),
+    };
+    let origin = format!("https://{host}");
+    let mut ws =
+        match crate::ws::WsClient::connect(stream, &host, &path, &origin, limits, fill_random) {
             Ok(ws) => ws,
             Err(e) => {
                 log::error!("WebSocket handshake failed: {}", e);
@@ -378,7 +336,7 @@ fn ws_thread(
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            let _ = ws.close(None);
+            let _ = ws.send_close(1000);
             break;
         }
 
@@ -388,7 +346,7 @@ fn ws_thread(
                 data.len(),
                 crate::metrics::heap_note()
             );
-            if let Err(e) = ws.send(Message::Binary(data)) {
+            if let Err(e) = ws.send_binary(&data) {
                 log::error!("WS send error: {}", e);
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(
                     DisconnectReason::ReadError(format!("WS send error: {e}")),
@@ -397,40 +355,39 @@ fn ws_thread(
             }
         }
 
-        match ws.read() {
-            Ok(msg) => match msg {
-                Message::Binary(data) => {
-                    log::debug!(
-                        "<-- WS recv {} bytes{}",
-                        data.len(),
-                        crate::metrics::heap_note()
-                    );
-                    let _ = event_tx.send_blocking(TransportEvent::DataReceived(data));
-                }
-                Message::Ping(data) => {
-                    let _ = ws.send(Message::Pong(data));
-                }
-                Message::Close(frame) => {
-                    log::info!("WS thread: server sent close");
-                    let reason = frame
-                        .map(|f| DisconnectReason::ServerClose {
-                            code: Some(u16::from(f.code)),
-                            reason: f.reason.to_string(),
-                        })
-                        .unwrap_or(DisconnectReason::ServerClose {
-                            code: None,
-                            reason: String::new(),
-                        });
-                    let _ = event_tx.send_blocking(TransportEvent::Disconnected(reason));
-                    return;
-                }
-                _ => {}
-            },
-            Err(tungstenite::Error::Io(ref e))
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                // Read timeout, normal
+        match ws.read_frame() {
+            // The socket's read timeout elapsed mid-frame or between frames;
+            // the reader kept whatever it had.
+            Ok(None) => {}
+            Ok(Some(crate::ws::Frame::Binary(data))) => {
+                log::debug!(
+                    "<-- WS recv {} bytes{}",
+                    data.len(),
+                    crate::metrics::heap_note()
+                );
+                let _ = event_tx.send_blocking(TransportEvent::DataReceived(data));
+            }
+            Ok(Some(crate::ws::Frame::Ping(payload))) => {
+                let _ = ws.send_pong(&payload);
+            }
+            Ok(Some(crate::ws::Frame::Pong(_))) | Ok(Some(crate::ws::Frame::Text(_))) => {}
+            Ok(Some(crate::ws::Frame::Close(frame))) => {
+                log::info!("WS thread: server sent close");
+                // Echo the close so the peer's TLS teardown is orderly; the
+                // outcome does not change what happens next.
+                let _ = ws.send_close(1000);
+                let reason = match frame {
+                    Some((code, reason)) => DisconnectReason::ServerClose {
+                        code: Some(code),
+                        reason,
+                    },
+                    None => DisconnectReason::ServerClose {
+                        code: None,
+                        reason: String::new(),
+                    },
+                };
+                let _ = event_tx.send_blocking(TransportEvent::Disconnected(reason));
+                return;
             }
             Err(e) => {
                 log::error!("WS read error: {}", e);
@@ -448,4 +405,11 @@ fn ws_thread(
 
     let _ = event_tx.send_blocking(TransportEvent::Disconnected(DisconnectReason::Unknown));
     log::info!("WS thread: exiting");
+}
+
+/// ESP-IDF's hardware RNG, for the handshake key and every outbound mask.
+fn fill_random(buf: &mut [u8]) {
+    // SAFETY: `esp_fill_random` writes exactly `len` bytes into a buffer the
+    // caller owns for the duration of the call.
+    unsafe { esp_idf_svc::sys::esp_fill_random(buf.as_mut_ptr().cast(), buf.len()) }
 }

@@ -48,8 +48,13 @@ sha2 = { version = "0.11", default-features = false }
 edge-executor = "0.5"
 enumset = "1"
 
-# WebSocket framing (no TLS features - we use ESP-IDF mbedTLS)
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# The WebSocket client is the crate's own (`src/ws.rs`): it hands each frame
+# over with a single owner, which is what the ESP32-C3 needs to decode a 28 KB
+# server frame without a second full-size copy. These two are its only
+# dependencies, and both are already in the tree through whatsapp-rust at these
+# exact versions, so nothing new is compiled.
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+sha1 = { version = "0.11", default-features = false }
 
 # WhatsApp protocol. Single dependency: since 0.7.0 the crate re-exports
 # everything a consumer needs (`whatsapp_rust::{wacore, waproto, buffa,

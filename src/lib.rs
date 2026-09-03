@@ -12,7 +12,7 @@
 //! | Trait (`whatsapp_rust::wacore`) | Implementation | Notes |
 //! |---|---|---|
 //! | `store::traits::Backend` | [`NvsStore`] | Pairing, Signal state and sync keys in an NVS partition; the rest in RAM. |
-//! | `net::TransportFactory` | [`Esp32TransportFactory`] | ESP-IDF mbedTLS + `tungstenite`, driven on its own thread. |
+//! | `net::TransportFactory` | [`Esp32TransportFactory`] | ESP-IDF mbedTLS under the crate's own WebSocket client ([`ws`]), driven on its own thread. |
 //! | `net::HttpClient` | [`EspHttpClient`] | Streaming HTTP/1.1 over ESP-IDF TLS/TCP with bounded RAM. |
 //! | `runtime::Runtime` | [`Esp32Runtime`] | `spawn` / `sleep` / `spawn_blocking` on an [`Esp32Executor`]. |
 //!
@@ -62,6 +62,7 @@ pub mod runtime;
 pub mod storage;
 pub mod supervisor;
 pub mod transport;
+pub mod ws;
 
 #[cfg(feature = "admin")]
 pub mod admin;
