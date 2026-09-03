@@ -316,36 +316,48 @@ fn ws_thread(
     // boards this was tuned on keep the behaviour they were tested with.
     //
     // The size CAPS matter for a different reason, and the no-PSRAM ones are set
-    // from a measurement rather than from taste. tungstenite accumulates a whole
-    // message in a `BytesMut`, and `BytesMut::reserve_inner` grows it by
-    // `max(len + additional, cap * 2)` -- reallocating and copying, so it needs
-    // the *whole* new size contiguous. That is what aborted the ESP32-C3
-    // firmware: a buffer at 16,150 bytes doubled to 32,300 against a heap with
-    // 50,180 free but only 34,816 contiguous.
+    // from two measurements: what a message legitimately costs, and what the heap
+    // can actually serve.
+    //
+    // The cost side. tungstenite accumulates a whole message in a `BytesMut`, and
+    // `BytesMut::reserve_inner` grows it by `max(len + additional, cap * 2)` --
+    // reallocating and copying, so it needs the *whole* new size contiguous. That
+    // aborted the ESP32-C3 firmware once, at 16,150 doubling to 32,300 against a
+    // heap with 50,180 free but only 34,816 contiguous:
     //
     //     0x4202811e  <bytes::bytes_mut::BytesMut>::reserve_inner
     //     0x42161fa6  Esp32TransportFactory::create_transport::{closure#0}
     //     0x42075b28  std::alloc::rust_oom::{closure#0}
     //
-    // `read_buffer_size` does not bound it: that is the chunk reads are issued
-    // in, not the buffer a message accumulates into. The caps do, because
-    // tungstenite checks `max_frame_size` before reserving the payload. So on a
-    // board without PSRAM they are set below the contiguous budget this chip has
-    // actually been observed to have -- 8 KB per frame, 16 KB per message, which
-    // bounds the doubling at ~16 KB. The pairing flow's largest inbound frame is
-    // 634 bytes, so this costs no capability that ever worked; what it buys is
-    // that a peer sending more produces a clean protocol error the supervisor
-    // reconnects from, instead of an allocation failure that aborts the
-    // firmware. The PSRAM boards keep tungstenite's defaults, where 64 MiB is
-    // merely unreachable rather than fatal.
+    // `read_buffer_size` does not bound that: it is the chunk reads are issued in,
+    // not the buffer a message accumulates into. These caps do, because tungstenite
+    // checks `max_frame_size` before reserving the payload.
+    //
+    // The size side, and the reason these are not smaller. Capping at 8 KB was
+    // tried and is wrong: the `<iq xmlns="abt"><props/>` response -- the AB-props
+    // table, which `fetch_props` requests unconditionally at every login and which
+    // has no delta form until a full one has succeeded once -- is **28,205 bytes**.
+    // The cap rejected it, the supervisor reconnected, and the retry loop
+    // fragmented the heap down to an 8,704-byte largest block, which is a worse
+    // failure than the one it was meant to prevent.
+    //
+    // That message is not a problem for this chip once the worker stacks are sized
+    // from measurement: the C3 reaches its first connect with 114,688 bytes
+    // contiguous and its second, where the props response lands, with 73,728. So
+    // the caps sit above the largest legitimate message with room for the doubling
+    // (48 KB per frame, 64 KB per message) and far below what the heap can serve.
+    // That is still ~1000x tighter than tungstenite's 16 MiB / 64 MiB defaults, so
+    // a hostile or broken peer gets a clean protocol error the supervisor
+    // reconnects from rather than an allocation failure that aborts the firmware.
+    // PSRAM boards keep the defaults, where 64 MiB is merely unreachable.
     //
     // 4 KB read/write rather than 8 on the no-PSRAM side: the same contiguity
     // argument, and it costs read syscalls and nothing else.
     let ws_config = tungstenite::protocol::WebSocketConfig::default()
         .read_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
         .write_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
-        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 16 * 1024)))
-        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 8 * 1024)));
+        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 64 * 1024)))
+        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 48 * 1024)));
 
     let (mut ws, _response) =
         match tungstenite::client::client_with_config(request, stream, Some(ws_config)) {

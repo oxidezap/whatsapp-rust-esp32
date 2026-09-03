@@ -40,7 +40,7 @@ C3 differs from the others in the deepest possible way.
 | `ws-transport` stack | 16 KB | 10 KB | mbedTLS records and `tungstenite` framing; neither recurses. Measured peak 5,632 B. |
 | `wa-nvs` worker stack | 32 KB | 6 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
 | tungstenite read/write buffers | 128 KB | 4 KB each | The chunk reads are issued in, not a message cap. |
-| tungstenite frame / message cap | 16 MiB / 64 MiB | 8 KB / 16 KB | Bounds the read buffer's doubling below the contiguous heap. See below. |
+| tungstenite frame / message cap | 16 MiB / 64 MiB | 48 KB / 64 KB | Above the largest legitimate message (28,205 B), far below what the heap serves. See below. |
 | admin HTTP sessions | 16 | 4 | One browser tab; the QEMU suite drives it with one `curl` at a time. |
 
 Every ESP32-C3 figure in that table is a measured peak with headroom, not an
@@ -249,6 +249,41 @@ build where nobody was looking.
 **The heap also decays across reconnections** -- 75 KB, 49 KB, 41 KB, 27 KB --
 and the largest free block sticks at 8,192 for the last two, which is
 fragmentation rather than a shortage of total bytes.
+
+## What the resized stacks bought, and the cap that undid it
+
+With the four stacks sized from their measured peaks, the ESP32-C3 **completes
+pairing**: QR, the `515` restart, re-authentication at gen=2 and again at gen=4.
+No allocation failure appears anywhere in the log. The heap at connect is a
+different machine from the one that kept aborting:
+
+```text
+1st connect: heap 126,512 free, largest block 114,688
+2nd connect: heap 113,504 free, largest block  73,728
+```
+
+against 75,236 / 49,152 before the resize, and 53,332 / 31,744 before that.
+
+The run still failed, and on a cap this port set itself:
+
+```text
+WS read error: Space limit exceeded: Message too long: 28205 > 8192
+```
+
+**28,205 bytes is the `<iq xmlns="abt"><props/>` response** -- the AB-props
+table. `fetch_props` requests it unconditionally during every login's background
+initialisation, and its delta form is only valid once a full response has
+succeeded, so there is no way to not receive it. It is a legitimate message, and
+at the moment it arrives the heap has 73,728 bytes contiguous: it fits with room
+to spare. Only the 8 KB cap rejected it, and the reconnect loop that followed is
+what ground the largest free block down to 8,704 -- a worse failure than the one
+the cap was meant to prevent.
+
+So the caps are now set from that measurement rather than from caution: 48 KB
+per frame and 64 KB per message, above the largest legitimate message with room
+for `BytesMut`'s doubling, and far below what the heap can serve. Still ~1000x
+tighter than tungstenite's defaults, which is what makes a hostile peer a clean
+protocol error instead of an abort.
 
 ## Naming the allocation instead of guessing at it
 
