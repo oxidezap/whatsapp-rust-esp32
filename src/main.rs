@@ -703,9 +703,12 @@ async fn run_whatsapp_inner(
         // at the same instant the WebSocket thread reserves for the inbound
         // AB-props frame. That reserve wants 32,300 contiguous bytes and had
         // 51,200 a frame earlier, so the two together are what abort the chip.
-        // Fewer keys shrinks both the upload node (2,717 bytes at 50) and the
-        // record the save serialises. The floor upstream is 5; 20 keeps four
-        // times that, and the client re-uploads when the server runs low.
+        // Fewer keys shrinks the upload node (2,717 bytes at 50) and the burst
+        // of small allocations that stores them, which is what fragments the
+        // heap ahead of that reserve. It does not shrink the device record:
+        // `wacore::store::Device` holds keys and identity, never the prekey
+        // pool, which lives in the backend. The floor upstream is 5; 20 keeps
+        // four times that, and the client re-uploads when the server runs low.
         .with_wanted_pre_key_count(20)
         // Message history is not persisted (only identity and Signal state are),
         // so a history sync buys this firmware nothing and costs it a lot:

@@ -214,6 +214,26 @@ stop() {
     wait "$pid" 2>/dev/null || true
 }
 
+# The signatures that mean the firmware died rather than merely fell behind.
+CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)'
+
+# crash_context LOG: print the serial around the crash signature.
+#
+# `tail` alone is not enough to diagnose a crash: an ESP32 panic dumps
+# registers plus hundreds of lines of stack hex, so the tail is all hexdump
+# and the one line that says *why* -- "memory allocation of N bytes failed",
+# a panic message, the heap reading logged beside it -- has already scrolled
+# past. Anchor on the signature and show what came before it instead.
+crash_context() {
+    local serial="$1" line from
+    line=$(grep -n -m1 -E "$CRASH_RE" "$serial" | cut -d: -f1)
+    [[ -n "$line" ]] || return 0
+    from=$(( line > 60 ? line - 60 : 1 ))
+    log "--- serial lines $from-$line, ending at the crash signature ---"
+    sed -n "${from},${line}p" "$serial"
+    log "--- end crash context ---"
+}
+
 # wait_markers PID LOG MARKER...: each marker must show up in the serial log, in
 # order, before the deadline; a crash signature or a QEMU exit fails at once.
 wait_markers() {
@@ -225,8 +245,8 @@ wait_markers() {
             if ! kill -0 "$pid" 2>/dev/null; then
                 log "QEMU exited before '$marker'"; tail -n 60 "$serial"; return 1
             fi
-            if grep -q -E "RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)" "$serial"; then
-                log "firmware crashed before '$marker'"; tail -n 80 "$serial"; return 1
+            if grep -q -E "$CRASH_RE" "$serial"; then
+                log "firmware crashed before '$marker'"; crash_context "$serial"; return 1
             fi
             if (( SECONDS >= deadline )); then
                 log "timed out waiting for '$marker'"; tail -n 60 "$serial"; return 1
