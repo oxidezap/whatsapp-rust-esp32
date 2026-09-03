@@ -24,8 +24,9 @@ all three applied levers are chip-independent.
 scripts/build.sh --board esp32c3 --release --features mock-server
 ```
 
-Substitute any board in `scripts/boards.sh` and the rest of this section follows;
-`board_out_dir` in that file is what turns a board name into the paths below.
+For another board, substitute it in **both** places -- the build and the `BOARD`
+below -- since the output directory and the `riscv32-`/`xtensa-` tool prefix both
+follow from it.
 
 Tools, all from the toolchain the build already installs under `.embuild`. Its
 layout is not fixed -- esp-idf-sys puts things under `.embuild/` or
@@ -34,16 +35,21 @@ and there is one esp-idf-sys build directory per sdkconfig -- so find them rathe
 than assume:
 
 ```bash
-# Or: source scripts/boards.sh; board_select esp32c3; OUT=$(board_out_dir)
-OUT=target/riscv32imc-esp-espidf/release
-BIN=$(dirname "$(find .embuild -name 'riscv32-esp-elf-nm' | head -1)")
+BOARD=esp32c3
+source scripts/boards.sh && board_select "$BOARD"
+OUT=$(board_out_dir)                       # the triple lives in the board table
+case "$BOARD_TARGET" in                     # the GCC prefix ESP-IDF installs
+  riscv32*) PREFIX=riscv32-esp-elf ;;      # one for every RISC-V chip
+  xtensa-*) PREFIX=${BOARD_TARGET%-espidf}-elf ;;   # xtensa-esp32s3-elf
+esac
+BIN=$(dirname "$(find .embuild -name "$PREFIX-nm" | head -1)")
 IDFPY=$(find .embuild -path '*idf*_env/bin/python' | head -1)
 MAP=$(ls -t "$OUT"/build/esp-idf-sys/*/out/build/libespidf.map | head -1)
 
-$BIN/riscv32-esp-elf-size -A $OUT/whatsapp-esp32          # sections
-$IDFPY -m esp_idf_size --archives $MAP                     # per static library
-$IDFPY -m esp_idf_size --files $MAP                        # per object file
-$BIN/riscv32-esp-elf-nm --print-size --size-sort -r -C $OUT/whatsapp-esp32
+$BIN/$PREFIX-size -A "$OUT/whatsapp-esp32"                 # sections
+$IDFPY -m esp_idf_size --archives "$MAP"                   # per static library
+$IDFPY -m esp_idf_size --files "$MAP"                      # per object file
+$BIN/$PREFIX-nm --print-size --size-sort -r -C "$OUT/whatsapp-esp32"
 ```
 
 One caution learned the hard way: parsing the linker map by hand over-counts
