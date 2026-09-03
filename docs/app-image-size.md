@@ -2,8 +2,9 @@
 
 The firmware is large enough that flash size, not RAM, is what rules boards out:
 `partitions.csv` gives the app a 0x4C0000 (4,980,736 byte) factory partition, and
-no 4 MB board can hold the image at all. This is a measurement of what is
-actually in there, and of what the obvious levers are really worth.
+with that layout no 4 MB board can hold it. This is a measurement of what is
+actually in there, of what the obvious levers are really worth, and -- at the end
+-- of what a 4 MB board would actually cost.
 
 The image measured throughout is the **4,112,672-byte baseline** this analysis
 started from. Three of the levers found here are now applied as defaults (A, B
@@ -26,14 +27,18 @@ scripts/build.sh --board esp32c3 --release --features mock-server
 Substitute any board in `scripts/boards.sh` and the rest of this section follows;
 `board_out_dir` in that file is what turns a board name into the paths below.
 
-Tools, all from the toolchain the build already installs under `.embuild`:
+Tools, all from the toolchain the build already installs under `.embuild`. Its
+layout is not fixed -- esp-idf-sys puts things under `.embuild/` or
+`.embuild/espressif/` depending on whether `ESP_IDF_TOOLS_INSTALL_DIR` was set,
+and there is one esp-idf-sys build directory per sdkconfig -- so find them rather
+than assume:
 
 ```bash
 # Or: source scripts/boards.sh; board_select esp32c3; OUT=$(board_out_dir)
 OUT=target/riscv32imc-esp-espidf/release
-BIN=.embuild/tools/riscv32-esp-elf/*/riscv32-esp-elf/bin
-MAP=$OUT/build/esp-idf-sys/*/out/build/libespidf.map
-IDFPY=.embuild/python_env/idf5.5_py3.11_env/bin/python
+BIN=$(dirname "$(find .embuild -name 'riscv32-esp-elf-nm' | head -1)")
+IDFPY=$(find .embuild -path '*idf*_env/bin/python' | head -1)
+MAP=$(ls -t "$OUT"/build/esp-idf-sys/*/out/build/libespidf.map | head -1)
 
 $BIN/riscv32-esp-elf-size -A $OUT/whatsapp-esp32          # sections
 $IDFPY -m esp_idf_size --archives $MAP                     # per static library
@@ -230,14 +235,33 @@ only one that would delete a feature this firmware was deliberately built around
 *next* boot can report why the last one died. Trading that for 4.6% of flash on a
 device with no console attached is the wrong way round.
 
-**And none of it changes the shape of the problem.** The smallest image measured
-here, A+B+C at 3,776,016 bytes, is itself under 4 MB -- but the board is not the
-image. A 4 MB part has 4,194,304 bytes for the bootloader, the partition table,
-the `nvs` partition, the app, the 64 KB core dump *and* the 1 MB `wa_store`. At
-3.78 MB of app that is over by more than a megabyte, and re-cutting
-`partitions.csv` does not close it: even with the core dump gone and the store
-down to 256 KB the total is still past 4 MB. The 8 MB flash floor is structural,
-and no build switch reaches it.
+**And none of it changes the shape of the problem** -- though the honest version
+of that is narrower than it first looks. The board is not the image: a 4 MB part
+has 4,194,304 bytes to hold the bootloader, the partition table, `nvs`, the app,
+the core dump *and* `wa_store`. With `partitions.csv` as it stands (a 1 MB store
+and a 64 KB core dump) none of these images fit, and that is where the 8 MB
+requirement comes from.
+
+Re-cutting the table *can* close it, though, and saying otherwise would be wrong.
+App partitions align to 64 KiB, so what a 4 MB part has left after the app is:
+
+| Image | App slot | Left for core dump + store |
+| --- | --- | --- |
+| baseline 4,112,672 | 0x3F0000 | **0** -- does not fit at all |
+| A+B+D, what this tree builds, 3,879,360 | 0x3C0000 | 192 KB |
+| A+B+C 3,776,016 | 0x3A0000 | 320 KB |
+
+So the shipped build would fit a 4 MB board with the 64 KB core dump and a
+**128 KB** store, and A+B+C with a 256 KB one. That is a real option, and it is a
+*storage* decision rather than a size one: `src/storage.rs` caps the store at
+2048 identities, 2048 sessions and 2048 sender keys, which a 1 MB partition is
+sized for and a 256 KB one is not. Shrinking it trades away how many contacts and
+groups the device can hold, and nobody has measured where a shrunken store
+actually runs out.
+
+The defensible claim is therefore narrower than "8 MB or nothing": **8 MB is what
+the current partition layout needs, and no build switch changes that.** A 4 MB
+board is reachable only by giving up most of the store.
 
 ## Where the remaining mass is, and who owns it
 
