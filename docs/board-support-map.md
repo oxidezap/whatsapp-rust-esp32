@@ -78,9 +78,11 @@ The only *new* chip that is both PSRAM-capable **and** emulated by Espressif's
 QEMU, which is exactly the axis this exercise is about.
 
 What is already free: same Xtensa `esp` toolchain, same espup install, same
-ESP-IDF; the port is a `sdkconfig.defaults.esp32` file and a `--board esp32` arm
-in `scripts/build.sh`, matching the "adding a board is adding that one file"
-claim in the README.
+ESP-IDF. The port is a row in `scripts/boards.sh` (triple, whether it has PSRAM,
+its QEMU machine) plus a `sdkconfig.defaults.esp32` overlay -- `scripts/build.sh`
+and `scripts/qemu.sh` take every board from that table and need no per-board arm.
+CI is the third piece: a board only gets built or booted there if it has a row in
+the `build` matrix, and an emulated one a row in `qemu-e2e` too.
 
 What has to be checked, in order:
 

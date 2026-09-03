@@ -51,7 +51,10 @@ The source is the same for every board, and so is ESP-IDF v5.5.5. What differs i
 the target triple, whether the chip has PSRAM, and one chip-specific
 `sdkconfig.defaults.<chip>` overlay -- all of it in
 [`scripts/boards.sh`](scripts/boards.sh), the one table `scripts/build.sh`,
-`scripts/qemu.sh` and CI read. Adding a board is a row there plus that one file.
+`scripts/qemu.sh` and CI read. Adding a board is a row there plus that one file;
+neither script needs a per-board arm. CI is separate: a board is built, or
+emulated, only once it also has a row in the `build` (or `qemu-e2e`) matrix in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 PSRAM is not required, but its absence is the interesting case. On the S3 and the
 C5 the whole Rust heap, the 256 KB executor stack and every worker stack live in
