@@ -315,25 +315,37 @@ fn ws_thread(
     // either figure. The default is kept where there is PSRAM to spend, so the
     // boards this was tuned on keep the behaviour they were tested with.
     //
-    // The size CAPS matter for a different reason. tungstenite will accumulate a
-    // 64 MiB message out of 16 MiB frames before it refuses one, and on a chip
-    // whose whole heap is ~314 KB the allocator aborts the firmware long before
-    // tungstenite has an opinion. Capping does not cost capability that ever
-    // worked -- a frame that large was never going to be received here -- it
-    // turns an unrecoverable abort into a clean protocol error, which the
-    // supervisor already handles by reconnecting. The PSRAM boards keep the
-    // defaults, where 64 MiB is merely unreachable rather than fatal.
+    // The size CAPS matter for a different reason, and the no-PSRAM ones are set
+    // from a measurement rather than from taste. tungstenite accumulates a whole
+    // message in a `BytesMut`, and `BytesMut::reserve_inner` grows it by
+    // `max(len + additional, cap * 2)` -- reallocating and copying, so it needs
+    // the *whole* new size contiguous. That is what aborted the ESP32-C3
+    // firmware: a buffer at 16,150 bytes doubled to 32,300 against a heap with
+    // 50,180 free but only 34,816 contiguous.
     //
-    // 4 KB rather than 8 on the no-PSRAM side: turning CONFIG_MBEDTLS_DYNAMIC_BUFFER
-    // off for the ESP32-C3 moved mbedTLS from ~4 KB of record buffers between
-    // records to ~21 KB held for the whole session, and this is where half of
-    // that is paid back. It costs read syscalls and nothing else -- the largest
-    // frame the pairing flow has ever carried is 634 bytes.
+    //     0x4202811e  <bytes::bytes_mut::BytesMut>::reserve_inner
+    //     0x42161fa6  Esp32TransportFactory::create_transport::{closure#0}
+    //     0x42075b28  std::alloc::rust_oom::{closure#0}
+    //
+    // `read_buffer_size` does not bound it: that is the chunk reads are issued
+    // in, not the buffer a message accumulates into. The caps do, because
+    // tungstenite checks `max_frame_size` before reserving the payload. So on a
+    // board without PSRAM they are set below the contiguous budget this chip has
+    // actually been observed to have -- 8 KB per frame, 16 KB per message, which
+    // bounds the doubling at ~16 KB. The pairing flow's largest inbound frame is
+    // 634 bytes, so this costs no capability that ever worked; what it buys is
+    // that a peer sending more produces a clean protocol error the supervisor
+    // reconnects from, instead of an allocation failure that aborts the
+    // firmware. The PSRAM boards keep tungstenite's defaults, where 64 MiB is
+    // merely unreachable rather than fatal.
+    //
+    // 4 KB read/write rather than 8 on the no-PSRAM side: the same contiguity
+    // argument, and it costs read syscalls and nothing else.
     let ws_config = tungstenite::protocol::WebSocketConfig::default()
         .read_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
         .write_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
-        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 128 * 1024)))
-        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 64 * 1024)));
+        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 16 * 1024)))
+        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 8 * 1024)));
 
     let (mut ws, _response) =
         match tungstenite::client::client_with_config(request, stream, Some(ws_config)) {

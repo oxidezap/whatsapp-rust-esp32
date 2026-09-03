@@ -5,7 +5,7 @@ it freely: the whole Rust heap, a 256 KB executor stack, every worker stack. The
 ESP32-C3 has none. Its ~400 KB of on-chip SRAM is the entire memory system, and
 ESP-IDF hands about **314 KB** of that to the heap:
 
-```
+```text
 I (954) heap_init: At 3FC90080 len 0002FF80 (191 KiB): RAM
 I (954) heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
 I (954) heap_init: At 3FCDC710 len 00002950 (10 KiB): Retention RAM
@@ -35,12 +35,17 @@ C3 differs from the others in the deepest possible way.
 
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
-| `wa-main` executor stack | 256 KB | 64 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. |
-| `wa-blocking` worker stack | 32 KB | 20 KB | Prekey batches: CPU-bound, not deep. |
-| `ws-transport` stack | 16 KB | 12 KB | mbedTLS records and `tungstenite` framing; neither recurses. |
-| `wa-nvs` worker stack | 32 KB | 12 KB | Internal DRAM on every board (see below), so the one stack worth measuring. Peak use 2,564 B. |
-| tungstenite read buffer | 128 KB | 8 KB | See below. |
-| tungstenite write buffer | 128 KB | 8 KB | See below. |
+| `wa-main` executor stack | 256 KB | 32 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. Measured peak 21,608 B. |
+| `wa-blocking` worker stack | 32 KB | 10 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,504 B. |
+| `ws-transport` stack | 16 KB | 10 KB | mbedTLS records and `tungstenite` framing; neither recurses. Measured peak 5,632 B. |
+| `wa-nvs` worker stack | 32 KB | 6 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
+| tungstenite read/write buffers | 128 KB | 4 KB each | The chunk reads are issued in, not a message cap. |
+| tungstenite frame / message cap | 16 MiB / 64 MiB | 8 KB / 16 KB | Bounds the read buffer's doubling below the contiguous heap. See below. |
+| admin HTTP sessions | 16 | 4 | One browser tab; the QEMU suite drives it with one `curl` at a time. |
+
+Every ESP32-C3 figure in that table is a measured peak with headroom, not an
+estimate. How they were measured, and what they were before, is in **Sizing the
+stacks from the measurement** below.
 
 Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack drops from
 32 KB to 20 KB (it is held for the life of the firmware and is only large for the
@@ -55,13 +60,14 @@ the one worth measuring rather than guessing at. Its jobs are shallow and
 bounded: put or delete one record, or erase a namespace, and none of them puts a
 record on the stack (`read_blob` and `encode_record` both build `Vec`s). The boot
 replay, the only thing that walks the whole store, runs on the ESP-IDF main task
-before this worker exists. Measured peak is **2,564 bytes**: 2,416 with a 32 KB
-stack, and 2,564 with a 12 KB one after a `DELETE /sessions` (which runs the
-deepest job, `erase_namespace`) and the reboot that follows it. Shrinking the
-stack by 20 KB moved the peak by 148 bytes, which is the point: this worker's
-depth is bounded by what its jobs do, not by what it is given. 12 KB keeps nearly
-four times the observed peak and hands that 20 KB of internal DRAM back to the
-heap; the PSRAM boards keep the 32 KB they were tested on.
+before this worker exists. Measured peak is **2,596 bytes**, and it barely moves
+with the stack it is given: 2,416 with a 32 KB stack, 2,564 with a 12 KB one
+after a `DELETE /sessions` (the deepest job, `erase_namespace`) and the reboot
+that follows, 2,596 with 6 KB. Shrinking the stack by 26 KB moved the peak by
+180 bytes, which is the point: this worker's depth is bounded by what its jobs
+do, not by what it is given. 6 KB keeps well over twice the observed peak and
+hands the rest of that internal DRAM back to the heap; the PSRAM boards keep the
+32 KB they were tested on.
 
 ## The two failures worth writing down
 
@@ -72,7 +78,7 @@ shown up on a board with PSRAM.
 Ethernet link, a completed TLS handshake and a completed WebSocket upgrade, the
 firmware died on:
 
-```
+```text
 memory allocation of 131072 bytes failed
 ```
 
@@ -150,7 +156,7 @@ then died -- twice, with the same allocation, and the first diagnosis of it was
 wrong. Worth recording in full, because both the bug and the mistake are the
 shape of the problem on a chip this size:
 
-```
+```text
 I (6384) whatsapp_rust::prekeys: Server missing prekeys (persisted flag), uploading.
 E (6564) Dynamic Impl: alloc(16749 bytes) failed
 E (6564) esp-tls-mbedtls: read error :-0x7F00
@@ -167,7 +173,7 @@ plus record overhead, so the first fix lowered that value to 8192. The next run
 asked for 16,749 again. Disassembling `esp_mbedtls_add_rx_buffer` in the failing
 firmware settles it:
 
-```
+```text
 lw   a5,108(s0)          # ssl->in_len -- the record header just read off the wire
 lbu  a4,0(a5)            # length, big-endian
 lbu  a5,1(a5)
@@ -187,7 +193,7 @@ buffers are taken once inside the handshake, when the heap is least fragmented,
 which sounds strictly better. It is not, because of what the heap actually looks
 like by then:
 
-```
+```text
 I (4415) whatsapp_esp32::transport: WS thread: internal heap 53332 free, largest block 31744
 ```
 
@@ -196,7 +202,7 @@ printed before the bot is built. Holding ~21 KB of record buffers for the life o
 the session out of 53 KB left the OpenCores MAC unable to allocate receive
 buffers:
 
-```
+```text
 opencores.emac: no mem for receive buffer          (×3.8 million)
 task_wdt: Task watchdog got triggered ... CPU 0: emac_rx
 ```
@@ -205,12 +211,14 @@ A 206 MB serial log and a ten-minute job timeout, instead of the previous
 abort at seven seconds. `CONFIG_MBEDTLS_DYNAMIC_BUFFER` is therefore back on: a
 peak that fits is worth more here than a peak that is early.
 
-**So the constraint is neither knob**, and instrumenting it settled the sizing
+## Sizing the stacks from the measurement
+
+**The constraint is neither knob**, and instrumenting it settled the sizing
 question this port had been answering by reasoning. `metrics::log_memory_profile`
 prints free bytes, the largest free block and every worker stack's never-used
 bytes on each WebSocket connect and each read error. One run:
 
-```
+```text
 memory at websocket connect:     heap  75236 free, largest 49152; never-used wa-main=43932 wa-blocking=19584 ws-transport=8340 wa-nvs=9808
 memory at websocket connect:     heap  49664 free, largest 26624; never-used wa-main=43932 wa-blocking=19584 ws-transport=8336 wa-nvs=9756
 E Dynamic Impl: alloc(16749 bytes) failed
@@ -248,7 +256,7 @@ With the stacks resized the mbedTLS failure was gone, and the abort moved to
 `memory allocation of 32300 bytes failed` -- Rust's allocator, not mbedTLS. The
 per-frame heap note makes the run-up readable:
 
-```
+```text
 <-- WS recv  40 bytes  heap=71208/57344
 --> WS send  57 bytes  heap=53468/40960
 --> WS send 292 bytes  heap=50344/34816
@@ -259,7 +267,7 @@ memory allocation of 32300 bytes failed
 50 KB free, 34.8 KB contiguous, and a single request for 32.3 KB. The stack dump
 names it, resolved against the CI firmware with `addr2line`:
 
-```
+```text
 0x4202811e  <bytes::bytes_mut::BytesMut>::reserve_inner
 0x42161fa6  Esp32TransportFactory::create_transport::{closure#0}   # the ws-transport thread
 0x42075b28  std::alloc::rust_oom::{closure#0}
