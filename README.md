@@ -57,8 +57,9 @@ emulated, only once it also has a row in the `build` (or `qemu-e2e`) matrix in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 PSRAM is not required, but its absence is the interesting case. On the S3 and the
-C5 the whole Rust heap, the 256 KB executor stack and every worker stack live in
-8 MB of external RAM. The **ESP32-C3 has none**: ~400 KB of on-chip SRAM is the
+C5 the whole Rust heap, the 256 KB executor stack and every worker stack but one
+live in 8 MB of external RAM -- the exception is `wa-nvs`, which is internal DRAM
+on every board because writing flash disables the cache. The **ESP32-C3 has none**: ~400 KB of on-chip SRAM is the
 entire memory system, ESP-IDF hands about 314 KB of it to the heap, and the
 firmware adapts by reading `CONFIG_SPIRAM`; no logic in `src/` branches on chip
 identity. What that changes, what it cost, and what is and is not verified:
@@ -342,10 +343,10 @@ Two layers stand in for a board, and both run in CI (`.github/workflows/ci.yml`)
 on pull requests and on pushes to `main`:
 
 1. **Build for the real targets.** The `build` job compiles the firmware with
-   the pinned `esp` toolchain in three flavors, the ESP32-S3 board build, the
-   ESP32-C5 board build and the QEMU build, and fails when an app image no
-   longer fits the factory partition (`scripts/check-app-size.sh`). All three
-   ELFs are uploaded as artifacts.
+   the pinned `esp` toolchain in five flavors -- the ESP32-S3, ESP32-C5 and
+   ESP32-C3 board builds, plus a QEMU build for each of the two emulated chips --
+   and fails when an app image no longer fits the factory partition
+   (`scripts/check-app-size.sh`). All five ELFs are uploaded as artifacts.
 2. **Pair, persist and message on QEMU.** The `qemu-e2e` job runs the QEMU
    flavor on [Espressif's QEMU](https://github.com/espressif/esp-toolchain-docs/tree/main/qemu/esp32s3)
    (an ESP32-S3 with 8 MB PSRAM and an OpenCores Ethernet MAC) against the same
@@ -372,9 +373,19 @@ The same flow runs locally with `scripts/qemu.sh`:
 # once: Espressif's QEMU (these machines are not in upstream QEMU) and esptool.
 # The release ships one binary per architecture: xtensa for the S3, riscv32 for
 # the C3. Fetch the one for the board you want to emulate.
-curl -sSfL -o qemu.tar.xz https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-xtensa-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz
-mkdir -p ~/qemu && tar -xJf qemu.tar.xz -C ~/qemu     # needs libsdl2, libslirp, glib, pixman at runtime
-export QEMU_XTENSA=~/qemu/qemu/bin/qemu-system-xtensa   # QEMU_RISCV32 for the C3
+R=https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417
+V=esp_develop_9.2.2_20260417-x86_64-linux-gnu
+
+# ESP32-S3 (Xtensa)
+curl -sSfL -o qemu-xtensa.tar.xz "$R/qemu-xtensa-softmmu-$V.tar.xz"
+mkdir -p ~/qemu-xtensa && tar -xJf qemu-xtensa.tar.xz -C ~/qemu-xtensa
+export QEMU_XTENSA=~/qemu-xtensa/qemu/bin/qemu-system-xtensa
+
+# ESP32-C3 (RISC-V)
+curl -sSfL -o qemu-riscv32.tar.xz "$R/qemu-riscv32-softmmu-$V.tar.xz"
+mkdir -p ~/qemu-riscv32 && tar -xJf qemu-riscv32.tar.xz -C ~/qemu-riscv32
+export QEMU_RISCV32=~/qemu-riscv32/qemu/bin/qemu-system-riscv32
+# both need libsdl2, libslirp, glib and pixman at runtime
 pip install esptool esp-idf-nvs-partition-gen   # the ESP-IDF python env under .embuild already has both
 
 scripts/qemu.sh build      # release build with --features qemu and sdkconfig.qemu, into target/qemu-esp32s3/
@@ -421,10 +432,20 @@ Those still need the board.
 Install `cargo install espflash`. On Arch your user must be in the `uucp` group to
 access the serial port (`dialout` on Debian/Ubuntu).
 
-Both boards expose a built-in USB-Serial/JTAG (USB id `303a:1001`), so they show up
-directly as `/dev/ttyACM0`, with no external UART adapter needed. The commands below
-are for the S3; for the C5 add `--chip esp32c5` and use the
-`target/riscv32imac-esp-espidf/<profile>/` paths. Confirm the link first:
+The S3 and C5 expose a built-in USB-Serial/JTAG (USB id `303a:1001`), so they show
+up directly as `/dev/ttyACM0`, with no external UART adapter needed; most ESP32-C3
+devkits bring UART0 out through a USB-serial bridge instead, so the C3 usually
+appears as `/dev/ttyUSB0` (which is also why its overlay leaves the console on
+UART0 -- see [docs/esp32c3.md](docs/esp32c3.md)). The commands below are for the
+S3; for another board add its `--chip` and use its target directory:
+
+| Board | `--chip` | Target directory |
+|-------|----------|------------------|
+| ESP32-S3 | `esp32s3` (default) | `target/xtensa-esp32s3-espidf/<profile>/` |
+| ESP32-C5 | `esp32c5` | `target/riscv32imac-esp-espidf/<profile>/` |
+| ESP32-C3 | `esp32c3` | `target/riscv32imc-esp-espidf/<profile>/` |
+
+Confirm the link first:
 
 ```bash
 espflash board-info --port /dev/ttyACM0   # prints chip type, flash size, MAC
