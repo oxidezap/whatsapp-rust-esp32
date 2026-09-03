@@ -337,6 +337,9 @@ Signal state and sync keys) is separate from the app, so flashing a new build
 keeps the device linked. A factory reset from the dashboard, or erasing that
 partition, is what unlinks it.
 
+Why the image is 4.1--4.5 MB, measured object by object, and what the obvious
+size levers are actually worth: [docs/app-image-size.md](docs/app-image-size.md).
+
 ## Test without hardware
 
 Two layers stand in for a board, and both run in CI (`.github/workflows/ci.yml`)
