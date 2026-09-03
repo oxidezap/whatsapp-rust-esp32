@@ -771,7 +771,7 @@ async fn run_whatsapp_inner(
                                 text.unwrap_or("<no text>")
                             );
                             ds.record_message(MessageLogEntry {
-                                id: inbound.info.id.clone(),
+                                id: inbound.info.id.to_string(),
                                 chat: inbound.info.source.chat.to_string(),
                                 sender: inbound.info.source.sender.to_string(),
                                 text: text.map(str::to_owned),
