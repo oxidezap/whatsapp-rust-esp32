@@ -146,6 +146,26 @@ pub mod alloc_note {
 ///
 /// Free bytes *and* largest block, because the two diverge under fragmentation
 /// and it is the second that decides whether a large allocation succeeds.
+/// Free bytes and largest contiguous block, for callers that want one short
+/// line rather than the full profile above.
+///
+/// `log_memory_profile` prints the four stack watermarks too, which is the
+/// right thing at an event boundary and the wrong thing inside a loop: the
+/// crash context is a fixed 60-line window ending at the abort, and a probe
+/// that prints four lines per call pushes the evidence out of it. That is not
+/// hypothetical -- an earlier `memory_report()` probe in this investigation
+/// answered its question and displaced the run-up to the crash doing it.
+pub fn heap_now() -> (u32, u32) {
+    // SAFETY: read-only ESP-IDF accessors, safe from any context.
+    let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    unsafe {
+        (
+            sys::heap_caps_get_free_size(cap),
+            sys::heap_caps_get_largest_free_block(cap),
+        )
+    }
+}
+
 pub fn log_memory_profile(at: &str) {
     // SAFETY: read-only ESP-IDF accessors, safe from any context.
     let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;

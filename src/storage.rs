@@ -1069,6 +1069,19 @@ impl AppSyncStore for NvsStore {
         })?;
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);
+        let stored = s.sync_keys.len();
+        drop(s);
+        // The app-state key share arrives as one batch -- 70 keys on the QEMU
+        // mock -- and each key here is two NVS writes plus a RAM entry. On the
+        // ESP32-C3 the run dies shortly after this batch on a 4,176-byte
+        // allocation, in a stretch of the login where no client event fires and
+        // so no memory line is printed. This is that missing line. Sampled
+        // rather than per-key: 70 log lines would overrun the 60-line crash
+        // context and hide the very run-up it exists to show.
+        if stored == 1 || stored % 16 == 0 {
+            let (free, largest) = crate::metrics::heap_now();
+            log::info!("storage: sync keys: {stored} stored  heap={free}/{largest}");
+        }
         Ok(())
     }
 
