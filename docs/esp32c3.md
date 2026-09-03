@@ -458,6 +458,34 @@ If it turns out not to be enough, the next move is upstream rather than another
 resize here: decoding the props response without materialising a second
 full-size buffer would remove the 28,772-byte request altogether.
 
+Where the 54 KB is *not*, at least, is settled. `Client::memory_report()` was
+logged at those same events for one run and returned:
+
+```text
+--- Signal store caches ---
+  signal_sessions:             0 entries          0 B
+  signal_identities:           0 entries          0 B
+  signal_sender_keys:          0 entries          0 B
+  total estimated:        59 B
+```
+
+Fifty-nine bytes, with every queue and cache empty. Nothing upstream retains
+that memory, so it belongs to the session's transient buffers -- mbedTLS and the
+WebSocket -- not to a cache that could be bounded. The call was then removed:
+it prints about forty lines per event, and three of those pushed the actual
+run-up out of the sixty-line crash window, which is a bad trade once the answer
+is known.
+
+That same run also showed the other order this failure can take. Rather than the
+decode, it was the **frame buffer** that failed, at 32,300, with the last frame
+before it reporting `heap=62916/47104` -- a largest block comfortably above the
+request. The missing piece is mbedTLS: with `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y`,
+`esp_mbedtls_add_rx_buffer` allocates the peer's record length plus 341 bytes for
+the incoming record *before* tungstenite reserves. 47,104 less that ~16.7 KB
+leaves about 30 KB, roughly 2 KB under the 32,300. So both shapes of the abort
+are the same shortfall of a few kilobytes in one block, which is what makes the
+stack reclaim worth measuring rather than dismissing.
+
 ## The board
 
 `partitions.csv` is unchanged, so a C3 board needs **at least 8 MB of flash**

@@ -816,12 +816,6 @@ async fn run_whatsapp_inner(
                         // A per-task profile here says which stack or which
                         // pool is holding it, instead of leaving it inferred.
                         crate::metrics::log_memory_profile("event");
-                        // The heap profile says how much is gone; this says
-                        // who has it. `MemoryReport` names each retained
-                        // collection and its bytes, so the 54 KB gets
-                        // attributed rather than eliminated one guess at a
-                        // time.
-                        log::debug!("retained: {}", client.memory_report().await);
                     }
                 }
             }
