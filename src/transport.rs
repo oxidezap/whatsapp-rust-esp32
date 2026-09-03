@@ -312,9 +312,20 @@ fn ws_thread(
     // costs syscalls, not capability, and WhatsApp's frames are nowhere near
     // either figure. The default is kept where there is PSRAM to spend, so the
     // boards this was tuned on keep the behaviour they were tested with.
+    //
+    // The size CAPS matter for a different reason. tungstenite will accumulate a
+    // 64 MiB message out of 16 MiB frames before it refuses one, and on a chip
+    // whose whole heap is ~314 KB the allocator aborts the firmware long before
+    // tungstenite has an opinion. Capping does not cost capability that ever
+    // worked -- a frame that large was never going to be received here -- it
+    // turns an unrecoverable abort into a clean protocol error, which the
+    // supervisor already handles by reconnecting. The PSRAM boards keep the
+    // defaults, where 64 MiB is merely unreachable rather than fatal.
     let ws_config = tungstenite::protocol::WebSocketConfig::default()
         .read_buffer_size(crate::runtime::by_ram(128 * 1024, 8 * 1024))
-        .write_buffer_size(crate::runtime::by_ram(128 * 1024, 8 * 1024));
+        .write_buffer_size(crate::runtime::by_ram(128 * 1024, 8 * 1024))
+        .max_message_size(Some(crate::runtime::by_ram(64 << 20, 128 * 1024)))
+        .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 64 * 1024)));
 
     let (mut ws, _response) = match tungstenite::client::client_with_config(request, stream, Some(ws_config))
     {
