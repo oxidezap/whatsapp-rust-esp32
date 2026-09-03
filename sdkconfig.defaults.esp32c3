@@ -71,7 +71,20 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # the outgoing buffer does not have to match. Saves 12 KB against the symmetric
 # 16 KB the shared defaults ask for.
 CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
-CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+# 8 KB in, not the 16 KB a TLS peer is allowed to send. 16384 was the first
+# choice here and it is what broke the QEMU end-to-end run: during the prekey
+# upload the dynamic allocator asked for `alloc(16749 bytes)` -- 16384 plus
+# record overhead -- and a 314 KB heap that has a live TLS session, a tearing-down
+# one and the protocol on it could not produce a contiguous block that size. The
+# firmware then failed a 3,700-byte allocation and aborted.
+#
+# This is a real bet, not a free win: if a peer ever sends a single record larger
+# than this, the connection fails. It is taken because everything this client
+# receives is small (the largest inbound node in the pairing flow is ~200 bytes,
+# and history sync is off), while the 16 KB ceiling was costing a contiguous
+# allocation the chip cannot reliably serve. MFL (RFC 6066) does not help: it
+# caps at 4096 and needs the server to honour it.
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 
 # Trim ciphersuites and features the WhatsApp gateway and the mock server never

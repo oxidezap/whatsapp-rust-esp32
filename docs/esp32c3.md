@@ -140,7 +140,43 @@ Not verified, and it matters:
   board, and it is why the Wi-Fi buffer counts in the overlay are trimmed on
   reasoning rather than on measurement.
 - **The full pairing flow** needs the mock server CI runs; the `qemu-e2e` job is
-  what closes that gap.
+  what closes that gap -- and it is what found the one bug no local run could.
+  See below.
+
+## What the end-to-end run found that a local boot could not
+
+The first `qemu-e2e` run on this chip got further than anything reachable here
+and then died. Worth recording, because it is the shape of the problem on a chip
+this size:
+
+```
+I (6266) whatsapp_rust::prekeys: Server missing prekeys (persisted flag), uploading.
+E (6446) Dynamic Impl: alloc(16749 bytes) failed
+E (6446) esp-tls-mbedtls: read error :-0x7F00
+...
+memory allocation of 3700 bytes failed
+abort() was called at PC 0x4205e42d on core 0
+```
+
+Pairing itself succeeded: QR flow, all the server-side validation, the `515`
+reconnect, re-authentication. It fell over afterwards, on the prekey upload, and
+the failing allocation names its own cause -- 16,749 bytes is
+`MBEDTLS_SSL_IN_CONTENT_LEN` (16384) plus record overhead. A 314 KB heap holding
+a live TLS session, a tearing-down one and the protocol on top could not produce
+a contiguous block that big; the next 3,700-byte request then failed outright and
+the firmware aborted.
+
+So the input buffer is 8 KB here rather than 16 KB. That is a bet, not a free
+win: a peer that sends a single record larger than 8 KB will break the
+connection. It is taken because everything this client receives is small (the
+largest inbound node in the pairing flow is around 200 bytes, and history sync is
+off), while the 16 KB ceiling was demanding an allocation the chip cannot
+reliably serve. RFC 6066's max_fragment_length does not help -- it caps at 4096
+and needs the server to honour it.
+
+The general lesson is the one this port keeps repeating: the numbers that matter
+here are the *peak contiguous* ones, not the totals. 194 KB free with a 28 KB
+largest block is a different machine from 194 KB free with a 100 KB one.
 
 ## The board
 
