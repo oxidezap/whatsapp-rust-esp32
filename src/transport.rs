@@ -287,6 +287,17 @@ fn ws_thread(
     };
 
     log::info!("WS thread: TLS connected, starting WebSocket handshake...");
+    // Free bytes AND the largest contiguous block, on every connect. The two
+    // diverge under fragmentation, and it was that gap -- not the total -- that
+    // decided the ESP32-C3 end-to-end failures: a 16,749-byte request refused
+    // while 194 KB was free. One line per connection also makes the trajectory
+    // across a reconnect loop readable, which a single boot-time total was not.
+    {
+        let cap = esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT;
+        let free = unsafe { esp_idf_svc::sys::heap_caps_get_free_size(cap) };
+        let largest = unsafe { esp_idf_svc::sys::heap_caps_get_largest_free_block(cap) };
+        log::info!("WS thread: internal heap {free} free, largest block {largest}");
+    }
 
     let request = tungstenite::http::Request::builder()
         .uri(ws_url)
@@ -321,23 +332,29 @@ fn ws_thread(
     // turns an unrecoverable abort into a clean protocol error, which the
     // supervisor already handles by reconnecting. The PSRAM boards keep the
     // defaults, where 64 MiB is merely unreachable rather than fatal.
+    //
+    // 4 KB rather than 8 on the no-PSRAM side: turning CONFIG_MBEDTLS_DYNAMIC_BUFFER
+    // off for the ESP32-C3 moved mbedTLS from ~4 KB of record buffers between
+    // records to ~21 KB held for the whole session, and this is where half of
+    // that is paid back. It costs read syscalls and nothing else -- the largest
+    // frame the pairing flow has ever carried is 634 bytes.
     let ws_config = tungstenite::protocol::WebSocketConfig::default()
-        .read_buffer_size(crate::runtime::by_ram(128 * 1024, 8 * 1024))
-        .write_buffer_size(crate::runtime::by_ram(128 * 1024, 8 * 1024))
+        .read_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
+        .write_buffer_size(crate::runtime::by_ram(128 * 1024, 4 * 1024))
         .max_message_size(Some(crate::runtime::by_ram(64 << 20, 128 * 1024)))
         .max_frame_size(Some(crate::runtime::by_ram(16 << 20, 64 * 1024)));
 
-    let (mut ws, _response) = match tungstenite::client::client_with_config(request, stream, Some(ws_config))
-    {
-        Ok(ws) => ws,
-        Err(e) => {
-            log::error!("WebSocket handshake failed: {}", e);
-            let _ = event_tx.send_blocking(TransportEvent::Disconnected(
-                DisconnectReason::ReadError(format!("WebSocket handshake failed: {e}")),
-            ));
-            return;
-        }
-    };
+    let (mut ws, _response) =
+        match tungstenite::client::client_with_config(request, stream, Some(ws_config)) {
+            Ok(ws) => ws,
+            Err(e) => {
+                log::error!("WebSocket handshake failed: {}", e);
+                let _ = event_tx.send_blocking(TransportEvent::Disconnected(
+                    DisconnectReason::ReadError(format!("WebSocket handshake failed: {e}")),
+                ));
+                return;
+            }
+        };
 
     if let Err(e) = ws.get_mut().set_read_timeout_ms(100) {
         log::warn!("Could not set read timeout: {}", e);

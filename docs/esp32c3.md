@@ -45,8 +45,9 @@ C3 differs from the others in the deepest possible way.
 Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack drops from
 32 KB to 20 KB (it is held for the life of the firmware and is only large for the
 one-time NVS replay), the default pthread stack from 32 KB to 8 KB, the Wi-Fi
-buffer counts from 10/32/32 to 4/8/8, and mbedTLS gets `DYNAMIC_BUFFER` plus
-asymmetric record buffers (16 KB in, 4 KB out) since it can no longer allocate
+buffer counts from 10/32/32 to 4/8/8, and mbedTLS gets asymmetric record
+buffers (16 KB in, 4 KB out) -- but deliberately not `DYNAMIC_BUFFER`, for the
+reasons below -- since it can no longer allocate
 from external memory.
 
 `wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
@@ -145,34 +146,68 @@ Not verified, and it matters:
 
 ## What the end-to-end run found that a local boot could not
 
-The first `qemu-e2e` run on this chip got further than anything reachable here
-and then died. Worth recording, because it is the shape of the problem on a chip
-this size:
+The `qemu-e2e` runs on this chip got further than anything reachable locally and
+then died -- twice, with the same allocation, and the first diagnosis of it was
+wrong. Worth recording in full, because both the bug and the mistake are the
+shape of the problem on a chip this size:
 
 ```
-I (6266) whatsapp_rust::prekeys: Server missing prekeys (persisted flag), uploading.
-E (6446) Dynamic Impl: alloc(16749 bytes) failed
-E (6446) esp-tls-mbedtls: read error :-0x7F00
+I (6384) whatsapp_rust::prekeys: Server missing prekeys (persisted flag), uploading.
+E (6564) Dynamic Impl: alloc(16749 bytes) failed
+E (6564) esp-tls-mbedtls: read error :-0x7F00
 ...
-memory allocation of 3700 bytes failed
-abort() was called at PC 0x4205e42d on core 0
+memory allocation of 4192 bytes failed
+abort() was called at PC 0x420746ad on core 0
 ```
 
 Pairing itself succeeded: QR flow, all the server-side validation, the `515`
-reconnect, re-authentication. It fell over afterwards, on the prekey upload, and
-the failing allocation names its own cause -- 16,749 bytes is
-`MBEDTLS_SSL_IN_CONTENT_LEN` (16384) plus record overhead. A 314 KB heap holding
-a live TLS session, a tearing-down one and the protocol on top could not produce
-a contiguous block that big; the next 3,700-byte request then failed outright and
-the firmware aborted.
+reconnect, re-authentication. It fell over afterwards, on the prekey upload.
 
-So the input buffer is 8 KB here rather than 16 KB. That is a bet, not a free
-win: a peer that sends a single record larger than 8 KB will break the
-connection. It is taken because everything this client receives is small (the
-largest inbound node in the pairing flow is around 200 bytes, and history sync is
-off), while the 16 KB ceiling was demanding an allocation the chip cannot
-reliably serve. RFC 6066's max_fragment_length does not help -- it caps at 4096
-and needs the server to honour it.
+**The wrong diagnosis.** 16,749 reads like `MBEDTLS_SSL_IN_CONTENT_LEN` (16384)
+plus record overhead, so the first fix lowered that value to 8192. The next run
+asked for 16,749 again. Disassembling `esp_mbedtls_add_rx_buffer` in the failing
+firmware settles it:
+
+```
+lw   a5,108(s0)          # ssl->in_len -- the record header just read off the wire
+lbu  a4,0(a5)            # length, big-endian
+lbu  a5,1(a5)
+...
+addi s1,a5,333           # size = record_length + 333
+addi s5,s1,8             #      + 8
+jal  mbedtls_calloc
+```
+
+The size is `record_length + 341`, taken from the header the **peer** sent:
+16,749 is 16408 + 341, not 16384 + 365. No sdkconfig value bounds it, which is
+why lowering the ceiling changed nothing.
+
+**The actual fix** is to stop asking. `CONFIG_MBEDTLS_DYNAMIC_BUFFER` frees the
+receive buffer after every record and allocates the next one on demand; that is
+the feature ESP-IDF added for exactly this class of chip, and it is now off here.
+Two reasons:
+
+- *Heap.* An on-demand 16 KB contiguous request lands mid-session, against a heap
+  that by then holds a live TLS session, a tearing-down one and the protocol on
+  top of both. Static buffers are taken once inside the handshake, when the heap
+  is at its least fragmented, and never asked for again. That costs ~21 KB held
+  for the life of the session instead of ~4 KB between records; half of it is
+  paid back by dropping the WebSocket read and write buffers from 8 KB to 4 KB.
+- *Correctness.* This transport polls with a 100 ms read timeout, so
+  `esp_tls_conn_read` returns `WANT_READ` in the middle of a record routinely, and
+  rebuilding the receive buffer around a partially-read header is the fragile path
+  in that implementation. A claimed record length of 16408 on a connection whose
+  largest frame the server ever sent was 634 bytes is what a desynchronised header
+  looks like.
+
+The incoming ceiling therefore goes back to the full 16384: with static buffers a
+larger record is a hard protocol failure, and the ceiling is the peer's to choose.
+RFC 6066's max_fragment_length would cap it at 4096, but it needs the server to
+honour the extension and neither peer here does.
+
+Every WebSocket connect now logs free bytes *and* the largest free block, because
+the second number is the one that decided this and only the first was being
+printed.
 
 The general lesson is the one this port keeps repeating: the numbers that matter
 here are the *peak contiguous* ones, not the totals. 194 KB free with a 28 KB

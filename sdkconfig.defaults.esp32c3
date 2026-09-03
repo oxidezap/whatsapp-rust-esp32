@@ -56,35 +56,48 @@ CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 
 # mbedTLS: the single largest RAM item after the stacks. CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC
-# does not exist without PSRAM, so these buffers come out of internal DRAM and
-# have to be handed back when they are idle.
+# does not exist without PSRAM, so these buffers come out of internal DRAM, and
+# the only lever left is how large they are and when they are taken.
 #
-# DYNAMIC_BUFFER frees the handshake-only allocations (peer certificate chain,
-# the large intermediate buffers) as soon as the handshake completes, and shrinks
-# the record buffers to what the negotiated session actually uses. It is the
-# feature ESP-IDF added for exactly this class of chip.
-CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
-CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
-CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
-# Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we
-# must be able to receive it, but nothing this firmware sends comes close, so
-# the outgoing buffer does not have to match. Saves 12 KB against the symmetric
-# 16 KB the shared defaults ask for.
+# CONFIG_MBEDTLS_DYNAMIC_BUFFER is deliberately NOT set here, and that is the
+# opposite of the obvious choice -- it is the feature ESP-IDF added for exactly
+# this class of chip, and it was enabled here first. It is off because it is what
+# broke the QEMU end-to-end run, twice.
+#
+# Under that feature the receive buffer is freed after every record and
+# re-allocated for the next one, sized from the record header just read off the
+# wire: `esp_mbedtls_add_rx_buffer` allocates `record_length + 341`. Two things
+# follow. The size is the peer's choice, so no sdkconfig value bounds it -- the
+# run that asked for `alloc(16749 bytes)` asked for exactly the same 16749 after
+# CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN was lowered to 8192, because 16749 is
+# 16408 (what the header claimed) plus 341, not 16384 plus overhead. And the
+# request lands mid-session, against a heap that by then holds a live TLS
+# session, a tearing-down one and the protocol state on top of both; a 314 KB
+# heap could not produce a contiguous block that size, and the firmware went on
+# to fail a 4,192-byte allocation and abort.
+#
+# There is a second reason, and it is a correctness one. This transport polls
+# with a 100 ms read timeout (src/transport.rs), so `esp_tls_conn_read` returns
+# WANT_READ in the middle of a record routinely. Freeing and rebuilding the
+# receive buffer around a partially-read record header is the fragile path in
+# that implementation, and a claimed record length of 16408 on a connection
+# whose largest frame the server ever sent was 634 bytes is what a desynchronised
+# header looks like.
+#
+# Without it mbedTLS allocates its record buffers once, inside the handshake,
+# when the heap is at its least fragmented, and never asks again. That costs
+# ~21 KB held for the life of the session instead of ~4 KB between records --
+# paid for below and in the WebSocket buffers in src/transport.rs.
+#
+# Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must
+# be able to receive it, but nothing this firmware sends comes close, so the
+# outgoing buffer does not have to match. Saves 12 KB against the symmetric 16 KB
+# the shared defaults ask for. The incoming side stays at the full 16384: with
+# static buffers a record larger than the buffer is a hard protocol failure, and
+# the ceiling is the peer's to choose. MFL (RFC 6066) would cap it at 4096, but
+# it needs the server to honour the extension and neither peer here does.
 CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
-# 8 KB in, not the 16 KB a TLS peer is allowed to send. 16384 was the first
-# choice here and it is what broke the QEMU end-to-end run: during the prekey
-# upload the dynamic allocator asked for `alloc(16749 bytes)` -- 16384 plus
-# record overhead -- and a 314 KB heap that has a live TLS session, a tearing-down
-# one and the protocol on it could not produce a contiguous block that size. The
-# firmware then failed a 3,700-byte allocation and aborted.
-#
-# This is a real bet, not a free win: if a peer ever sends a single record larger
-# than this, the connection fails. It is taken because everything this client
-# receives is small (the largest inbound node in the pairing flow is ~200 bytes,
-# and history sync is off), while the 16 KB ceiling was costing a contiguous
-# allocation the chip cannot reliably serve. MFL (RFC 6066) does not help: it
-# caps at 4096 and needs the server to honour it.
-CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 
 # Trim ciphersuites and features the WhatsApp gateway and the mock server never
