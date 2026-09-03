@@ -44,9 +44,13 @@ C3 differs from the others in the deepest possible way.
 | tungstenite frame / message cap | 16 MiB / 64 MiB | 48 KB / 64 KB | Above the largest legitimate message (28,205 B), far below what the heap serves. See below. |
 | admin HTTP sessions | 16 | 4 | One browser tab; the QEMU suite drives it with one `curl` at a time. |
 
-Every ESP32-C3 figure in that table is a measured peak with headroom, not an
-estimate. How they were measured, and what they were before, is in **Sizing the
-stacks from the measurement** below.
+The four **stack** figures are measured peaks with headroom, not estimates -- how
+they were measured, and what they were before, is in **Sizing the stacks from the
+measurement** below. The rest are configured limits *chosen from* measurements
+rather than peaks themselves: the read buffer is sized so the largest observed
+frame never forces a reallocation, the protocol caps sit above the largest
+message the server actually sends, and the session count is what the dashboard
+and the QEMU suite actually use.
 
 Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack drops from
 32 KB to 20 KB (it is held for the life of the firmware and is only large for the

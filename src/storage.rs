@@ -94,10 +94,10 @@ impl FlashWorker {
         // `encode_record` both build `Vec`s. The boot replay, the only thing that
         // walks the whole store, runs on the ESP-IDF main task before this worker
         // exists (hence CONFIG_ESP_MAIN_TASK_STACK_SIZE), not here. Measured peak
-        // on the emulated ESP32-C3 across pairing writes and a factory reset is
-        // in docs/esp32c3.md: 2,596 bytes across pairing writes and a factory
-        // reset: 2,596 bytes, so 6 KB keeps well over twice it, and a board with
-        // PSRAM keeps the 32 KB it was tested on since it has DRAM to spare.
+        // on the emulated ESP32-C3, across pairing writes and a factory reset, is
+        // 2,596 bytes (see docs/esp32c3.md). A 6 KB stack keeps well over twice
+        // that, and a board with PSRAM keeps the 32 KB it was tested on since it
+        // has DRAM to spare.
         let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
             stack_size: crate::runtime::by_ram(32 * 1024, 6 * 1024),
