@@ -355,8 +355,8 @@ cmd_test() {
         return 1
     fi
     log "board a -> board b ($to_b): ping"
-    if ! sent="$(admin_curl -v --max-time 60 -H 'Content-Type: application/json' \
-        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send" 2>&1)"; then
+    if ! sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
+        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")"; then
         log "curl failed: $sent"
         return 1
     fi
