@@ -586,6 +586,10 @@ mod tests {
     struct Script {
         inbound: VecDeque<io::Result<Vec<u8>>>,
         outbound: Vec<u8>,
+        /// Write failures are injected by setting this directly, so a test
+        /// can connect first and stall only the frame write: this models a
+        /// peer that stops reading once SO_SNDTIMEO expires on the socket.
+        write_err: Option<io::ErrorKind>,
     }
 
     impl Script {
@@ -593,6 +597,7 @@ mod tests {
             Self {
                 inbound: VecDeque::new(),
                 outbound: Vec::new(),
+                write_err: None,
             }
         }
         fn chunk(mut self, bytes: &[u8]) -> Self {
@@ -625,6 +630,9 @@ mod tests {
 
     impl Write for Script {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(kind) = self.write_err {
+                return Err(io::Error::from(kind));
+            }
             self.outbound.extend_from_slice(buf);
             Ok(buf.len())
         }
@@ -813,6 +821,22 @@ mod tests {
             Some(Frame::Binary(b)) => assert_eq!(&b[..], b"abcde"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_stalled_write_surfaces_as_an_error() {
+        // The property `disconnect` depends on: with SO_SNDTIMEO set, a peer
+        // that stops reading turns the blocked write into an error instead
+        // of parking the socket thread forever. The transport maps that
+        // error to `Disconnected` and exits, dropping the queued frames
+        // with it; without the timeout this `send_binary` would never
+        // return and the thread would outlive the disconnect.
+        let mut ws = connect(Script::new().chunk(&upgrade_response(b"")));
+        // Fail only the frame write, not the handshake request above: this
+        // is a connected socket whose peer stops reading mid-session.
+        ws.stream.write_err = Some(io::ErrorKind::TimedOut);
+        let err = ws.send_binary(b"ping").err().expect("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]

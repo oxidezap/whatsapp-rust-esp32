@@ -207,10 +207,29 @@ impl StoreInner {
         }
     }
     fn enforce_sync_keys_cap(&mut self) {
+        let latest = self.latest_sync_key_id.clone();
+        self.enforce_sync_keys_cap_except(latest.as_deref());
+    }
+    /// Same cap, but sparing `protected` instead of the recorded latest.
+    /// The boot replay uses it with the best-known-latest id seen so far,
+    /// since `latest_sync_key_id` is only resolved after the whole namespace
+    /// has been walked.
+    fn enforce_sync_keys_cap_except(&mut self, protected: Option<&[u8]>) {
         if crate::runtime::HAS_PSRAM {
             return;
         }
-        for key in self.sync_key_order.overflow(self.sync_keys.len(), 8) {
+        // Oldest first, but never the protected key: dropping the latest
+        // would force a full key re-request the next sync needs answered by
+        // the phone.
+        let excess = self.sync_keys.len().saturating_sub(8);
+        let keys_to_remove: Vec<_> = self
+            .sync_key_order
+            .overflow(self.sync_keys.len(), 8)
+            .into_iter()
+            .filter(|k| Some(k.as_slice()) != protected)
+            .take(excess)
+            .collect();
+        for key in keys_to_remove {
             self.sync_keys.remove(&key);
             self.sync_key_order.removed(&key);
         }
@@ -361,6 +380,58 @@ impl FlashNamespaces {
             records.push((logical_key.to_vec(), value.to_vec()));
         }
         Ok(records)
+    }
+
+    /// Walk every record in a namespace one at a time, validating exactly
+    /// like [`Self::load_records`] (entry budget, disappearance, key match,
+    /// size) but without materializing the whole namespace: each value is
+    /// handed to `visit` and dropped before the next record is read, so the
+    /// transient peak is a single record. The boot replay uses it for the
+    /// capped mirrors on no-PSRAM boards, where holding all 2048 session
+    /// blobs at once would dwarf the 8-entry cap the mirror enforces.
+    fn visit_records(
+        &self,
+        namespace: &EspCustomNvs,
+        label: &str,
+        max_entries: usize,
+        max_value_len: usize,
+        mut visit: impl FnMut(Vec<u8>, Vec<u8>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let names = record_names(namespace)?;
+        if names.len() > max_entries {
+            anyhow::bail!(
+                "{label} namespace has {} records; maximum is {max_entries}",
+                names.len()
+            );
+        }
+        for name in names {
+            let record = read_blob(
+                namespace,
+                &name,
+                RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + max_value_len,
+            )?
+            .ok_or_else(|| {
+                StoreError::Validation(format!(
+                    "{label} record '{name}' disappeared during startup"
+                ))
+            })?;
+            let (logical_key, value) = decode_record(&record)?;
+            if record_name(logical_key) != name {
+                return Err(StoreError::Validation(format!(
+                    "{label} record '{name}' has a mismatched logical key"
+                ))
+                .into());
+            }
+            if value.len() > max_value_len {
+                return Err(StoreError::Validation(format!(
+                    "{label} record '{name}' is too large: {} bytes",
+                    value.len()
+                ))
+                .into());
+            }
+            visit(logical_key.to_vec(), value.to_vec())?;
+        }
+        Ok(())
     }
 
     fn load_record(
@@ -772,9 +843,12 @@ impl NvsStore {
         };
         let mut timestamp_latest: Option<Vec<u8>> = None;
         if inner.device.is_some() {
-            for (key, value) in
-                flash.load_records(&flash.identities, "identity", MAX_IDENTITIES, 32)?
-            {
+            // Streamed, not batched: `load_records` would hold every blob at
+            // once, and the capped mirrors below exist precisely so a large
+            // store does not sit in internal DRAM. Each record is validated,
+            // mirrored, and dropped before the next is read; the mirror keeps
+            // the newest 8 in NVS order and misses reload from flash.
+            flash.visit_records(&flash.identities, "identity", MAX_IDENTITIES, 32, |key, value| {
                 let address = decode_string_key(key, "identity")?;
                 let key: [u8; 32] = value.as_slice().try_into().map_err(|_| {
                     anyhow::anyhow!("identity record for '{address}' has {} bytes", value.len())
@@ -783,24 +857,24 @@ impl NvsStore {
                     anyhow::bail!("duplicate identity record in WhatsApp NVS");
                 }
                 inner.identity_order.touched(address);
-            }
-            for (key, value) in flash.load_records(
+                inner.enforce_identities_cap();
+                Ok(())
+            })?;
+            flash.visit_records(
                 &flash.sessions,
                 "session",
                 MAX_SESSIONS,
                 MAX_SIGNAL_RECORD_LEN,
-            )? {
-                let address = decode_string_key(key, "session")?;
-                if inner.sessions.insert(address.clone(), Bytes::from(value)).is_some() {
-                    anyhow::bail!("duplicate session record in WhatsApp NVS");
-                }
-                inner.session_order.touched(address);
-            }
-            // The RAM mirrors are an 8-entry cache over flash without PSRAM:
-            // a reboot with more records persisted must not pin them all in
-            // internal DRAM. Misses reload from NVS on demand.
-            inner.enforce_identities_cap();
-            inner.enforce_sessions_cap();
+                |key, value| {
+                    let address = decode_string_key(key, "session")?;
+                    if inner.sessions.insert(address.clone(), Bytes::from(value)).is_some() {
+                        anyhow::bail!("duplicate session record in WhatsApp NVS");
+                    }
+                    inner.session_order.touched(address);
+                    inner.enforce_sessions_cap();
+                    Ok(())
+                },
+            )?;
             for (key, value) in
                 flash.load_records(&flash.prekeys, "prekey", MAX_PREKEYS, MAX_SIGNAL_RECORD_LEN)?
             {
@@ -831,29 +905,35 @@ impl NvsStore {
                     anyhow::bail!("duplicate sender-key record in WhatsApp NVS");
                 }
             }
-            for (key_id, value) in flash.load_records(
+            flash.visit_records(
                 &flash.sync_keys,
                 "sync key",
                 MAX_SYNC_KEYS,
                 MAX_SIGNAL_RECORD_LEN,
-            )? {
-                let key: AppStateSyncKey = serde_json::from_slice(&value)
-                    .map_err(|error| anyhow::anyhow!("invalid sync key record: {error}"))?;
-                // Fallback for a store written before the latest id was recorded:
-                // the newest key by the phone's own timestamp is the best guess
-                // at the one written last. The recorded id below wins over it.
-                let newer = timestamp_latest
-                    .as_ref()
-                    .and_then(|id| inner.sync_keys.get(id))
-                    .is_none_or(|latest: &AppStateSyncKey| key.timestamp >= latest.timestamp);
-                if newer {
-                    timestamp_latest = Some(key_id.clone());
-                }
-                if inner.sync_keys.insert(key_id.clone(), key).is_some() {
-                    anyhow::bail!("duplicate sync-key record in WhatsApp NVS");
-                }
-                inner.sync_key_order.touched(key_id);
-            }
+                |key_id, value| {
+                    let key: AppStateSyncKey = serde_json::from_slice(&value)
+                        .map_err(|error| anyhow::anyhow!("invalid sync key record: {error}"))?;
+                    // Fallback for a store written before the latest id was recorded:
+                    // the newest key by the phone's own timestamp is the best guess
+                    // at the one written last. The recorded id below wins over it.
+                    let newer = timestamp_latest
+                        .as_ref()
+                        .and_then(|id| inner.sync_keys.get(id))
+                        .is_none_or(|latest: &AppStateSyncKey| key.timestamp >= latest.timestamp);
+                    if newer {
+                        timestamp_latest = Some(key_id.clone());
+                    }
+                    if inner.sync_keys.insert(key_id.clone(), key).is_some() {
+                        anyhow::bail!("duplicate sync-key record in WhatsApp NVS");
+                    }
+                    inner.sync_key_order.touched(key_id);
+                    // Latest-aware like the write path: never evict the
+                    // best-known-latest while loading, so the timestamp
+                    // fallback below always names a present entry.
+                    inner.enforce_sync_keys_cap_except(timestamp_latest.as_deref());
+                    Ok(())
+                },
+            )?;
             // Only trust a recorded id that names a key actually present. If the
             // marker is unreadable or corrupted, fall back to timestamp_latest.
             let recorded = match flash.load_latest_sync_key_id() {
@@ -1394,23 +1474,9 @@ impl AppSyncStore for NvsStore {
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);
         s.sync_key_order.touched(key_id.to_vec());
-        if !crate::runtime::HAS_PSRAM && s.sync_keys.len() > 8 {
-            // Oldest first, but never the latest: dropping it would force a
-            // full key re-request the next sync needs answered by the phone.
-            let latest = s.latest_sync_key_id.clone();
-            let excess = s.sync_keys.len() - 8;
-            let keys_to_remove: Vec<_> = s
-                .sync_key_order
-                .overflow(s.sync_keys.len(), 8)
-                .into_iter()
-                .filter(|k| Some(k) != latest.as_ref())
-                .take(excess)
-                .collect();
-            for k in keys_to_remove {
-                s.sync_keys.remove(&k);
-                s.sync_key_order.removed(&k);
-            }
-        }
+        // Latest-aware: the just-written key is the recorded latest, so the
+        // shared cap keeps it and evicts the oldest other entry instead.
+        s.enforce_sync_keys_cap();
         let stored = s.sync_keys.len();
         drop(s);
         // The app-state key share arrives as one batch -- 70 keys on the QEMU

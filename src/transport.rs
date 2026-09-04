@@ -346,6 +346,17 @@ fn ws_thread(
     if let Err(e) = ws.get_mut().set_read_timeout_ms(100) {
         log::warn!("Could not set read timeout: {}", e);
     }
+    // Bound every in-flight write the same way. Without it a peer that stops
+    // reading parks this thread inside `send_binary` forever: the shutdown
+    // flag above is never re-checked, the queued Bytes never drain, and
+    // `disconnect` never takes effect. With it a stalled write fails, the
+    // send-error path emits `Disconnected`, and the thread exits, dropping
+    // the queue with it. 5 s tolerates a slow link moving 32 KB frames while
+    // keeping a stuck socket to a short, loud failure the supervisor
+    // reconnects from.
+    if let Err(e) = ws.get_mut().set_write_timeout_ms(5000) {
+        log::warn!("Could not set write timeout: {}", e);
+    }
 
     log::info!("WS thread: WebSocket connected!");
     let _ = event_tx.send_blocking(TransportEvent::Connected);
