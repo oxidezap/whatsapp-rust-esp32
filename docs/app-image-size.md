@@ -163,16 +163,21 @@ defined, `BotMetadata` and `AIRichResponseSubMessage` included.
 | `history_sync` | 16,474 |
 | `download` | 7,056 |
 
-### 128 KB of backtrace symbolizer that can never run
+### 116 KB of backtrace symbolizer that can never run
 
 | Crate | Bytes |
 | --- | --- |
 | `gimli` (DWARF parser) | 78,872 |
 | `std::sys` backtrace / symbolize glue | 22,821 |
 | `rustc_demangle` | 12,698 |
-| `zlib_rs` (only reachable from `gimli`) | 11,934 |
 | `object`, `addr2line` | 1,890 |
-| **total** | **128,215 (3.1% of the image)** |
+| **total** | **116,281 (2.8% of the image)** |
+
+(`zlib_rs`, 11,934 bytes, sits next to `gimli` in a size listing but is not
+part of the symbolizer: it is `wacore-binary`'s history-sync inflate, reached
+independently -- it is still linked with zero `gimli::` symbols remaining. The
+measured lever-D delta below is `gimli` plus the part of the glue nothing else
+references; `rustc_demangle` stays linked at ~13 KB.)
 
 This is a full DWARF-parsing backtrace symbolizer, linked into a firmware that
 
