@@ -95,9 +95,9 @@ impl FlashWorker {
         // walks the whole store, runs on the ESP-IDF main task before this worker
         // exists (hence CONFIG_ESP_MAIN_TASK_STACK_SIZE), not here. Measured peak
         // on the emulated ESP32-C3, across pairing writes and a factory reset, is
-        // 2,596 bytes (see docs/esp32c3.md). A 6 KB stack keeps well over twice
-        // that, and a board with PSRAM keeps the 32 KB it was tested on since it
-        // has DRAM to spare.
+        // 2,596 bytes (see docs/esp32c3.md). A 4 KB stack keeps ~60% headroom
+        // over that, and a board with PSRAM keeps the 32 KB it was tested on
+        // since it has DRAM to spare.
         let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
             stack_size: crate::runtime::by_ram(32 * 1024, 4 * 1024),
@@ -878,12 +878,30 @@ impl SignalStore for NvsStore {
         Ok(())
     }
 
+    /// Store several identities with one call. Each record is committed as it
+    /// is written, exactly like [`Self::put_identity`] would do it: a failure
+    /// partway through leaves the prefix persisted (no rollback), which is
+    /// safe because every entry is an independent key and the next flush
+    /// rewrites the remainder.
     async fn put_identities_batch(&self, identities: &[(Arc<str>, [u8; 32])]) -> Result<()> {
         if identities.is_empty() {
             return Ok(());
         }
         let _operation = self.write_operation()?;
         for (address, key) in identities {
+            // Same capacity gate as the single-put path, before flash is touched.
+            // One guard: two `self.lock()` temporaries in one expression would
+            // deadlock, since the first lives until the end of the statement.
+            {
+                let address_str: &str = address;
+                let s = self.lock();
+                ensure_insert_capacity(
+                    s.identities.contains_key(address_str),
+                    s.identities.len(),
+                    MAX_IDENTITIES,
+                    "identity",
+                )?;
+            }
             let logical_key = address.as_bytes().to_vec();
             let key = *key;
             self.flash.run(move |flash| {
@@ -971,12 +989,29 @@ impl SignalStore for NvsStore {
         Ok(())
     }
 
+    /// Store several sessions with one call. Same prefix semantics as
+    /// [`Self::put_identities_batch`]: each record commits as written, so a
+    /// failure partway leaves the prefix persisted and the next flush rewrites
+    /// the rest.
     async fn put_sessions_batch(&self, sessions: &[(Arc<str>, Bytes)]) -> Result<()> {
         if sessions.is_empty() {
             return Ok(());
         }
         let _operation = self.write_operation()?;
         for (address, session) in sessions {
+            // Same capacity gate as the single-put path, before flash is touched.
+            // One guard: two `self.lock()` temporaries in one expression would
+            // deadlock, since the first lives until the end of the statement.
+            {
+                let address_str: &str = address;
+                let s = self.lock();
+                ensure_insert_capacity(
+                    s.sessions.contains_key(address_str),
+                    s.sessions.len(),
+                    MAX_SESSIONS,
+                    "session",
+                )?;
+            }
             let logical_key = address.as_bytes().to_vec();
             let persisted = session.clone();
             self.flash.run(move |flash| {

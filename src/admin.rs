@@ -446,7 +446,7 @@ pub fn start_admin_server(
         // single browser tab and the QEMU suite drives it with one `curl` at a
         // time, so on a board without PSRAM -- where the ESP32-C3 fails
         // allocations of 32 KB against a heap that has 50 KB free but only
-        // 34 KB contiguous -- the other twelve are session state nobody uses.
+        // 34 KB contiguous -- the other fourteen are session state nobody uses.
         max_sessions: if crate::runtime::HAS_PSRAM { 16 } else { 2 },
         task_caps: if crate::runtime::HAS_PSRAM {
             esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT

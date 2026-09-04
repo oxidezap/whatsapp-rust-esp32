@@ -35,12 +35,12 @@ C3 differs from the others in the deepest possible way.
 
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
-| `wa-main` executor stack | 256 KB | 32 KB | The send path (reaction + quoted reply + edit) has the deepest frames in the firmware. Measured peak 26,564 B against the streaming decode. |
-| `wa-blocking` worker stack | 32 KB | 6 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,404 B. |
-| `ws-transport` stack | 16 KB | 8 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
-| `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,644 B. |
+| `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 36 KB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864`; measured peak 30.4 KB. `default_thread_config`'s 32 KB no-PSRAM arm is what library consumers get. |
+| `wa-blocking` worker stack | 32 KB | 14 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,404 B. |
+| `ws-transport` stack | 16 KB | 6 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
+| `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
 | WebSocket frame / message cap | 16 MiB / 64 MiB | 32 KB / 32 KB | Above the largest legitimate message (28,204 B). Refused from the frame header, before any allocation. See below. |
-| admin HTTP sessions | 16 | 4 | One browser tab; the QEMU suite drives it with one `curl` at a time. |
+| admin HTTP sessions | 16 | 2 | One browser tab; the QEMU suite drives it with one `curl` at a time. |
 
 The four **stack** figures are measured peaks with headroom, not estimates -- how
 they were measured, and what they were before, is in **Sizing the stacks from the
@@ -50,12 +50,12 @@ frame never forces a reallocation, the protocol caps sit above the largest
 message the server actually sends, and the session count is what the dashboard
 and the QEMU suite actually use.
 
-Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack drops from
-32 KB to 20 KB (it is held for the life of the firmware and is only large for the
-one-time NVS replay), the default pthread stack from 32 KB to 8 KB, the Wi-Fi
-buffer counts from 10/32/32 to 4/8/8, and mbedTLS gets `DYNAMIC_BUFFER` plus
-asymmetric record buffers (16 KB in, 4 KB out) since it can no longer allocate
-from external memory.
+Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack grows from
+32 KB to 36 KB (it hosts the executor directly on the C3 instead of spawning a
+separate `wa-main` thread; measured peak 30.4 KB), the default pthread stack
+drops from 32 KB to 8 KB, the Wi-Fi buffer counts from 10/32/32 to 4/8/8, and
+mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KB in, 4 KB
+out) since it can no longer allocate from external memory.
 
 `wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
 disables the cache, so a stack in PSRAM would fault mid-write -- which makes it
@@ -66,11 +66,11 @@ replay, the only thing that walks the whole store, runs on the ESP-IDF main task
 before this worker exists. Measured peak is **2,596 bytes**, and it barely moves
 with the stack it is given: 2,416 with a 32 KB stack, 2,564 with a 12 KB one
 after a `DELETE /sessions` (the deepest job, `erase_namespace`) and the reboot
-that follows, 2,596 with 6 KB. Shrinking the stack by 26 KB moved the peak by
+that follows, 2,596 with 4 KB. Shrinking the stack by 28 KB moved the peak by
 180 bytes, which is the point: this worker's depth is bounded by what its jobs
-do, not by what it is given. 6 KB keeps well over twice the observed peak and
-hands the rest of that internal DRAM back to the heap; the PSRAM boards keep the
-32 KB they were tested on.
+do, not by what it is given. 4 KB keeps ~60% headroom over the observed peak
+and hands the rest of that internal DRAM back to the heap; the PSRAM boards keep
+the 32 KB they were tested on.
 
 ## The two failures worth writing down
 
@@ -131,7 +131,9 @@ connected:
 | At `Free heap:` in the boot log | 173,880 (166,396 internal) | -- |
 | Steady state | 64,680 | **57,016** |
 
-Stack high-water marks from `GET /metrics` (bytes still free at the deepest point):
+Stack high-water marks from `GET /metrics` (bytes still free at the deepest point).
+First-round figures, with the 64/20/12/12 KB stacks the port started from --
+the current sizes are the `by_ram` table at the top of this document:
 
 | Thread | Size | Free at peak | Used |
 | --- | --- | --- | --- |
@@ -365,7 +367,7 @@ stack cuts is sized for it. The peaks measured twice, on the resized build:
 
 `ws-transport` keeps its size deliberately: it is the thread that ran out of
 *heap*, and shrinking its stack would confuse the next measurement for nothing.
-The admin server's session table also drops from 16 to 4 without PSRAM -- the
+The admin server's session table also drops from 16 to 2 without PSRAM -- the
 dashboard is one browser tab and the suite drives it with one `curl` at a time.
 
 The general lesson is the one this port keeps repeating: the numbers that matter
@@ -451,6 +453,12 @@ them -- keeping at least a third clear above each measured peak -- is memory the
 allocator never takes from the heap in the first place, so it widens the largest
 free block rather than merely adding to the total. Against a shortfall of ~8 KB
 in exactly that block, that is the lever the measurement points at.
+
+That pass landed as the `now` column above, and a third pass followed: the
+executor moved onto the 36 KB IDF main task (no `wa-main` thread on the C3),
+`wa-blocking` to 14 KB, `ws-transport` to 6 KB, `wa-nvs` to 4 KB, admin
+sessions to 2. The `by_ram` table at the top of this document is that final
+state; the `now` columns in the round tables above are history.
 
 If it turns out not to be enough, the next move is upstream rather than another
 resize here: decoding the props response without materialising a second

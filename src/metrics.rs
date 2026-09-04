@@ -135,12 +135,12 @@ pub mod alloc_note {
 
 /// Log every worker stack's high-water mark together with the internal heap.
 ///
-/// The four worker stacks are `by_ram` constants in `runtime`, `transport` and
-/// `storage`, chosen by reasoning rather than measurement, and on a board with
-/// no PSRAM they are the largest single claim on the heap: 64 + 20 + 12 + 12 KB
-/// out of ~314 KB. `/metrics` has reported the same numbers all along, but the
-/// QEMU end-to-end run never reads it, so the one build where the sizing
-/// actually bites is the one where nobody was looking.
+/// The worker stacks are `by_ram` constants in `runtime`, `transport` and
+/// `storage`: 14 + 6 + 4 KB of spawned threads without PSRAM, plus the 36 KB
+/// IDF main task the demo firmware runs the executor on instead of spawning
+/// the 32 KB `wa-main` thread. `/metrics` has reported the same high-water
+/// marks all along, but the QEMU end-to-end run never reads it, so the one
+/// build where the sizing actually bites is the one where nobody was looking.
 ///
 /// It bites concretely. The ESP32-C3 reaches its first WebSocket connect with
 /// 53,332 bytes free and a 31,744-byte largest block, and whether a stack is

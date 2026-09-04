@@ -169,6 +169,10 @@ impl<S: Read + Write> WsClient<S> {
                             "websocket: handshake timed out",
                         ));
                     }
+                    // Yield instead of spinning: this loop can wait the full
+                    // deadline for a slow peer, and the thread it runs on
+                    // shares its core with the executor.
+                    std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(e) => return Err(e),
             }
@@ -513,8 +517,11 @@ fn expected_accept(key: &str) -> String {
 fn verify_upgrade(head: &str, key: &str) -> io::Result<()> {
     let mut lines = head.split("\r\n");
     let status = lines.next().unwrap_or("");
+    // HTTP/1.0 and HTTP/1.1 share the status-line shape; either may carry a
+    // 101. Only the code is load-bearing here.
     let code = status
         .strip_prefix("HTTP/1.1 ")
+        .or_else(|| status.strip_prefix("HTTP/1.0 "))
         .and_then(|rest| rest.get(..3))
         .ok_or_else(|| protocol_error("malformed status line"))?;
     if code != "101" {

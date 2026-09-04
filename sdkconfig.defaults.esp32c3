@@ -78,11 +78,11 @@ CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 # A peak that fits is worth more here than a peak that is early.
 #
 # So the real constraint is neither knob: the firmware arrives at connect with
-# 53 KB, and roughly 108 KB of that went into four worker stacks (wa-main 64 KB,
-# wa-blocking 20 KB, ws-transport 12 KB, wa-nvs 12 KB). Those are sized on
-# reasoning, never on measurement, which is what src/runtime.rs now logs.
+# 53 KB, and roughly 60 KB of that went into its thread stacks (the 36 KB main
+# task hosting the executor, wa-blocking 14 KB, ws-transport 6 KB, wa-nvs 4 KB;
+# see docs/esp32c3.md). Those are sized from measurement, which is what
+# src/runtime.rs now logs.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
-CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must
 # be able to receive it, but nothing this firmware sends comes close, so the
@@ -99,7 +99,7 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 # negotiate. Each one is code in flash and, for the key exchanges, peak RAM
 # during the handshake.
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=n
-CONFIG_MBEDTLS_DES=n
+CONFIG_MBEDTLS_DES_C=n
 CONFIG_MBEDTLS_CAMELLIA_C=n
 CONFIG_MBEDTLS_BLOWFISH_C=n
 CONFIG_MBEDTLS_XTEA_C=n
