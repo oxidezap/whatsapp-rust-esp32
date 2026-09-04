@@ -1,6 +1,6 @@
 //! ESP-IDF platform implementations for running
 //! [`whatsapp-rust`](https://crates.io/crates/whatsapp-rust) on Espressif
-//! ESP32 microcontrollers (ESP32-S3 and ESP32-C5).
+//! ESP32 microcontrollers (ESP32-S3, ESP32-C5 and ESP32-C3).
 //!
 //! `whatsapp-rust` is platform-agnostic: the protocol engine (Noise, Signal,
 //! framing, app state) is written against four traits, and a platform supplies
@@ -12,7 +12,7 @@
 //! | Trait (`whatsapp_rust::wacore`) | Implementation | Notes |
 //! |---|---|---|
 //! | `store::traits::Backend` | [`NvsStore`] | Pairing, Signal state and sync keys in an NVS partition; the rest in RAM. |
-//! | `net::TransportFactory` | [`Esp32TransportFactory`] | ESP-IDF mbedTLS + `tungstenite`, driven on its own thread. |
+//! | `net::TransportFactory` | [`Esp32TransportFactory`] | ESP-IDF mbedTLS under the crate's own WebSocket client ([`ws`]), driven on its own thread. |
 //! | `net::HttpClient` | [`EspHttpClient`] | Streaming HTTP/1.1 over ESP-IDF TLS/TCP with bounded RAM. |
 //! | `runtime::Runtime` | [`Esp32Runtime`] | `spawn` / `sleep` / `spawn_blocking` on an [`Esp32Executor`]. |
 //!
@@ -29,17 +29,23 @@
 //!
 //! # What the firmware around it has to provide
 //!
-//! - **PSRAM**, and a large stack for the executor thread
-//!   ([`Esp32Executor::default_thread_config`] takes 256 KB there). Install
-//!   [`psram_alloc::PsramAllocator`] as the global allocator to keep the Rust
-//!   heap out of internal DRAM as well.
+//! - **A large stack for the executor thread**, which on a board with PSRAM
+//!   means PSRAM: [`Esp32Executor::default_thread_config`] takes 256 KB there,
+//!   and 32 KB of internal DRAM on a chip without it. Where there is PSRAM,
+//!   install [`psram_alloc::PsramAllocator`] as the global allocator to keep the
+//!   Rust heap out of internal DRAM as well; where there is not, the plain
+//!   ESP-IDF allocator is the only heap there is. Both choices follow
+//!   [`runtime::HAS_PSRAM`], which is `CONFIG_SPIRAM` from the sdkconfig, so
+//!   neither is a decision a consumer has to repeat per chip.
 //! - **A `wa_store` NVS partition** (1 MB in the demo's `partitions.csv`), or
 //!   any other name passed to [`NvsStore::open`].
-//! - **`sdkconfig.defaults`** along the lines of the demo's: PSRAM enabled for
-//!   `malloc` and for task stacks (`CONFIG_SPIRAM_USE_MALLOC`,
-//!   `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`), mbedTLS allocating from
-//!   external memory, and the task watchdog not checking the idle task on the
-//!   executor's core (the [`BlockingWorker`] runs below idle priority there).
+//! - **`sdkconfig.defaults`** along the lines of the demo's: the task watchdog
+//!   not checking the idle task on the executor's core (the [`BlockingWorker`]
+//!   runs below idle priority there), and, on a board with PSRAM, that PSRAM
+//!   enabled for `malloc` and for task stacks (`CONFIG_SPIRAM_USE_MALLOC`,
+//!   `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`) with mbedTLS allocating from
+//!   external memory. The demo keeps the second group in its own
+//!   `sdkconfig.psram`, layered only for the boards that have it.
 //! - **Time**: the Noise handshake needs a roughly correct clock, so start SNTP
 //!   (or set the time some other way) before the first connect.
 //!
@@ -56,6 +62,7 @@ pub mod runtime;
 pub mod storage;
 pub mod supervisor;
 pub mod transport;
+pub mod ws;
 
 #[cfg(feature = "admin")]
 pub mod admin;

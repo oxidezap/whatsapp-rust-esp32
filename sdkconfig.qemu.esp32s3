@@ -1,0 +1,6 @@
+# ESP32-S3 under QEMU. Layered by scripts/qemu.sh after sdkconfig.qemu.
+#
+# QEMU emulates the PSRAM as a generic SPI device: it answers the quad-mode ID
+# probe, not the octal one the N16R8 board uses. Same size, same heap routing.
+CONFIG_SPIRAM_MODE_OCT=n
+CONFIG_SPIRAM_MODE_QUAD=y

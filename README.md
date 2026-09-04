@@ -19,8 +19,10 @@
 > status dashboard over HTTP. All of that on a chip with thousands of times less
 > RAM and a small fraction of the clock speed a phone takes for granted.
 
-A WhatsApp client running on **ESP32-S3** and **ESP32-C5** microcontrollers,
-built on top of [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
+A WhatsApp client running on **ESP32-S3**, **ESP32-C5** and **ESP32-C3**
+microcontrollers -- the last of those with no PSRAM at all, on ~400 KB of on-chip
+SRAM -- built on top of
+[`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
 
 It pairs over QR code or a phone-number linking code, keeps the pairing and its
 Signal state in flash so a reboot comes back as the same linked device, connects
@@ -43,13 +45,33 @@ demo bot, and serves a status dashboard over HTTP. See
 |-------|------|---------------|---------|-------|
 | ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release --features mock-server` |
 | [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release --features mock-server` |
+| ESP32-C3, 16 MB flash | RISC-V, single core | 16 MB / **none** | v5.5.5 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
 
-The PSRAM is required on both: the main async task runs on a 256 KB stack
-allocated from PSRAM, which is far larger than internal SRAM can provide. The
-source is the same for both boards; both share ESP-IDF v5.5.5. What differs is
-the target triple and one chip-specific `sdkconfig.defaults.<chip>` overlay (PSRAM
-mode, console, cache layout), which `esp-idf-sys` picks up from the `MCU` it is
-building for. Adding a board is adding that one file.
+The source is the same for every board, and so is ESP-IDF v5.5.5. What differs is
+the target triple, whether the chip has PSRAM, and one chip-specific
+`sdkconfig.defaults.<chip>` overlay -- all of it in
+[`scripts/boards.sh`](scripts/boards.sh), the one table `scripts/build.sh`,
+`scripts/qemu.sh` and CI read. Adding a board is a row there plus that one file;
+neither script needs a per-board arm. CI is separate: a board is built, or
+emulated, only once it also has a row in the `build` (or `qemu-e2e`) matrix in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+PSRAM is not required, but its absence is the interesting case. On the S3 and the
+C5 the whole Rust heap, the 256 KB executor stack and every worker stack but one
+live in 8 MB of external RAM -- the exception is `wa-nvs`, which is internal DRAM
+on every board because writing flash disables the cache. The **ESP32-C3 has none**: ~400 KB of on-chip SRAM is the
+entire memory system, ESP-IDF hands about 314 KB of it to the heap, and the
+firmware adapts by reading `CONFIG_SPIRAM`; no logic in `src/` branches on chip
+identity. What that changes, what it cost, and what is and is not verified:
+[docs/esp32c3.md](docs/esp32c3.md).
+
+Flash is the one hard floor: the app image is 4.1--4.5 MB and `partitions.csv`
+also wants 1 MB for the store, so a board needs **at least 8 MB** and the table as
+written assumes 16 MB. The common 4 MB C3 devkits cannot hold it.
+
+Which other Espressif parts could host this firmware, what each would cost, and
+which emulator can stand in for it in CI:
+[docs/board-support-map.md](docs/board-support-map.md).
 
 ## How it works
 
@@ -62,7 +84,7 @@ binary, `whatsapp-esp32`, is the demo firmware built on it.
 | Module | Provides | `whatsapp-rust` contract |
 |--------|----------|--------------------------|
 | `storage` | `NvsStore` | `Backend`. The linked device, the Signal state and the app-state sync keys live in an NVS partition (`wa_store` by default) and survive reboots; the rest is a RAM cache. |
-| `transport` | `Esp32TransportFactory` | `TransportFactory`. ESP-IDF mbedTLS + `tungstenite` WebSocket, driven on its own thread. |
+| `transport` | `Esp32TransportFactory` | `TransportFactory`. ESP-IDF mbedTLS under the crate's own single-owner WebSocket client (`ws`), driven on its own thread. |
 | `http_client` | `EspHttpClient` | `HttpClient`. Streaming HTTP/1.1 over ESP-IDF TLS/TCP with bounded RAM (media, version fetch). |
 | `runtime` | `Esp32Runtime`, `Esp32Executor`, `BlockingWorker` | `Runtime`. `edge-executor` event loop that parks when idle; `spawn_blocking` runs on a dedicated `wa-blocking` thread so key generation never stalls the loop. |
 | `psram_alloc` | `PsramAllocator` | Optional global allocator that keeps the Rust heap in PSRAM. |
@@ -211,7 +233,7 @@ crates are edition 2024). The Xtensa `esp` channel is well past that.
 - `cargo install espflash` for flashing and monitoring.
 - ESP-IDF is downloaded and built automatically by `esp-idf-sys` on the first
   build (into `.embuild/`, a few GB; subsequent builds reuse it): **v5.5.5**
-  unified for both the ESP32-S3 and the ESP32-C5.
+  unified for all three boards.
 - Host tools the ESP-IDF build needs: `git`, `python3`, `cmake`, `ninja`, `clang`.
 
 ## Configure
@@ -306,8 +328,8 @@ The S3 target (`xtensa-esp32s3-espidf`), `build-std`, and the `MCU` /
 `ESP_IDF_VERSION` environment variables all come from `.cargo/config.toml`, so a
 bare `cargo build` is the S3 build. `scripts/build.sh` is the same `cargo build`
 with the target and those two variables switched for the board named (`BOARD=...`
-in the environment works too, and `CARGO_CMD=clippy` runs clippy instead). The
-two boards' ESP-IDF trees and build outputs never share a directory, so
+in the environment works too, and `CARGO_CMD=clippy` runs clippy instead). Each
+board's ESP-IDF tree and build outputs never share a directory, so
 switching between them costs nothing but disk.
 
 What persists across a reflash of the app: the `wa_store` partition (the pairing,
@@ -321,10 +343,10 @@ Two layers stand in for a board, and both run in CI (`.github/workflows/ci.yml`)
 on pull requests and on pushes to `main`:
 
 1. **Build for the real targets.** The `build` job compiles the firmware with
-   the pinned `esp` toolchain in three flavors, the ESP32-S3 board build, the
-   ESP32-C5 board build and the QEMU build, and fails when an app image no
-   longer fits the factory partition (`scripts/check-app-size.sh`). All three
-   ELFs are uploaded as artifacts.
+   the pinned `esp` toolchain in five flavors -- the ESP32-S3, ESP32-C5 and
+   ESP32-C3 board builds, plus a QEMU build for each of the two emulated chips --
+   and fails when an app image no longer fits the factory partition
+   (`scripts/check-app-size.sh`). All five ELFs are uploaded as artifacts.
 2. **Pair, persist and message on QEMU.** The `qemu-e2e` job runs the QEMU
    flavor on [Espressif's QEMU](https://github.com/espressif/esp-toolchain-docs/tree/main/qemu/esp32s3)
    (an ESP32-S3 with 8 MB PSRAM and an OpenCores Ethernet MAC) against the same
@@ -348,20 +370,33 @@ on pull requests and on pushes to `main`:
 The same flow runs locally with `scripts/qemu.sh`:
 
 ```bash
-# once: Espressif's QEMU (the esp32s3 machine is not in upstream QEMU) and esptool
-curl -sSfL -o qemu.tar.xz https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-xtensa-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz
-mkdir -p ~/qemu && tar -xJf qemu.tar.xz -C ~/qemu     # needs libsdl2, libslirp, glib, pixman at runtime
-export QEMU_XTENSA=~/qemu/qemu/bin/qemu-system-xtensa
+# once: Espressif's QEMU (these machines are not in upstream QEMU) and esptool.
+# The release ships one binary per architecture: xtensa for the S3, riscv32 for
+# the C3. Fetch the one for the board you want to emulate.
+R=https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417
+V=esp_develop_9.2.2_20260417-x86_64-linux-gnu
+
+# ESP32-S3 (Xtensa)
+curl -sSfL -o qemu-xtensa.tar.xz "$R/qemu-xtensa-softmmu-$V.tar.xz"
+mkdir -p ~/qemu-xtensa && tar -xJf qemu-xtensa.tar.xz -C ~/qemu-xtensa
+export QEMU_XTENSA=~/qemu-xtensa/qemu/bin/qemu-system-xtensa
+
+# ESP32-C3 (RISC-V)
+curl -sSfL -o qemu-riscv32.tar.xz "$R/qemu-riscv32-softmmu-$V.tar.xz"
+mkdir -p ~/qemu-riscv32 && tar -xJf qemu-riscv32.tar.xz -C ~/qemu-riscv32
+export QEMU_RISCV32=~/qemu-riscv32/qemu/bin/qemu-system-riscv32
+# both need libsdl2, libslirp, glib and pixman at runtime
 pip install esptool esp-idf-nvs-partition-gen   # the ESP-IDF python env under .embuild already has both
 
-scripts/qemu.sh build      # release build with --features qemu and sdkconfig.qemu, into target/qemu/
+scripts/qemu.sh build      # release build with --features qemu and sdkconfig.qemu, into target/qemu-esp32s3/
+BOARD=esp32c3 scripts/qemu.sh all   # the same, end to end, on the emulated ESP32-C3
 scripts/qemu.sh image a    # 16 MB flash image for board "a": bootloader + partition table + its NVS + app
 scripts/qemu.sh run a      # interactive: serial console on the terminal, Ctrl-A X quits
 scripts/qemu.sh test       # headless: the three stages above (needs images a and b)
 ```
 
 `run` reuses the image, so a board you paired interactively stays paired across
-runs, exactly as a real one would; delete `target/qemu/.../flash_image-a.bin` (or
+runs, exactly as a real one would; delete `target/qemu-<board>/.../flash_image-a.bin` (or
 `scripts/qemu.sh image a`) for a fresh one.
 
 What the `qemu` feature changes, and nothing else: the network comes up over the
@@ -397,10 +432,20 @@ Those still need the board.
 Install `cargo install espflash`. On Arch your user must be in the `uucp` group to
 access the serial port (`dialout` on Debian/Ubuntu).
 
-Both boards expose a built-in USB-Serial/JTAG (USB id `303a:1001`), so they show up
-directly as `/dev/ttyACM0`, with no external UART adapter needed. The commands below
-are for the S3; for the C5 add `--chip esp32c5` and use the
-`target/riscv32imac-esp-espidf/<profile>/` paths. Confirm the link first:
+The S3 and C5 expose a built-in USB-Serial/JTAG (USB id `303a:1001`), so they show
+up directly as `/dev/ttyACM0`, with no external UART adapter needed; most ESP32-C3
+devkits bring UART0 out through a USB-serial bridge instead, so the C3 usually
+appears as `/dev/ttyUSB0` (which is also why its overlay leaves the console on
+UART0 -- see [docs/esp32c3.md](docs/esp32c3.md)). The commands below are for the
+S3; for another board add its `--chip` and use its target directory:
+
+| Board | `--chip` | Target directory |
+|-------|----------|------------------|
+| ESP32-S3 | `esp32s3` (default) | `target/xtensa-esp32s3-espidf/<profile>/` |
+| ESP32-C5 | `esp32c5` | `target/riscv32imac-esp-espidf/<profile>/` |
+| ESP32-C3 | `esp32c3` | `target/riscv32imc-esp-espidf/<profile>/` |
+
+Confirm the link first:
 
 ```bash
 espflash board-info --port /dev/ttyACM0   # prints chip type, flash size, MAC
@@ -517,10 +562,12 @@ curl http://<device-ip>:8081/metrics
 #  "heap_internal_free":29775,"heap_min_free":3299632,
 #  "internal_largest_block":7680,"internal_min_free":4755,
 #  "psram_free":3463948,"rssi_dbm":-65}
+# (abbreviated: the full document also reports `internal_8bit_*`,
+# `psram_largest_block`, per-thread `stack_*_min`, `last_panic` and `coredump`)
 ```
 
 `internal_*` is the scarce resource on this board: **internal DRAM** (~tens of KB,
-DMA-capable), separate from the 4 MB PSRAM. `internal_min_free` is the all-time
+DMA-capable), separate from the 8 MB PSRAM. `internal_min_free` is the all-time
 low-water mark. Watch it, since the AES/TLS/prekey paths compete for internal
 DRAM and that's what OOMs first.
 

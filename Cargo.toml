@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.94"
 authors = ["João Lucas <jlucaso@hotmail.com>"]
 license = "MIT"
-description = "A full, end-to-end-encrypted WhatsApp client running on ESP32-S3 and ESP32-C5 microcontrollers, built on whatsapp-rust."
+description = "A full, end-to-end-encrypted WhatsApp client running on ESP32-S3, ESP32-C5 and ESP32-C3 microcontrollers, built on whatsapp-rust."
 repository = "https://github.com/oxidezap/whatsapp-rust-esp32"
 keywords = ["whatsapp", "esp32", "embedded", "esp-idf", "iot"]
 categories = ["embedded"]
@@ -48,8 +48,17 @@ sha2 = { version = "0.11", default-features = false }
 edge-executor = "0.5"
 enumset = "1"
 
-# WebSocket framing (no TLS features - we use ESP-IDF mbedTLS)
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# The WebSocket client is the crate's own (`src/ws.rs`): it hands each frame
+# over with a single owner, which is what the ESP32-C3 needs to decode a 28 KB
+# server frame without a second full-size copy. These two are its only
+# dependencies, and both are already in the tree through whatsapp-rust at these
+# exact versions, so nothing new is compiled.
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+sha1 = { version = "0.11", default-features = false }
+# `ws.rs` names `bytes` directly rather than through `whatsapp_rust::bytes` so
+# the module has no dependency on whatsapp-rust at all: that is what lets its
+# tests run on a host. Same crate, same version, as the re-export.
+bytes = "1.12"
 
 # WhatsApp protocol. Single dependency: since 0.7.0 the crate re-exports
 # everything a consumer needs (`whatsapp_rust::{wacore, waproto, buffa,
@@ -58,7 +67,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "bb5aa3aa3f3881a4bb958aaa9b7daa66c6f863d7", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", branch = "main", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing
@@ -83,6 +92,12 @@ panic = "abort"
 # ldproxy announces itself on stderr ("[ldproxy] Running ldproxy"); rustc's
 # `linker_messages` lint would otherwise report that on every link.
 linker_messages = "allow"
+# `esp_idf_spiram` is one of the cfgs esp-idf-sys derives from the sdkconfig
+# (CONFIG_SPIRAM), and the firmware reads it to decide where stacks and the heap
+# live. The build script only *declares* it on a board that has PSRAM, so on the
+# ESP32-C3 -- the build where its absence is the entire point -- rustc would
+# otherwise report it as an unexpected cfg name.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_spiram)'] }
 
 [features]
 # The dashboard only. `mock-server` is deliberately not a default: a consumer

@@ -1,21 +1,19 @@
-# Overlay for running under Espressif's QEMU (`scripts/qemu.sh`). Layered on top of
-# sdkconfig.defaults via ESP_IDF_SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu",
-# so only what differs from the board build belongs here.
+# Overlay for running under Espressif's QEMU (`scripts/qemu.sh`), shared by every
+# emulated board. Layered on top of sdkconfig.defaults and the chip's own
+# sdkconfig.defaults.<mcu> via ESP_IDF_SDKCONFIG_DEFAULTS, so only what differs
+# from the board build belongs here -- and, as in sdkconfig.defaults, only what
+# is true of every chip. Anything that is not goes in sdkconfig.qemu.<mcu>,
+# which scripts/qemu.sh layers last when that file exists.
 
 # QEMU has no radio. It attaches an OpenCores Ethernet MAC (DP83848 PHY) to the
-# emulated ESP32-S3, and the firmware's `qemu` feature brings the network up on it.
-# This is also what makes `peripherals.mac` exist on the S3 in esp-idf-hal.
+# emulated chip, and the firmware's `qemu` feature brings the network up on it.
+# This is also what makes `peripherals.mac` exist in esp-idf-hal.
 CONFIG_ETH_ENABLED=y
 CONFIG_ETH_USE_OPENETH=y
 
-# QEMU emulates the PSRAM as a generic SPI device: it answers the quad-mode ID
-# probe, not the octal one the N16R8 board uses. Same size, same heap routing.
-CONFIG_SPIRAM_MODE_OCT=n
-CONFIG_SPIRAM_MODE_QUAD=y
-
-# scripts/qemu.sh builds into target/qemu/, one directory deeper than the default
-# target dir, so the climb from esp-idf-sys's build dir back to partitions.csv is
-# one level longer than the one in sdkconfig.defaults.
+# scripts/qemu.sh builds into target/qemu-<board>/, one directory deeper than the
+# default target dir, so the climb from esp-idf-sys's build dir back to
+# partitions.csv is one level longer than the one in sdkconfig.defaults.
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../../partitions.csv"
 
 # QEMU's AES block does not complete DMA transfers: mbedTLS's first CTR-DRBG seed
@@ -23,5 +21,10 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../../partitions.csv"
 # connect hangs there before a single byte is sent (found with gdb on the stalled
 # ws-transport task). The S3 SHA driver takes the same DMA path for larger inputs,
 # so both go to the software implementations here. The board keeps the accelerators.
+#
+# Kept for the ESP32-C3 as well: this port was brought up on the software
+# implementations rather than with the emulated accelerators. The C3 machine
+# documents AES and SHA as emulated, so turning them back on there is a
+# reasonable follow-up, not a defect being papered over.
 CONFIG_MBEDTLS_HARDWARE_AES=n
 CONFIG_MBEDTLS_HARDWARE_SHA=n

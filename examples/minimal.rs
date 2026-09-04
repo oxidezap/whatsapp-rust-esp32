@@ -13,6 +13,10 @@ use whatsapp_rust::bot::Bot;
 use whatsapp_rust::prelude::MessageExt as _;
 
 // The Rust heap goes to PSRAM; internal DRAM stays free for FreeRTOS and mbedTLS.
+// Only on a build that has PSRAM: on the ESP32-C3 there is one heap and it is
+// internal DRAM, so the plain ESP-IDF allocator is the right one. `esp_idf_spiram`
+// is the cfg esp-idf-sys derives from CONFIG_SPIRAM.
+#[cfg(esp_idf_spiram)]
 #[global_allocator]
 static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
     whatsapp_esp32::psram_alloc::PsramAllocator;
@@ -29,8 +33,9 @@ fn main() -> anyhow::Result<()> {
     // One runtime, one executor. The runtime is cheap to clone; clone it per Bot.
     let (runtime, executor) = Esp32Runtime::create_default()?;
 
-    // The executor needs a large stack (the send path has deep frames), which
-    // only PSRAM can afford; `default_thread_config` is 256 KB there.
+    // The executor needs a large stack (the send path has deep frames):
+    // `default_thread_config` is 256 KB of PSRAM, or 32 KB of internal DRAM on a
+    // chip without any.
     let main_thread = spawn_thread(&Esp32Executor::default_thread_config(), move || {
         executor.block_on(async move {
             let bot = Bot::builder()

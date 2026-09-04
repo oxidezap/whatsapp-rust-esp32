@@ -1,11 +1,17 @@
 # One config for every supported board. `cargo build` alone targets the ESP32-S3;
-# scripts/build.sh selects a board by overriding the target and the `[env]` block
-# below (a process environment variable wins over `[env]` unless `force = true`).
+# scripts/build.sh selects a board from scripts/boards.sh by overriding the target
+# and the `[env]` block below (a process environment variable wins over `[env]`
+# unless `force = true`).
 
 [target.xtensa-esp32s3-espidf]
 linker = "ldproxy"
 
 [target.riscv32imac-esp-espidf]
+linker = "ldproxy"
+
+# The ESP32-C3 is rv32imc: no atomics in hardware, so it is a different triple
+# from the C5's rv32imac and needs its own entry here.
+[target.riscv32imc-esp-espidf]
 linker = "ldproxy"
 
 [build]
@@ -15,6 +21,13 @@ target = "xtensa-esp32s3-espidf"
 build-std = ["std", "panic_abort"]
 
 [env]
-# Shared ESP-IDF version for every supported board (ESP32-S3 and ESP32-C5).
+# Shared ESP-IDF version for every supported board.
 MCU = "esp32s3"
 ESP_IDF_VERSION = "v5.5.5"
+# The sdkconfig layering scripts/boards.sh does for the other boards, spelled out
+# for the one board a bare `cargo build` targets. `sdkconfig.psram` is separate
+# from `sdkconfig.defaults` because the ESP32-C3 has no PSRAM and most of those
+# symbols do not exist there; leaving it out of this list would quietly build the
+# S3 without PSRAM, which still links and then fails at the first 256 KB stack.
+# ESP-IDF adds each `<file>.<mcu>` itself, so no chip overlay is named here.
+ESP_IDF_SDKCONFIG_DEFAULTS = "sdkconfig.defaults;sdkconfig.psram"

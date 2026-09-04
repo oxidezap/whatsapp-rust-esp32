@@ -3,8 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
-use tungstenite::Message;
+use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 // Re-exported through whatsapp-rust so the `async_channel::Receiver` handed back
 // by `create_transport` is provably the same type the client expects.
 use whatsapp_rust::async_channel::{self, Sender};
@@ -163,7 +162,8 @@ impl Drop for EspTlsStream {
     }
 }
 
-/// Transport implementation using ESP-IDF TLS + tungstenite WebSocket.
+/// Transport implementation: ESP-IDF TLS under the crate's own WebSocket
+/// client ([`crate::ws`]), driven on its own thread.
 pub struct Esp32Transport {
     data_tx: std::sync::mpsc::Sender<Bytes>,
     shutdown: Arc<AtomicBool>,
@@ -172,8 +172,8 @@ pub struct Esp32Transport {
 #[async_trait]
 impl Transport for Esp32Transport {
     async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
-        // Move the Bytes through the channel (refcount bump, no copy); tungstenite
-        // 0.29's Message::Binary takes Bytes directly, so no realloc on either end.
+        // Move the Bytes through the channel (refcount bump, no copy); the
+        // socket thread masks it straight onto the wire from the slice.
         self.data_tx
             .send(data)
             .map_err(|_| anyhow!("Transport channel closed"))
@@ -201,16 +201,19 @@ impl Esp32TransportFactory {
         }
     }
 
-    /// The thread each connection's socket is driven on: 16 KB of PSRAM stack
-    /// on core 0, at the same priority as the executor.
+    /// The thread each connection's socket is driven on: 16 KB of stack on
+    /// core 0, at the same priority as the executor. Without PSRAM the stack is
+    /// internal DRAM and 6 KB; the frames here are mbedTLS record handling and
+    /// [`crate::ws`] framing, neither of which recurses, and the emulated C3
+    /// measures a 5,640-byte peak across pairing and reconnection.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"ws-transport"),
-            stack_size: 16_384,
+            stack_size: crate::runtime::by_ram(16 * 1024, 6 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
-            stack_alloc_caps: enumset::enum_set!(MallocCap::Spiram | MallocCap::Cap8bit),
+            stack_alloc_caps: crate::runtime::stack_caps(),
         }
     }
 
@@ -260,7 +263,7 @@ fn ws_thread(
     ws_url: &str,
     skip_tls_verify: bool,
 ) {
-    let (host, port, _path, _tls) = match crate::http_client::parse_url(ws_url) {
+    let (host, port, path, _tls) = match crate::http_client::parse_url(ws_url) {
         Ok(v) => v,
         Err(e) => {
             log::error!("Invalid WS URL: {}", e);
@@ -285,31 +288,44 @@ fn ws_thread(
     };
 
     log::info!("WS thread: TLS connected, starting WebSocket handshake...");
+    crate::metrics::log_memory_profile("websocket connect");
 
-    let request = tungstenite::http::Request::builder()
-        .uri(ws_url)
-        .header("Origin", format!("https://{}", host))
-        .header("Host", &host)
-        .header("Upgrade", "websocket")
-        .header("Connection", "Upgrade")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-
-    let (mut ws, _response) = match tungstenite::client(request, stream) {
-        Ok(ws) => ws,
-        Err(e) => {
-            log::error!("WebSocket handshake failed: {}", e);
-            let _ = event_tx.send_blocking(TransportEvent::Disconnected(
-                DisconnectReason::ReadError(format!("WebSocket handshake failed: {e}")),
-            ));
-            return;
-        }
+    // The size limits are the one place a peer can make this side allocate
+    // towards. They matter without PSRAM and are nearly unreachable with it.
+    //
+    // 32 KB per frame and per message on the ESP32-C3: the largest legitimate
+    // message is the 28,204-byte AB-props response, which `fetch_props`
+    // requests unconditionally at every login and which arrives as a single
+    // frame. An 8 KB cap was tried and rejected that message, which put the
+    // client in a reconnect loop that ground the largest free block down to
+    // 8,704 -- worse than anything the cap prevented. The reader refuses an
+    // oversize frame from its header alone, before allocating anything, so a
+    // hostile peer costs a clean protocol error the supervisor reconnects from
+    // rather than an abort. A fragmented message is bounded the same way as it
+    // accumulates.
+    //
+    // What this reader does *not* do, and why it exists, is documented on
+    // [`crate::ws`]: it allocates each payload once, at its declared size, and
+    // hands it over with a single owner. The general-purpose library it
+    // replaced grew its read buffer to hold the frame and kept that buffer for
+    // the life of the connection, so every large frame afterwards cost two
+    // full-size copies -- and on the C3 the second one is what aborted.
+    let limits = crate::ws::Limits {
+        max_frame_size: crate::runtime::by_ram(16 << 20, 32 * 1024),
+        max_message_size: crate::runtime::by_ram(64 << 20, 32 * 1024),
     };
+    let origin = format!("https://{host}");
+    let mut ws =
+        match crate::ws::WsClient::connect(stream, &host, &path, &origin, limits, fill_random) {
+            Ok(ws) => ws,
+            Err(e) => {
+                log::error!("WebSocket handshake failed: {}", e);
+                let _ = event_tx.send_blocking(TransportEvent::Disconnected(
+                    DisconnectReason::ReadError(format!("WebSocket handshake failed: {e}")),
+                ));
+                return;
+            }
+        };
 
     if let Err(e) = ws.get_mut().set_read_timeout_ms(100) {
         log::warn!("Could not set read timeout: {}", e);
@@ -320,13 +336,17 @@ fn ws_thread(
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            let _ = ws.close(None);
+            let _ = ws.send_close(1000);
             break;
         }
 
         while let Ok(data) = data_rx.try_recv() {
-            log::debug!("--> WS send {} bytes", data.len());
-            if let Err(e) = ws.send(Message::Binary(data)) {
+            log::debug!(
+                "--> WS send {} bytes{}",
+                data.len(),
+                crate::metrics::heap_note()
+            );
+            if let Err(e) = ws.send_binary(&data) {
                 log::error!("WS send error: {}", e);
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(
                     DisconnectReason::ReadError(format!("WS send error: {e}")),
@@ -335,39 +355,46 @@ fn ws_thread(
             }
         }
 
-        match ws.read() {
-            Ok(msg) => match msg {
-                Message::Binary(data) => {
-                    log::debug!("<-- WS recv {} bytes", data.len());
-                    let _ = event_tx.send_blocking(TransportEvent::DataReceived(data));
-                }
-                Message::Ping(data) => {
-                    let _ = ws.send(Message::Pong(data));
-                }
-                Message::Close(frame) => {
-                    log::info!("WS thread: server sent close");
-                    let reason = frame
-                        .map(|f| DisconnectReason::ServerClose {
-                            code: Some(u16::from(f.code)),
-                            reason: f.reason.to_string(),
-                        })
-                        .unwrap_or(DisconnectReason::ServerClose {
-                            code: None,
-                            reason: String::new(),
-                        });
-                    let _ = event_tx.send_blocking(TransportEvent::Disconnected(reason));
-                    return;
-                }
-                _ => {}
-            },
-            Err(tungstenite::Error::Io(ref e))
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                // Read timeout, normal
+        match ws.read_frame() {
+            // The socket's read timeout elapsed mid-frame or between frames;
+            // the reader kept whatever it had.
+            Ok(None) => {}
+            Ok(Some(crate::ws::Frame::Binary(data))) => {
+                log::debug!(
+                    "<-- WS recv {} bytes{}",
+                    data.len(),
+                    crate::metrics::heap_note()
+                );
+                let _ = event_tx.send_blocking(TransportEvent::DataReceived(data));
+            }
+            Ok(Some(crate::ws::Frame::Ping(payload))) => {
+                let _ = ws.send_pong(&payload);
+            }
+            Ok(Some(crate::ws::Frame::Pong(_))) | Ok(Some(crate::ws::Frame::Text(_))) => {}
+            Ok(Some(crate::ws::Frame::Close(frame))) => {
+                log::info!("WS thread: server sent close");
+                // Echo the close so the peer's TLS teardown is orderly; the
+                // outcome does not change what happens next.
+                let _ = ws.send_close(1000);
+                let reason = match frame {
+                    Some((code, reason)) => DisconnectReason::ServerClose {
+                        code: Some(code),
+                        reason,
+                    },
+                    None => DisconnectReason::ServerClose {
+                        code: None,
+                        reason: String::new(),
+                    },
+                };
+                let _ = event_tx.send_blocking(TransportEvent::Disconnected(reason));
+                return;
             }
             Err(e) => {
                 log::error!("WS read error: {}", e);
+                // The other end of the story: a read that fails for want of
+                // memory is the failure mode this chip actually hits, so record
+                // what the heap looked like when it did.
+                crate::metrics::log_memory_profile("websocket read error");
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(
                     DisconnectReason::ReadError(format!("WS read error: {e}")),
                 ));
@@ -378,4 +405,11 @@ fn ws_thread(
 
     let _ = event_tx.send_blocking(TransportEvent::Disconnected(DisconnectReason::Unknown));
     log::info!("WS thread: exiting");
+}
+
+/// ESP-IDF's hardware RNG, for the handshake key and every outbound mask.
+fn fill_random(buf: &mut [u8]) {
+    // SAFETY: `esp_fill_random` writes exactly `len` bytes into a buffer the
+    // caller owns for the duration of the call.
+    unsafe { esp_idf_svc::sys::esp_fill_random(buf.as_mut_ptr().cast(), buf.len()) }
 }

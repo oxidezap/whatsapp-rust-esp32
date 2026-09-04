@@ -1,0 +1,128 @@
+# ESP32-C3. Read by esp-idf-sys after sdkconfig.defaults whenever MCU=esp32c3.
+#
+# The C3 is the first supported chip with NO PSRAM: ~400 KB of on-chip SRAM is
+# the entire memory system, and roughly 300 KB of that reaches the heap once the
+# static allocations are in. Every setting here exists to buy back internal DRAM
+# that the S3 and C5 do not have to think about, because they push the same
+# bytes into an 8 MB external heap.
+#
+# The matching source-side half is that `src/runtime.rs` sizes its thread stacks
+# and `src/main.rs` picks its global allocator from `esp_idf_spiram`, the cfg
+# esp-idf-sys derives from CONFIG_SPIRAM. Nothing below is a chip-detection
+# trick in Rust; it is this file being read, and the cfg following from it.
+
+# 160 MHz is the C3's maximum (the S3 and C5 run at 240).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# --- Internal DRAM budget ---------------------------------------------------
+
+# The main task hosts the WhatsApp executor directly on the C3 rather than
+# spawning a separate 32 KB wa-main thread while main() parks in a join().
+# 36 KB covers the full runtime (measured peak 30.4 KB) and eliminates the
+# second stack entirely, saving 16 KB of contiguous internal DRAM for the heap.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864
+
+# Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
+# this. Everything in src/ names its own size; this is the floor for the rest
+# (esp-idf-svc's internal helpers), and 32 KB of it is pure loss here.
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
+
+# WiFi buffers, trimmed from the shared defaults (10/32/32). Each static RX
+# buffer is ~1.6 KB of DRAM that is allocated whether or not traffic arrives.
+# This firmware is one long-lived TLS connection with small frames, not a
+# throughput workload, so the queue depth costs more than it returns.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_ESP_WIFI_NVS_ENABLED=y
+
+# lwIP: the window sizes are what cost DRAM, not the socket count, so the
+# buffers come down and the table does not. ESP-IDF's httpd reserves 3 sockets
+# for itself and refuses to start unless LWIP_MAX_SOCKETS leaves room for its
+# `max_open_sockets` on top (4, esp-idf-svc's default, in src/admin.rs); at 6
+# the dashboard fails to bind and takes the firmware's startup with it. 10 is
+# the ESP-IDF default and leaves the gateway's TLS socket, DNS and SNTP room
+# beside it.
+CONFIG_LWIP_MAX_SOCKETS=10
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
+CONFIG_LWIP_TCP_WND_DEFAULT=5760
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
+
+# mbedTLS: the single largest RAM item after the stacks. CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC
+# does not exist without PSRAM, so these buffers come out of internal DRAM, and
+# the only lever left is how large they are and when they are taken.
+#
+# DYNAMIC_BUFFER is on, and turning it OFF was tried and is what the log below
+# rules out. Under it the receive buffer is freed after each record and
+# re-allocated for the next, sized from the header just read off the wire:
+# `esp_mbedtls_add_rx_buffer` allocates `record_length + 341`. That is the peer's
+# number, not ours, which is why lowering CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN to
+# 8192 changed nothing -- the failing `alloc(16749 bytes)` is 16408 + 341, and it
+# was still exactly 16749 afterwards.
+#
+# The obvious next move was to take the buffers statically instead, once inside
+# the handshake, when the heap is least fragmented. That is worse here, and the
+# measurement says why. At the moment the WebSocket connects this chip has:
+#
+#     WS thread: internal heap 53332 free, largest block 31744
+#
+# 53 KB, not the 194 KB the boot-time line reports before the bot is built.
+# Holding ~21 KB of record buffers for the life of the session out of 53 KB left
+# the OpenCores MAC unable to allocate receive buffers -- `opencores.emac: no mem
+# for receive buffer` in a tight loop until the task watchdog fired on `emac_rx`.
+# A peak that fits is worth more here than a peak that is early.
+#
+# So the real constraint is neither knob: the firmware arrives at connect with
+# 53 KB, and roughly 60 KB of that went into its thread stacks (the 36 KB main
+# task hosting the executor, wa-blocking 14 KB, ws-transport 6 KB, wa-nvs 4 KB;
+# see docs/esp32c3.md). Those are sized from measurement, which is what
+# src/runtime.rs now logs.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+# Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must
+# be able to receive it, but nothing this firmware sends comes close, so the
+# outgoing buffer does not have to match. The incoming side stays at the full
+# 16384 -- with the dynamic allocator the value does not bound the request
+# anyway, and lowering it only risks rejecting a record the peer is entitled to
+# send. MFL (RFC 6066) would cap it at 4096, but it needs the server to honour
+# the extension and neither peer here does.
+CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# Trim ciphersuites and features the WhatsApp gateway and the mock server never
+# negotiate. Each one is code in flash and, for the key exchanges, peak RAM
+# during the handshake.
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=n
+CONFIG_MBEDTLS_DES_C=n
+CONFIG_MBEDTLS_CAMELLIA_C=n
+CONFIG_MBEDTLS_BLOWFISH_C=n
+CONFIG_MBEDTLS_XTEA_C=n
+CONFIG_MBEDTLS_CCM_C=n
+CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK=n
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=n
+CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK=n
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_PSK=n
+CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_RSA=n
+
+# --- Crash reporting --------------------------------------------------------
+# With no PSRAM, no task stack can be in external memory, so ESP_COREDUMP_USE_STACK_SIZE
+# is off and the dump runs on the crashed task's own stack. CONFIG_ESP_COREDUMP_STACK_SIZE
+# is therefore absent here (it is set in the PSRAM overlays), and the task count
+# comes down because there are fewer tasks and less room to describe them.
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=16
+
+# --- Console ----------------------------------------------------------------
+# Left at the ESP-IDF default, UART0, unlike the C5 overlay next door. The common
+# ESP32-C3 devkits (DevKitM-1, DevKitC-02) bring UART0 out through a USB-serial
+# bridge, and QEMU's `-serial` is that same UART0. Selecting the chip's native
+# USB Serial/JTAG endpoint instead costs the emulator all output from the
+# second-stage bootloader onwards -- the ROM still prints, because the ROM uses
+# UART, which makes it look like a hang at `entry 0x...` rather than a console
+# that went somewhere else. A board that is wired to the USB endpoint wants
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y here, and cannot then be run under QEMU.

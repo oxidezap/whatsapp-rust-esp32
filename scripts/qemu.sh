@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, image, and run the firmware inside Espressif's QEMU (ESP32-S3 machine).
+# Build, image, and run the firmware inside Espressif's QEMU.
 #
 #   scripts/qemu.sh build          # cargo build --release --features qemu, with sdkconfig.qemu layered in
 #   scripts/qemu.sh image [NAME]   # 16 MB flash image for board NAME (default "a"), provisioned with its own push name
@@ -7,8 +7,16 @@
 #   scripts/qemu.sh test           # pair board "a", reboot it and check it stays paired, then message board "b"
 #   scripts/qemu.sh all            # build + image + test (what CI runs)
 #
+# BOARD picks the emulated chip: esp32s3 (default) or esp32c3. Espressif's QEMU
+# emulates exactly three ESP32 machines (esp32, esp32c3, esp32s3), which is why
+# the ESP32-C5 is built but never booted here. Each board builds into its own
+# target/qemu-<board>/ so the two ESP-IDF configurations never share a tree:
+#
+#   BOARD=esp32c3 scripts/qemu.sh all
+#
 # Requirements beyond the normal build (see README "Test without hardware"):
-#   - qemu-system-xtensa from Espressif's fork (QEMU_XTENSA env var, or on PATH)
+#   - Espressif's QEMU fork: qemu-system-xtensa for the S3 (QEMU_XTENSA env var,
+#     or on PATH), qemu-system-riscv32 for the C3 (QEMU_RISCV32)
 #   - esptool (pip install esptool) for elf2image / merge_bin
 #   - esp-idf-nvs-partition-gen (pip) for the provisioning NVS image; the ESP-IDF
 #     python env under .embuild already has it and is used when present
@@ -23,18 +31,24 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source scripts/boards.sh
 
 PROFILE="${PROFILE:-release}"
-# Fixed, not overridable: sdkconfig.qemu points ESP-IDF back at partitions.csv
-# with a relative path whose depth assumes exactly this location (see the
-# comment there), so a different or absolute target dir would silently lose
-# the custom partition table.
-TARGET_DIR="target/qemu"
-OUT_DIR="$TARGET_DIR/xtensa-esp32s3-espidf/$PROFILE"
+BOARD="${BOARD:-esp32s3}"
+board_select "$BOARD" || exit 2
+if [[ -z "$BOARD_QEMU_BIN" ]]; then
+    echo "board '$BOARD' has no QEMU machine (Espressif's fork emulates esp32, esp32c3 and esp32s3)" >&2
+    exit 2
+fi
+# The directory NAME varies with the board, but its DEPTH must not: sdkconfig.qemu
+# points ESP-IDF back at partitions.csv with a relative path that assumes exactly
+# this many levels (see the comment there), so a target dir at another depth, or
+# an absolute one, would silently lose the custom partition table.
+TARGET_DIR="$(board_qemu_target_dir)"
+OUT_DIR="$(board_out_dir "$TARGET_DIR" "$PROFILE")"
 ELF="$OUT_DIR/whatsapp-esp32"
 FLASH_SIZE="${FLASH_SIZE:-16MB}"
 ADMIN_PORT="${ADMIN_PORT:-8081}"
-QEMU_XTENSA="${QEMU_XTENSA:-qemu-system-xtensa}"
 ESPTOOL="${ESPTOOL:-esptool}"
 # How long each boot may take to report a live WhatsApp connection. QEMU is
 # well under real-chip speed for the key generation at first pairing.
@@ -74,15 +88,17 @@ cmd_build() {
     # ESP-IDF under target/.embuild. So everything is passed absolute, and the
     # repo's own .embuild is shared; only the qemu flavor's ESP-IDF *build* lands
     # under $TARGET_DIR. (partitions.csv is the one path that has to stay
-    # relative; sdkconfig.qemu carries the deeper one.) esp-idf-sys adds the
-    # chip-specific sdkconfig.defaults.esp32s3 by itself, before the overlay.
-    log "building $PROFILE with sdkconfig.qemu into $TARGET_DIR"
-    ESP_IDF_VERSION="v5.5.5" \
-    MCU="esp32s3" \
-    ESP_IDF_SDKCONFIG_DEFAULTS="$PWD/sdkconfig.defaults;$PWD/sdkconfig.qemu" \
+    # relative; sdkconfig.qemu carries the deeper one.) ESP-IDF pulls in each
+    # `<file>.<mcu>` right after the file that brought it in, so the chip
+    # overlays (sdkconfig.defaults.esp32c3, sdkconfig.qemu.esp32s3) are picked
+    # up here without being named.
+    log "building $PROFILE for $BOARD with sdkconfig.qemu into $TARGET_DIR"
+    ESP_IDF_VERSION="$BOARD_ESP_IDF_VERSION" \
+    MCU="$BOARD" \
+    ESP_IDF_SDKCONFIG_DEFAULTS="$(board_sdkconfig_defaults sdkconfig.qemu)" \
     ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo build --profile "$PROFILE" --features qemu
+        cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
     test -f "$ELF"
 }
 
@@ -119,10 +135,10 @@ cmd_image() {
     local app="$OUT_DIR/whatsapp-esp32.bin" image nvs
     image="$(flash_image "$name")"
     log "elf2image -> $app"
-    "$ESPTOOL" --chip esp32s3 elf2image --flash_size "$FLASH_SIZE" -o "$app" "$ELF"
+    "$ESPTOOL" --chip "$BOARD" elf2image --flash_size "$FLASH_SIZE" -o "$app" "$ELF"
     nvs="$(nvs_image "$name")"
     log "merge_bin -> $image (push name esp32-qemu-$name)"
-    "$ESPTOOL" --chip esp32s3 merge_bin --fill-flash-size "$FLASH_SIZE" -o "$image" \
+    "$ESPTOOL" --chip "$BOARD" merge_bin --fill-flash-size "$FLASH_SIZE" -o "$image" \
         0x0 "$OUT_DIR/bootloader.bin" \
         0x8000 "$OUT_DIR/partition-table.bin" \
         0x9000 "$nvs" \
@@ -131,18 +147,19 @@ cmd_image() {
 }
 
 # Fills QEMU_CMD, the invocation as an array, so a path with whitespace in
-# QEMU_XTENSA or PROFILE stays one argument.
+# BOARD_QEMU_BIN or PROFILE stays one argument.
 #
-# -m sets the emulated PSRAM size (the board has 8 MB). `open_eth` is the only
-# NIC model the esp32s3 machine wires up. The serial console is the stdio.
-# QEMU_GDB=1 adds a gdb stub on :1234 and holds the CPUs until a debugger
-# continues them: `xtensa-esp32s3-elf-gdb <elf> -ex 'target remote :1234'`,
-# then `info threads` / `thread apply all bt` shows every FreeRTOS task,
-# which is how the hardware-AES stall in sdkconfig.qemu was found.
+# The machine and its memory come from the board's row in scripts/boards.sh.
+# `open_eth` is the only NIC model these machines wire up. The serial console is
+# the stdio. QEMU_GDB=1 adds a gdb stub on :1234 and holds the CPUs until a
+# debugger continues them: `xtensa-esp32s3-elf-gdb <elf> -ex 'target remote :1234'`
+# (`riscv32-esp-elf-gdb` on the C3), then `info threads` / `thread apply all bt`
+# shows every FreeRTOS task, which is how the hardware-AES stall in
+# sdkconfig.qemu was found.
 qemu_cmd() {
     local name="$1" port="$2"
     QEMU_CMD=(
-        "$QEMU_XTENSA" -nographic -M esp32s3 -m 8M
+        "$BOARD_QEMU_BIN" -nographic "${BOARD_QEMU_MACHINE_ARGS[@]}"
         -drive "file=$(flash_image "$name"),if=mtd,format=raw"
         -nic "user,model=open_eth,hostfwd=tcp:127.0.0.1:${port}-:8081"
         -serial mon:stdio
@@ -197,6 +214,26 @@ stop() {
     wait "$pid" 2>/dev/null || true
 }
 
+# The signatures that mean the firmware died rather than merely fell behind.
+CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)'
+
+# crash_context LOG: print the serial around the crash signature.
+#
+# `tail` alone is not enough to diagnose a crash: an ESP32 panic dumps
+# registers plus hundreds of lines of stack hex, so the tail is all hexdump
+# and the one line that says *why* -- "memory allocation of N bytes failed",
+# a panic message, the heap reading logged beside it -- has already scrolled
+# past. Anchor on the signature and show what came before it instead.
+crash_context() {
+    local serial="$1" line from
+    line=$(grep -n -m1 -E "$CRASH_RE" "$serial" | cut -d: -f1)
+    [[ -n "$line" ]] || return 0
+    from=$(( line > 60 ? line - 60 : 1 ))
+    log "--- serial lines $from-$line, ending at the crash signature ---"
+    sed -n "${from},${line}p" "$serial"
+    log "--- end crash context ---"
+}
+
 # wait_markers PID LOG MARKER...: each marker must show up in the serial log, in
 # order, before the deadline; a crash signature or a QEMU exit fails at once.
 wait_markers() {
@@ -208,8 +245,8 @@ wait_markers() {
             if ! kill -0 "$pid" 2>/dev/null; then
                 log "QEMU exited before '$marker'"; tail -n 60 "$serial"; return 1
             fi
-            if grep -q -E "RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)" "$serial"; then
-                log "firmware crashed before '$marker'"; tail -n 80 "$serial"; return 1
+            if grep -q -E "$CRASH_RE" "$serial"; then
+                log "firmware crashed before '$marker'"; crash_context "$serial"; return 1
             fi
             if (( SECONDS >= deadline )); then
                 log "timed out waiting for '$marker'"; tail -n 60 "$serial"; return 1
@@ -275,11 +312,19 @@ cmd_test() {
     local pid_a=$BOOT_PID device
     wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot1.log" "${BOOT_MARKERS[@]}" \
         "WhatsApp NVS loaded: device=false" "QR CODE" "Connected to WhatsApp!"
-    device="$(admin_get "$port_a" /device)"
+    # Guarded like the /send call below: an unguarded assignment under
+    # `set -e` would abort on a transient curl failure with no diagnostic.
+    if ! device="$(admin_get "$port_a" /device)"; then
+        log "board a, boot 1: GET /device failed: $device"
+        return 1
+    fi
     log "board a, boot 1: GET /device -> $device"
     [[ "$(json_field "$device" "d['connected']")" == True ]] || { log "board a is not connected"; return 1; }
     local pn_a
-    pn_a="$(json_field "$device" "d['pn'] or ''")"
+    if ! pn_a="$(json_field "$device" "d['pn'] or ''")"; then
+        log "board a, boot 1: /device was not JSON: $device"
+        return 1
+    fi
     if [[ -z "$pn_a" ]]; then
         log "board a connected without reporting a number; /device -> $device"
         return 1
@@ -298,7 +343,10 @@ cmd_test() {
         log "board a asked for a QR scan after the reboot: the stored credentials were not used"
         return 1
     fi
-    device="$(admin_get "$port_a" /device)"
+    if ! device="$(admin_get "$port_a" /device)"; then
+        log "board a, boot 2: GET /device failed: $device"
+        return 1
+    fi
     log "board a, boot 2: GET /device -> $device"
     [[ "$(json_field "$device" "d['connected'] and d['pn'] == '$pn_a'")" == True ]] \
         || { log "board a did not come back as the same connected device"; return 1; }
@@ -309,17 +357,26 @@ cmd_test() {
     boot b "$port_b" "$OUT_DIR/qemu-b-boot1.log"
     local pid_b=$BOOT_PID
     wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "${BOOT_MARKERS[@]}" "Connected to WhatsApp!"
-    device="$(admin_get "$port_b" /device)"
+    if ! device="$(admin_get "$port_b" /device)"; then
+        log "board b: GET /device failed: $device"
+        return 1
+    fi
     log "board b: GET /device -> $device"
     local to_b sent
-    to_b="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"
+    if ! to_b="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"; then
+        log "board b: /device was not JSON: $device"
+        return 1
+    fi
     if [[ -z "$to_b" ]]; then
         log "board b connected without reporting a number; /device -> $device"
         return 1
     fi
     log "board a -> board b ($to_b): ping"
-    sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
-        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")"
+    if ! sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
+        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")"; then
+        log "curl failed: $sent"
+        return 1
+    fi
     log "POST /send -> $sent"
     [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || { log "send failed"; return 1; }
     wait_for_message "$port_b" "'\U0001f980ping'"

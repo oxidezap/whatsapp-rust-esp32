@@ -35,6 +35,13 @@ use whatsapp_esp32::{
 
 // The whole Rust heap goes to PSRAM; internal DRAM is left to FreeRTOS, DMA
 // and mbedTLS. The library only defines the allocator, the firmware installs it.
+//
+// Only where the build has PSRAM. On the ESP32-C3 there is one heap and it is
+// internal DRAM, so `PsramAllocator` would ask `heap_caps_aligned_alloc` for
+// SPIRAM, get a null, and retry against the default heap on every single
+// allocation. Leaving it out means the plain ESP-IDF allocator, which is what
+// that fallback path reaches anyway.
+#[cfg(esp_idf_spiram)]
 #[global_allocator]
 static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
     whatsapp_esp32::psram_alloc::PsramAllocator;
@@ -192,19 +199,30 @@ fn main() -> Result<()> {
     // on the serial monitor (the compile-time default is INFO). The C log macros are
     // compiled out above INFO, so this only unmasks the Rust-side debug records routed
     // through esp_log_write. It keeps the demo's protocol flow visible on the wire;
-    // drop to LevelFilter::Info for a quieter, slightly faster build.
-    log::set_max_level(log::LevelFilter::Debug);
-    unsafe {
-        esp_idf_svc::sys::esp_log_level_set(
-            c"*".as_ptr(),
-            esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
-        );
-        // Async timers are short-lived RAII objects; their DEBUG drop message is
-        // routine noise rather than a resource failure.
-        esp_idf_svc::sys::esp_log_level_set(
-            c"esp_idf_svc::timer".as_ptr(),
-            esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
-        );
+    // on chips without PSRAM, drop to LevelFilter::Info to avoid allocating massive XML
+    // formatted strings on the heap during multi-device fanout (DisplayableNodeRef).
+    if whatsapp_esp32::runtime::HAS_PSRAM {
+        log::set_max_level(log::LevelFilter::Debug);
+        unsafe {
+            esp_idf_svc::sys::esp_log_level_set(
+                c"*".as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
+            );
+            // Async timers are short-lived RAII objects; their DEBUG drop message is
+            // routine noise rather than a resource failure.
+            esp_idf_svc::sys::esp_log_level_set(
+                c"esp_idf_svc::timer".as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
+            );
+        }
+    } else {
+        log::set_max_level(log::LevelFilter::Info);
+        unsafe {
+            esp_idf_svc::sys::esp_log_level_set(
+                c"*".as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
+            );
+        }
     }
 
     // Capture the REAL cause of a Rust panic (location + message) before the runtime
@@ -313,13 +331,35 @@ fn main() -> Result<()> {
     #[cfg(feature = "admin")]
     info!("Admin: http://{_ip}:{ADMIN_PORT}/dashboard");
 
+    let main_hwm = unsafe { esp_idf_svc::sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
     info!(
-        "Free heap: {} bytes (internal: {} bytes)",
+        "Free heap: {} bytes (internal: {} bytes); main_task stack never-used: {} bytes",
         unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
-        unsafe { esp_idf_svc::sys::esp_get_free_internal_heap_size() }
+        unsafe { esp_idf_svc::sys::esp_get_free_internal_heap_size() },
+        main_hwm
     );
 
-    let jh = spawn_thread(&Esp32Executor::default_thread_config(), move || {
+    if whatsapp_esp32::runtime::HAS_PSRAM {
+        let jh = spawn_thread(&Esp32Executor::default_thread_config(), move || {
+            run_executor(
+                executor,
+                runtime,
+                store,
+                device_status,
+                active_client,
+                maintenance,
+                push_name,
+            );
+        })?;
+
+        if let Err(e) = jh.join() {
+            error!("Executor thread panicked: {:?}", e);
+        }
+        Ok(())
+    } else {
+        unsafe {
+            esp_idf_svc::sys::vTaskPrioritySet(core::ptr::null_mut(), 5);
+        }
         run_executor(
             executor,
             runtime,
@@ -329,12 +369,8 @@ fn main() -> Result<()> {
             maintenance,
             push_name,
         );
-    })?;
-
-    if let Err(e) = jh.join() {
-        error!("Executor thread panicked: {:?}", e);
+        Ok(())
     }
-    Ok(())
 }
 
 /// A string provisioned in the default NVS partition, namespace `wa`.
@@ -464,7 +500,8 @@ fn run_executor(
     // for this core (sdkconfig.defaults), a wedged event loop is otherwise
     // invisible. The feed runs as a task, so it stops exactly when the loop does.
     let watchdog_registered = unsafe {
-        esp_idf_svc::sys::esp_task_wdt_add(core::ptr::null_mut()) == esp_idf_svc::sys::ESP_OK
+        let ret = esp_idf_svc::sys::esp_task_wdt_add(core::ptr::null_mut());
+        ret == esp_idf_svc::sys::ESP_OK || ret == esp_idf_svc::sys::ESP_ERR_INVALID_STATE
     };
     if watchdog_registered {
         runtime.spawn(Box::pin(feed_task_watchdog())).detach();
@@ -472,13 +509,12 @@ fn run_executor(
         error!("Failed to register wa-main with the task watchdog");
     }
 
-    // The zlib inflate state (one ~47.5 KB block) is built on this thread the
-    // first time a compressed frame is decoded, which on a board without PSRAM
-    // is the moment the login's largest frame is already sitting in the heap:
-    // the ESP32-C3 has ~58 KB free then, so the block never fits next to it.
-    // Built here, on a fresh heap, it is parked in the thread's pool and reused
-    // by every compressed frame this executor ever decodes.
-    whatsapp_rust::wacore_binary::zlib_pool::warm_pool();
+    // The zlib inflate state (one ~47.5 KB block) parks in thread-local storage.
+    // On boards without PSRAM (like ESP32-C3), AB props fetch is disabled, so
+    // holding ~47.5 KB in internal DRAM would exhaust the heap during AppState sync.
+    if whatsapp_esp32::runtime::HAS_PSRAM {
+        whatsapp_rust::wacore_binary::zlib_pool::warm_pool();
+    }
 
     executor.block_on(run_whatsapp(
         runtime,
@@ -693,11 +729,38 @@ async fn run_whatsapp_inner(
                 .with_os(DEVICE_OS)
                 .with_platform_type(wa::device_props::PlatformType::CHROME),
         )
-        // 50 instead of the 812 default: generating 812 X25519 keypairs at login
+        // 20 instead of the 812 default: generating 812 X25519 keypairs at login
         // exhausts internal DRAM, and even on the blocking worker it is seconds
         // of work the first connect would wait on. Configurable upstream as of
         // whatsapp-rust PR #695, so no fork needed.
-        .with_wanted_pre_key_count(50)
+        //
+        // 50 was the first choice and it was still too many for the ESP32-C3, for
+        // a reason that is about timing rather than size: the upload's success
+        // marks the device dirty, and the persistence save then runs on `wa-nvs`
+        // at the same instant the WebSocket thread reserves for the inbound
+        // AB-props frame. That reserve wants 32,300 contiguous bytes and had
+        // 51,200 a frame earlier, so the two together are what abort the chip.
+        // Fewer keys shrinks the upload node (2,717 bytes at 50) and the burst
+        // of small allocations that stores them, which is what fragments the
+        // heap ahead of that reserve. It does not shrink the device record:
+        // `wacore::store::Device` holds keys and identity, never the prekey
+        // pool, which lives in the backend. The floor upstream is 5; 20 keeps
+        // four times that, and the client re-uploads when the server runs low.
+        .with_wanted_pre_key_count(20)
+        // The AB-props catalog is experiment flags, and its response is by far
+        // the largest frame this firmware ever receives: 28,204 bytes, against
+        // a largest free block that the concurrent background init has eroded
+        // to ~28.6 KB by the time it lands. Upstream now streams the inflate
+        // rather than buffering it whole, which removed the decompression wall
+        // -- but the frame itself still has to be materialised contiguously,
+        // and on the C3 it misses by a few hundred bytes.
+        //
+        // So the boards that cannot hold the answer do not ask the question.
+        // Turning the fetch off is a supported client option, not a workaround:
+        // the query is simply not sent, the flags stay at their registry
+        // defaults, and nothing else about the connection changes. PSRAM boards
+        // keep the default they were tested with.
+        .with_ab_props_fetch(whatsapp_esp32::runtime::HAS_PSRAM)
         // Message history is not persisted (only identity and Signal state are),
         // so a history sync buys this firmware nothing and costs it a lot:
         // upstream measures the drain at ~14 MB of allocation churn, more than
@@ -724,7 +787,12 @@ async fn run_whatsapp_inner(
                         info!("QR CODE (valid for {}s)", qr.timeout.as_secs());
                         ds.set_qr_code(qr.code.clone());
                         if MOCK_AUTOPAIR && !scanned.swap(true, Ordering::Relaxed) {
-                            auto_scan_qr(&qr.code).await;
+                            let code = qr.code.clone();
+                            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                                Box::pin(async move {
+                                    auto_scan_qr(&code).await;
+                                });
+                            fut.await;
                         }
                     }
                     Event::PairingQrCodesExhausted(_) => {
@@ -781,7 +849,11 @@ async fn run_whatsapp_inner(
                             if text == Some(PING_TRIGGER) {
                                 let ctx =
                                     MessageContext::from_inbound(inbound, Arc::clone(&client));
-                                handle_message(&ctx).await;
+                                let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                                    Box::pin(async move {
+                                        handle_message(&ctx).await;
+                                    });
+                                fut.await;
                             }
                         }
                     }
@@ -797,6 +869,13 @@ async fn run_whatsapp_inner(
                     }
                     other => {
                         info!("event: {:?}", other.kind());
+                        // These fire either side of the background init burst
+                        // (Props, Blocklist, Privacy, Digest, Devices go out
+                        // together via `futures::join!`), which is where the C3
+                        // loses ~54 KB between connect and the props response.
+                        // A per-task profile here says which stack or which
+                        // pool is holding it, instead of leaving it inferred.
+                        crate::metrics::log_memory_profile("event");
                     }
                 }
             }

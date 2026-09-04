@@ -76,12 +76,121 @@ fn last_reset_str() -> &'static str {
 /// is `u8` on this port, so the high-water mark is already in bytes. `None` if
 /// the task isn't registered (e.g. before it spawns).
 fn stack_free_min(name: &core::ffi::CStr) -> Option<u32> {
-    let handle = unsafe { sys::xTaskGetHandle(name.as_ptr()) };
+    let mut handle = unsafe { sys::xTaskGetHandle(name.as_ptr()) };
+    if handle.is_null() && name == c"wa-main" {
+        handle = unsafe { sys::xTaskGetHandle(c"main".as_ptr()) };
+    }
     if handle.is_null() {
         None
     } else {
         Some(unsafe { sys::uxTaskGetStackHighWaterMark(handle) } as u32)
     }
+}
+
+/// `free/largest` for the internal heap, as a short string for an existing log line.
+///
+/// The per-frame logs in `transport` carry this on a board without PSRAM. A
+/// once-per-connect snapshot was enough to show that the ESP32-C3 arrives at its
+/// first connect with far less heap than the boot-time total suggests, but not
+/// to show *where* it goes: between one connect and the abort the heap fell from
+/// 101,356 free / 63,488 largest to less than the 32,300 bytes the next
+/// allocation asked for, in 320 ms and a handful of frames. Attaching it to the
+/// frames themselves is what makes that interval readable, and it costs two
+/// accessor calls on a line that was already being formatted.
+///
+/// Empty where there is PSRAM: those boards have an 8 MB heap and the numbers
+/// are noise on every frame.
+pub fn heap_note() -> alloc_note::Note {
+    alloc_note::Note::new()
+}
+
+/// Wrapper so the `Display` impl can decide, at no cost on a PSRAM board,
+/// whether to read the heap at all.
+pub mod alloc_note {
+    use super::sys;
+
+    /// Renders as ` heap=<free>/<largest>` without PSRAM, and as nothing with it.
+    pub struct Note(());
+
+    impl Note {
+        #[allow(clippy::new_without_default)]
+        pub fn new() -> Self {
+            Self(())
+        }
+    }
+
+    impl core::fmt::Display for Note {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            if crate::runtime::HAS_PSRAM {
+                return Ok(());
+            }
+            let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+            // SAFETY: read-only ESP-IDF accessors, safe from any context.
+            let free = unsafe { sys::heap_caps_get_free_size(cap) };
+            let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
+            write!(f, " heap={free}/{largest}")
+        }
+    }
+}
+
+/// Log every worker stack's high-water mark together with the internal heap.
+///
+/// The worker stacks are `by_ram` constants in `runtime`, `transport` and
+/// `storage`: 14 + 6 + 4 KB of spawned threads without PSRAM, plus the 36 KB
+/// IDF main task the demo firmware runs the executor on instead of spawning
+/// the 32 KB `wa-main` thread. `/metrics` has reported the same high-water
+/// marks all along, but the QEMU end-to-end run never reads it, so the one
+/// build where the sizing actually bites is the one where nobody was looking.
+///
+/// It bites concretely. The ESP32-C3 reaches its first WebSocket connect with
+/// 53,332 bytes free and a 31,744-byte largest block, and whether a stack is
+/// twice the size it needs is the difference between a 16 KB TLS record fitting
+/// and the Ethernet driver failing to allocate receive buffers.
+///
+/// Free bytes *and* largest block, because the two diverge under fragmentation
+/// and it is the second that decides whether a large allocation succeeds.
+/// Free bytes and largest contiguous block, for callers that want one short
+/// line rather than the full profile above.
+///
+/// `log_memory_profile` prints the four stack watermarks too, which is the
+/// right thing at an event boundary and the wrong thing inside a loop: the
+/// crash context is a fixed 60-line window ending at the abort, and a probe
+/// that prints four lines per call pushes the evidence out of it. That is not
+/// hypothetical -- an earlier `memory_report()` probe in this investigation
+/// answered its question and displaced the run-up to the crash doing it.
+pub fn heap_now() -> (usize, usize) {
+    // SAFETY: read-only ESP-IDF accessors, safe from any context.
+    let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    unsafe {
+        (
+            sys::heap_caps_get_free_size(cap),
+            sys::heap_caps_get_largest_free_block(cap),
+        )
+    }
+}
+
+pub fn log_memory_profile(at: &str) {
+    // SAFETY: read-only ESP-IDF accessors, safe from any context.
+    let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    let free = unsafe { sys::heap_caps_get_free_size(cap) };
+    let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
+    struct Opt(Option<u32>);
+    impl std::fmt::Display for Opt {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {
+                Some(v) => write!(f, "{v}"),
+                None => write!(f, "-"),
+            }
+        }
+    }
+    log::info!(
+        "memory at {at}: internal heap {free} free, largest block {largest}; \
+         stack never-used wa-main={} wa-blocking={} ws-transport={} wa-nvs={}",
+        Opt(stack_free_min(c"wa-main")),
+        Opt(stack_free_min(c"wa-blocking")),
+        Opt(stack_free_min(c"ws-transport")),
+        Opt(stack_free_min(c"wa-nvs")),
+    );
 }
 
 /// Snapshot of heap / DRAM / PSRAM / uptime / RSSI as JSON for `/metrics`.

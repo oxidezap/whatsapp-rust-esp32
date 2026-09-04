@@ -1,0 +1,51 @@
+# ESP-IDF configuration for the boards that HAVE external SPI RAM.
+#
+# Layered after sdkconfig.defaults by scripts/boards.sh, for the boards whose row
+# there says so. It is a separate file rather than a block repeated in each
+# chip's overlay, and rather than a block in sdkconfig.defaults that the ESP32-C3
+# would have to switch back off: on a chip with no PSRAM, most of these symbols
+# do not exist at all, so `=n` is not available and silence is the only correct
+# state. The chip-specific part (quad vs octal probe mode) stays in
+# sdkconfig.defaults.<mcu>.
+#
+# CONFIG_SPIRAM is also what the firmware reads: esp-idf-sys turns it into the
+# `esp_idf_spiram` cfg, which `src/runtime.rs` uses to size thread stacks and
+# `src/main.rs` to decide whether to install the PSRAM global allocator.
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Allow FreeRTOS task stacks in PSRAM (needed for large thread stacks).
+# Rust's ESP-IDF thread implementation uses this path for the explicitly
+# SPIRAM-capable stacks in src/.
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+
+# malloc() routing between the two heaps. ALWAYSINTERNAL is the max request size
+# that is preferentially served from internal DRAM; anything larger goes to PSRAM
+# first. The Rust global allocator routes through malloc(), and the incoming-message
+# path makes thousands of small (<4KB) allocations, and at 4096 they ALL landed in
+# internal DRAM and drained it mid-burst below what a FreeRTOS mutex/semaphore needs
+# (which MUST be internal), surfacing as `xSemaphoreCreateMutex -> EAGAIN` panics.
+# Lowered to 256 so the bulk of those allocations go to PSRAM, leaving the internal
+# pool for objects that can only live there. FreeRTOS objects use an explicit
+# INTERNAL cap (not this heuristic), so they keep getting internal DRAM.
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# Allocate WiFi/lwIP dynamic buffers from PSRAM, not scarce internal DRAM. One of
+# several knobs (with ALWAYSINTERNAL above) that keep internal DRAM free for the
+# FreeRTOS objects that can only live there.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# mbedTLS allocates its session buffers from PSRAM here; without PSRAM this
+# symbol does not exist (it depends on SPIRAM_USE_MALLOC).
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Task stacks in PSRAM turn on ESP_COREDUMP_USE_STACK_SIZE and with it a
+# [1792, 4096] range on this symbol: the dump cannot run on a crashed task's
+# stack when that stack is in PSRAM, because the cache is off while it writes.
+# A value below the range is silently ignored, so this must stay inside it.
+CONFIG_ESP_COREDUMP_STACK_SIZE=2048
+
+# CPU at full speed (default is 160 MHz).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
