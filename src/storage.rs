@@ -17,7 +17,7 @@
 //! write updates flash first and the mirror only once flash has committed, so
 //! RAM never claims more than flash holds.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -147,6 +147,76 @@ type MsgSecretKey = (Arc<str>, Arc<str>, Arc<str>);
 /// so a row costs no separate heap allocation for the secret itself.
 type MsgSecretValue = (MessageSecret, i64, i64);
 
+/// Use order for a RAM-capped mirror map. Without PSRAM the mirror holds at
+/// most 8 entries as a cache over flash (a miss reloads from NVS), and
+/// eviction must drop the least-recently-used entry: dropping an arbitrary
+/// `HashMap` key can discard the just-written hot session the encrypt path is
+/// about to read, paying a flash read immediately. Both writes and read hits
+/// count as use; the back holds the most-recently-used key.
+#[derive(Default)]
+struct LruOrder<K> {
+    order: VecDeque<K>,
+}
+
+impl<K: Eq + Clone> LruOrder<K> {
+    fn touched(&mut self, key: K) {
+        if let Some(pos) = self.order.iter().position(|k| *k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key);
+    }
+    fn removed(&mut self, key: &K) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+    }
+    fn clear(&mut self) {
+        self.order.clear();
+    }
+    /// Oldest-first keys to drop so that `len` entries fit `cap`.
+    fn overflow(&self, len: usize, cap: usize) -> Vec<K> {
+        if len > cap {
+            self.order.iter().take(len - cap).cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Drop least-recently-used entries from a capped RAM mirror (no-PSRAM only;
+/// with PSRAM the mirror is unbounded). These are methods on the inner state
+/// (not a free function over two `&mut` fields) so the borrow checker sees
+/// the disjoint field borrows; callers hold the store lock.
+impl StoreInner {
+    fn enforce_identities_cap(&mut self) {
+        if crate::runtime::HAS_PSRAM {
+            return;
+        }
+        for key in self.identity_order.overflow(self.identities.len(), 8) {
+            self.identities.remove(&key);
+            self.identity_order.removed(&key);
+        }
+    }
+    fn enforce_sessions_cap(&mut self) {
+        if crate::runtime::HAS_PSRAM {
+            return;
+        }
+        for key in self.session_order.overflow(self.sessions.len(), 8) {
+            self.sessions.remove(&key);
+            self.session_order.removed(&key);
+        }
+    }
+    fn enforce_sync_keys_cap(&mut self) {
+        if crate::runtime::HAS_PSRAM {
+            return;
+        }
+        for key in self.sync_key_order.overflow(self.sync_keys.len(), 8) {
+            self.sync_keys.remove(&key);
+            self.sync_key_order.removed(&key);
+        }
+    }
+}
+
 #[derive(Default)]
 struct StoreInner {
     device: Option<Device>,
@@ -160,12 +230,17 @@ struct StoreInner {
     prekeys: HashMap<u32, Bytes>,
     signed_prekeys: HashMap<u32, Vec<u8>>,
     sender_keys: HashMap<String, Vec<u8>>,
+    // LRU order for the three RAM-capped mirrors above that have one
+    // (identities, sessions, sync_keys): eviction drops the oldest first.
+    identity_order: LruOrder<String>,
+    session_order: LruOrder<String>,
 
     // AppSyncStore. The keys are persisted (without them a rebooted device has
     // to ask the phone for every key again, and the phone must be online to
     // answer); the hash versions and MACs are a rebuildable cache.
     sync_keys: HashMap<Vec<u8>, AppStateSyncKey>,
     latest_sync_key_id: Option<Vec<u8>>,
+    sync_key_order: LruOrder<Vec<u8>>,
     versions: HashMap<String, HashState>,
     mutation_macs: HashMap<String, HashMap<Vec<u8>, Vec<u8>>>,
 
@@ -346,11 +421,27 @@ impl FlashNamespaces {
         &self,
         namespace: &EspCustomNvs,
         logical_key: &[u8],
-        _label: &str,
+        label: &str,
     ) -> Result<()> {
         let name = record_name(logical_key);
-        namespace.remove(&name).map_err(nvs_error)?;
-        commit(namespace)
+        // Deleting an absent record is a no-op (Signal and prekey teardown
+        // call delete for keys that were never stored), and must not commit:
+        // `nvs_erase_key` reports NOT_FOUND for a missing key.
+        if let Some(existing) = read_blob(
+            namespace,
+            &name,
+            RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN,
+        )? {
+            let (stored_key, _) = decode_record(&existing)?;
+            if stored_key != logical_key {
+                return Err(StoreError::Validation(format!(
+                    "{label} NVS key collision at '{name}'"
+                )));
+            }
+            namespace.remove(&name).map_err(nvs_error)?;
+            commit(namespace)?;
+        }
+        Ok(())
     }
 
     fn has_signal_records(&self) -> Result<bool> {
@@ -664,9 +755,10 @@ impl NvsStore {
                 let key: [u8; 32] = value.as_slice().try_into().map_err(|_| {
                     anyhow::anyhow!("identity record for '{address}' has {} bytes", value.len())
                 })?;
-                if inner.identities.insert(address, key).is_some() {
+                if inner.identities.insert(address.clone(), key).is_some() {
                     anyhow::bail!("duplicate identity record in WhatsApp NVS");
                 }
+                inner.identity_order.touched(address);
             }
             for (key, value) in flash.load_records(
                 &flash.sessions,
@@ -675,9 +767,10 @@ impl NvsStore {
                 MAX_SIGNAL_RECORD_LEN,
             )? {
                 let address = decode_string_key(key, "session")?;
-                if inner.sessions.insert(address, Bytes::from(value)).is_some() {
+                if inner.sessions.insert(address.clone(), Bytes::from(value)).is_some() {
                     anyhow::bail!("duplicate session record in WhatsApp NVS");
                 }
+                inner.session_order.touched(address);
             }
             for (key, value) in
                 flash.load_records(&flash.prekeys, "prekey", MAX_PREKEYS, MAX_SIGNAL_RECORD_LEN)?
@@ -727,9 +820,10 @@ impl NvsStore {
                 if newer {
                     timestamp_latest = Some(key_id.clone());
                 }
-                if inner.sync_keys.insert(key_id, key).is_some() {
+                if inner.sync_keys.insert(key_id.clone(), key).is_some() {
                     anyhow::bail!("duplicate sync-key record in WhatsApp NVS");
                 }
+                inner.sync_key_order.touched(key_id);
             }
             // Only trust a recorded id that names a key actually present. If the
             // marker is unreadable or corrupted, fall back to timestamp_latest.
@@ -746,6 +840,11 @@ impl NvsStore {
             if !crate::runtime::HAS_PSRAM && inner.sync_keys.len() > 8 {
                 let latest = inner.latest_sync_key_id.clone();
                 inner.sync_keys.retain(|k, _| Some(k) == latest.as_ref());
+                // The order must mirror the map: nothing else is retained.
+                inner.sync_key_order.clear();
+                if let Some(latest) = latest {
+                    inner.sync_key_order.touched(latest);
+                }
             }
         } else if flash.has_signal_records()? {
             log::warn!("Discarding orphaned Signal records without a linked device");
@@ -800,6 +899,7 @@ impl NvsStore {
             .run(|flash| erase_namespace(&flash.sessions, "session"))?;
         let count = s.sessions.len();
         s.sessions.clear();
+        s.session_order.clear();
         Ok(count)
     }
 
@@ -868,13 +968,8 @@ impl SignalStore for NvsStore {
             flash.put_record(&flash.identities, &logical_key, &key, "identity")
         })?;
         s.identities.insert(address.to_string(), key);
-        if !crate::runtime::HAS_PSRAM && s.identities.len() > 8 {
-            let excess = s.identities.len() - 8;
-            let keys_to_remove: Vec<_> = s.identities.keys().take(excess).cloned().collect();
-            for k in keys_to_remove {
-                s.identities.remove(&k);
-            }
-        }
+        s.identity_order.touched(address.to_string());
+        s.enforce_identities_cap();
         Ok(())
     }
 
@@ -909,20 +1004,19 @@ impl SignalStore for NvsStore {
             })?;
             let mut s = self.lock();
             s.identities.insert(address.to_string(), key);
-            if !crate::runtime::HAS_PSRAM && s.identities.len() > 8 {
-                let excess = s.identities.len() - 8;
-                let keys_to_remove: Vec<_> = s.identities.keys().take(excess).cloned().collect();
-                for k in keys_to_remove {
-                    s.identities.remove(&k);
-                }
-            }
+            s.identity_order.touched(address.to_string());
+            s.enforce_identities_cap();
         }
         Ok(())
     }
 
     async fn load_identity(&self, address: &str) -> Result<Option<[u8; 32]>> {
-        if let Some(key) = self.lock().identities.get(address).copied() {
-            return Ok(Some(key));
+        {
+            let mut s = self.lock();
+            if let Some(key) = s.identities.get(address).copied() {
+                s.identity_order.touched(address.to_string());
+                return Ok(Some(key));
+            }
         }
         let address_bytes = address.as_bytes().to_vec();
         let payload = self.flash.run(move |flash| {
@@ -930,7 +1024,10 @@ impl SignalStore for NvsStore {
         })?;
         if let Some(ref bytes) = payload {
             if let Ok(key) = bytes.as_slice().try_into() {
-                self.lock().identities.insert(address.to_string(), key);
+                let mut s = self.lock();
+                s.identities.insert(address.to_string(), key);
+                s.identity_order.touched(address.to_string());
+                s.enforce_identities_cap();
                 return Ok(Some(key));
             }
         }
@@ -944,12 +1041,17 @@ impl SignalStore for NvsStore {
         self.flash
             .run(move |flash| flash.delete_record(&flash.identities, &logical_key, "identity"))?;
         s.identities.remove(address);
+        s.identity_order.removed(&address.to_string());
         Ok(())
     }
 
     async fn get_session(&self, address: &str) -> Result<Option<Bytes>> {
-        if let Some(session) = self.lock().sessions.get(address).cloned() {
-            return Ok(Some(session));
+        {
+            let mut s = self.lock();
+            if let Some(session) = s.sessions.get(address).cloned() {
+                s.session_order.touched(address.to_string());
+                return Ok(Some(session));
+            }
         }
         let address_bytes = address.as_bytes().to_vec();
         let payload = self.flash.run(move |flash| {
@@ -957,7 +1059,10 @@ impl SignalStore for NvsStore {
         })?;
         if let Some(bytes) = payload {
             let session_bytes = Bytes::from(bytes);
-            self.lock().sessions.insert(address.to_string(), session_bytes.clone());
+            let mut s = self.lock();
+            s.sessions.insert(address.to_string(), session_bytes.clone());
+            s.session_order.touched(address.to_string());
+            s.enforce_sessions_cap();
             return Ok(Some(session_bytes));
         }
         Ok(None)
@@ -979,13 +1084,8 @@ impl SignalStore for NvsStore {
             flash.put_record(&flash.sessions, &logical_key, &persisted, "session")
         })?;
         s.sessions.insert(address.to_string(), mirrored);
-        if !crate::runtime::HAS_PSRAM && s.sessions.len() > 8 {
-            let excess = s.sessions.len() - 8;
-            let keys_to_remove: Vec<_> = s.sessions.keys().take(excess).cloned().collect();
-            for k in keys_to_remove {
-                s.sessions.remove(&k);
-            }
-        }
+        s.session_order.touched(address.to_string());
+        s.enforce_sessions_cap();
         Ok(())
     }
 
@@ -1019,13 +1119,8 @@ impl SignalStore for NvsStore {
             })?;
             let mut s = self.lock();
             s.sessions.insert(address.to_string(), session.clone());
-            if !crate::runtime::HAS_PSRAM && s.sessions.len() > 8 {
-                let excess = s.sessions.len() - 8;
-                let keys_to_remove: Vec<_> = s.sessions.keys().take(excess).cloned().collect();
-                for k in keys_to_remove {
-                    s.sessions.remove(&k);
-                }
-            }
+            s.session_order.touched(address.to_string());
+            s.enforce_sessions_cap();
         }
         Ok(())
     }
@@ -1037,6 +1132,7 @@ impl SignalStore for NvsStore {
         self.flash
             .run(move |flash| flash.delete_record(&flash.sessions, &logical_key, "session"))?;
         s.sessions.remove(address);
+        s.session_order.removed(&address.to_string());
         Ok(())
     }
 
@@ -1178,8 +1274,12 @@ impl SignalStore for NvsStore {
 #[async_trait]
 impl AppSyncStore for NvsStore {
     async fn get_sync_key(&self, key_id: &[u8]) -> Result<Option<AppStateSyncKey>> {
-        if let Some(key) = self.lock().sync_keys.get(key_id).cloned() {
-            return Ok(Some(key));
+        {
+            let mut s = self.lock();
+            if let Some(key) = s.sync_keys.get(key_id).cloned() {
+                s.sync_key_order.touched(key_id.to_vec());
+                return Ok(Some(key));
+            }
         }
         let key_id_vec = key_id.to_vec();
         let payload = self
@@ -1188,6 +1288,8 @@ impl AppSyncStore for NvsStore {
         if let Some(ref key) = payload {
             let mut s = self.lock();
             s.sync_keys.insert(key_id.to_vec(), key.clone());
+            s.sync_key_order.touched(key_id.to_vec());
+            s.enforce_sync_keys_cap();
         }
         Ok(payload)
     }
@@ -1217,18 +1319,22 @@ impl AppSyncStore for NvsStore {
         })?;
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);
+        s.sync_key_order.touched(key_id.to_vec());
         if !crate::runtime::HAS_PSRAM && s.sync_keys.len() > 8 {
+            // Oldest first, but never the latest: dropping it would force a
+            // full key re-request the next sync needs answered by the phone.
             let latest = s.latest_sync_key_id.clone();
             let excess = s.sync_keys.len() - 8;
             let keys_to_remove: Vec<_> = s
-                .sync_keys
-                .keys()
-                .filter(|k| Some(*k) != latest.as_ref())
+                .sync_key_order
+                .overflow(s.sync_keys.len(), 8)
+                .into_iter()
+                .filter(|k| Some(k) != latest.as_ref())
                 .take(excess)
-                .cloned()
                 .collect();
             for k in keys_to_remove {
                 s.sync_keys.remove(&k);
+                s.sync_key_order.removed(&k);
             }
         }
         let stored = s.sync_keys.len();

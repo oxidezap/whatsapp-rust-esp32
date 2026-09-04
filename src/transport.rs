@@ -162,10 +162,19 @@ impl Drop for EspTlsStream {
     }
 }
 
+/// Outbound frames waiting for the socket thread. Bounded on purpose: a
+/// stalled socket must surface as a send error the supervisor reconnects
+/// from, not as an ever-growing queue in internal DRAM (on the C3 that is a
+/// silent OOM). 64 entries absorb the login burst -- presence, receipts, the
+/// prekey upload, account-sync acks -- several times over, and the drain loop
+/// below empties the queue every pass, so a full queue means the socket is
+/// genuinely stuck rather than momentarily behind.
+const SEND_QUEUE_CAP: usize = 64;
+
 /// Transport implementation: ESP-IDF TLS under the crate's own WebSocket
 /// client ([`crate::ws`]), driven on its own thread.
 pub struct Esp32Transport {
-    data_tx: std::sync::mpsc::Sender<Bytes>,
+    data_tx: std::sync::mpsc::SyncSender<Bytes>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -173,10 +182,17 @@ pub struct Esp32Transport {
 impl Transport for Esp32Transport {
     async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
         // Move the Bytes through the channel (refcount bump, no copy); the
-        // socket thread masks it straight onto the wire from the slice.
-        self.data_tx
-            .send(data)
-            .map_err(|_| anyhow!("Transport channel closed"))
+        // socket thread masks it straight onto the wire from the slice. Never
+        // blocks: backpressure is an error, and the core treats a send error
+        // as a broken connection, which is exactly what a full queue means.
+        self.data_tx.try_send(data).map_err(|error| match error {
+            std::sync::mpsc::TrySendError::Full(_) => {
+                anyhow!("Transport send queue full ({SEND_QUEUE_CAP}): socket stalled")
+            }
+            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                anyhow!("Transport channel closed")
+            }
+        })
     }
 
     async fn disconnect(&self) {
@@ -241,7 +257,7 @@ impl TransportFactory for Esp32TransportFactory {
         &self,
     ) -> Result<(Arc<dyn Transport>, async_channel::Receiver<TransportEvent>), anyhow::Error> {
         let (event_tx, event_rx) = async_channel::unbounded();
-        let (data_tx, data_rx) = std::sync::mpsc::channel();
+        let (data_tx, data_rx) = std::sync::mpsc::sync_channel(SEND_QUEUE_CAP);
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let shutdown_clone = shutdown.clone();

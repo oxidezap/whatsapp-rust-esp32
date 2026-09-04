@@ -287,4 +287,4 @@ jobs:
           if-no-files-found: ignore
           path: |
             ${{ env.OUT }}/qemu-*.log
-            ${{ env.OUT }}/qemu-metrics.json
+            ${{ env.OUT }}/qemu-metrics-*.json
