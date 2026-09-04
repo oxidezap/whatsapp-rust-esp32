@@ -142,7 +142,7 @@ pub struct BlockingWorker {
 }
 
 impl BlockingWorker {
-    /// The thread [`BlockingWorker::start`] creates: 32 KB of stack (10 KB
+    /// The thread [`BlockingWorker::start`] creates: 32 KB of stack (14 KB
     /// without PSRAM, see [`HAS_PSRAM`]), pinned to core 0 below the network
     /// and executor threads (priority 5) so a long key batch never delays a
     /// socket read, and above idle, which the task watchdog must therefore not
@@ -150,7 +150,7 @@ impl BlockingWorker {
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-blocking"),
-            stack_size: by_ram(32 * 1024, 6 * 1024),
+            stack_size: by_ram(32 * 1024, 14 * 1024),
             priority: 1,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
@@ -296,6 +296,11 @@ impl Esp32Executor {
     /// deeper work to the executor should watch `stack_wa_main_min` in
     /// `GET /metrics` on that chip, or read the line this crate now logs on
     /// every connect.
+    ///
+    /// The demo firmware does not spawn this thread without PSRAM: there the
+    /// executor runs on the ESP-IDF main task (`CONFIG_ESP_MAIN_TASK_STACK_SIZE`
+    /// in `sdkconfig.defaults.esp32c3`), so the 32 KB arm below is what library
+    /// consumers who spawn the thread themselves get.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-main"),

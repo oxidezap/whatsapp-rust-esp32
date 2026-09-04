@@ -1,9 +1,9 @@
 name: CI
 
 # Two questions, answered in order: does the firmware still build for the real
-# chips, and does it still run on one. The first is the `build` matrix: the two
-# board flavors are the bits you would flash to an ESP32-S3 and an ESP32-C5, the
-# qemu flavor swaps WiFi for the emulated Ethernet MAC. The second is `qemu-e2e`,
+# chips, and does it still run on one. The first is the `build` matrix: the
+# three board flavors are the bits you would flash to an ESP32-S3, an ESP32-C5
+# and an ESP32-C3, the qemu flavors swap WiFi for the emulated Ethernet MAC. The second is `qemu-e2e`,
 # which boots the qemu flavor on Espressif's QEMU (an ESP32-S3 with 8 MB PSRAM
 # and an OpenCores NIC), pairs it against the same mock server whatsapp-rust's
 # E2E suite uses, reboots it to prove the pairing survives in flash, then boots

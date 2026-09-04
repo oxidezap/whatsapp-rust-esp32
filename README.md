@@ -233,7 +233,7 @@ crates are edition 2024). The Xtensa `esp` channel is well past that.
 - `cargo install espflash` for flashing and monitoring.
 - ESP-IDF is downloaded and built automatically by `esp-idf-sys` on the first
   build (into `.embuild/`, a few GB; subsequent builds reuse it): **v5.5.5**
-  unified for both the ESP32-S3 and the ESP32-C5.
+  unified for all three boards.
 - Host tools the ESP-IDF build needs: `git`, `python3`, `cmake`, `ninja`, `clang`.
 
 ## Configure
@@ -328,8 +328,8 @@ The S3 target (`xtensa-esp32s3-espidf`), `build-std`, and the `MCU` /
 `ESP_IDF_VERSION` environment variables all come from `.cargo/config.toml`, so a
 bare `cargo build` is the S3 build. `scripts/build.sh` is the same `cargo build`
 with the target and those two variables switched for the board named (`BOARD=...`
-in the environment works too, and `CARGO_CMD=clippy` runs clippy instead). The
-two boards' ESP-IDF trees and build outputs never share a directory, so
+in the environment works too, and `CARGO_CMD=clippy` runs clippy instead). Each
+board's ESP-IDF tree and build outputs never share a directory, so
 switching between them costs nothing but disk.
 
 What persists across a reflash of the app: the `wa_store` partition (the pairing,
@@ -568,10 +568,12 @@ curl http://<device-ip>:8081/metrics
 #  "heap_internal_free":29775,"heap_min_free":3299632,
 #  "internal_largest_block":7680,"internal_min_free":4755,
 #  "psram_free":3463948,"rssi_dbm":-65}
+# (abbreviated: the full document also reports `internal_8bit_*`,
+# `psram_largest_block`, per-thread `stack_*_min`, `last_panic` and `coredump`)
 ```
 
 `internal_*` is the scarce resource on this board: **internal DRAM** (~tens of KB,
-DMA-capable), separate from the 4 MB PSRAM. `internal_min_free` is the all-time
+DMA-capable), separate from the 8 MB PSRAM. `internal_min_free` is the all-time
 low-water mark. Watch it, since the AES/TLS/prekey paths compete for internal
 DRAM and that's what OOMs first.
 

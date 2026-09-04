@@ -203,13 +203,13 @@ impl Esp32TransportFactory {
 
     /// The thread each connection's socket is driven on: 16 KB of stack on
     /// core 0, at the same priority as the executor. Without PSRAM the stack is
-    /// internal DRAM and 8 KB; the frames here are mbedTLS record handling and
+    /// internal DRAM and 6 KB; the frames here are mbedTLS record handling and
     /// [`crate::ws`] framing, neither of which recurses, and the emulated C3
     /// measures a 5,640-byte peak across pairing and reconnection.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"ws-transport"),
-            stack_size: crate::runtime::by_ram(16 * 1024, 8 * 1024),
+            stack_size: crate::runtime::by_ram(16 * 1024, 6 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),

@@ -95,9 +95,9 @@ impl FlashWorker {
         // walks the whole store, runs on the ESP-IDF main task before this worker
         // exists (hence CONFIG_ESP_MAIN_TASK_STACK_SIZE), not here. Measured peak
         // on the emulated ESP32-C3, across pairing writes and a factory reset, is
-        // 2,596 bytes (see docs/esp32c3.md). A 6 KB stack keeps well over twice
-        // that, and a board with PSRAM keeps the 32 KB it was tested on since it
-        // has DRAM to spare.
+        // 2,596 bytes (see docs/esp32c3.md). A 4 KB stack keeps ~60% headroom
+        // over that, and a board with PSRAM keeps the 32 KB it was tested on
+        // since it has DRAM to spare.
         let thread = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
             name: Some(c"wa-nvs"),
             stack_size: crate::runtime::by_ram(32 * 1024, 4 * 1024),
@@ -288,6 +288,42 @@ impl FlashNamespaces {
         Ok(records)
     }
 
+    fn load_record(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        max_value_len: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        let name = record_name(logical_key);
+        let Some(record) = read_blob(
+            namespace,
+            &name,
+            RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + max_value_len,
+        )? else {
+            return Ok(None);
+        };
+        let (stored_key, value) = decode_record(&record)?;
+        if stored_key != logical_key {
+            return Ok(None);
+        }
+        if value.len() > max_value_len {
+            return Err(StoreError::Validation(format!(
+                "record '{name}' is too large: {} bytes",
+                value.len()
+            )));
+        }
+        Ok(Some(value.to_vec()))
+    }
+
+    fn load_sync_key(&self, key_id: &[u8]) -> Result<Option<AppStateSyncKey>> {
+        let Some(value) = self.load_record(&self.sync_keys, key_id, MAX_SIGNAL_RECORD_LEN)? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&value)
+            .map(Some)
+            .map_err(|error| StoreError::Serialization(Box::new(error)))
+    }
+
     fn put_record(
         &self,
         namespace: &EspCustomNvs,
@@ -302,18 +338,6 @@ impl FlashNamespaces {
             )));
         }
         let name = record_name(logical_key);
-        if let Some(existing) = read_blob(
-            namespace,
-            &name,
-            RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN,
-        )? {
-            let (stored_key, _) = decode_record(&existing)?;
-            if stored_key != logical_key {
-                return Err(StoreError::Validation(format!(
-                    "{label} NVS key collision at '{name}'"
-                )));
-            }
-        }
         let record = encode_record(logical_key, value)?;
         set_blob(namespace, &name, &record)
     }
@@ -322,24 +346,11 @@ impl FlashNamespaces {
         &self,
         namespace: &EspCustomNvs,
         logical_key: &[u8],
-        label: &str,
+        _label: &str,
     ) -> Result<()> {
         let name = record_name(logical_key);
-        if let Some(existing) = read_blob(
-            namespace,
-            &name,
-            RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN,
-        )? {
-            let (stored_key, _) = decode_record(&existing)?;
-            if stored_key != logical_key {
-                return Err(StoreError::Validation(format!(
-                    "{label} NVS key collision at '{name}'"
-                )));
-            }
-            namespace.remove(&name).map_err(nvs_error)?;
-            commit(namespace)?;
-        }
-        Ok(())
+        namespace.remove(&name).map_err(nvs_error)?;
+        commit(namespace)
     }
 
     fn has_signal_records(&self) -> Result<bool> {
@@ -732,6 +743,10 @@ impl NvsStore {
             inner.latest_sync_key_id = recorded
                 .filter(|id| inner.sync_keys.contains_key(id))
                 .or(timestamp_latest);
+            if !crate::runtime::HAS_PSRAM && inner.sync_keys.len() > 8 {
+                let latest = inner.latest_sync_key_id.clone();
+                inner.sync_keys.retain(|k, _| Some(k) == latest.as_ref());
+            }
         } else if flash.has_signal_records()? {
             log::warn!("Discarding orphaned Signal records without a linked device");
             flash.erase_signal()?;
@@ -853,11 +868,73 @@ impl SignalStore for NvsStore {
             flash.put_record(&flash.identities, &logical_key, &key, "identity")
         })?;
         s.identities.insert(address.to_string(), key);
+        if !crate::runtime::HAS_PSRAM && s.identities.len() > 8 {
+            let excess = s.identities.len() - 8;
+            let keys_to_remove: Vec<_> = s.identities.keys().take(excess).cloned().collect();
+            for k in keys_to_remove {
+                s.identities.remove(&k);
+            }
+        }
+        Ok(())
+    }
+
+    /// Store several identities with one call. Each record is committed as it
+    /// is written, exactly like [`Self::put_identity`] would do it: a failure
+    /// partway through leaves the prefix persisted (no rollback), which is
+    /// safe because every entry is an independent key and the next flush
+    /// rewrites the remainder.
+    async fn put_identities_batch(&self, identities: &[(Arc<str>, [u8; 32])]) -> Result<()> {
+        if identities.is_empty() {
+            return Ok(());
+        }
+        let _operation = self.write_operation()?;
+        for (address, key) in identities {
+            // Same capacity gate as the single-put path, before flash is touched.
+            // One guard: two `self.lock()` temporaries in one expression would
+            // deadlock, since the first lives until the end of the statement.
+            {
+                let address_str: &str = address;
+                let s = self.lock();
+                ensure_insert_capacity(
+                    s.identities.contains_key(address_str),
+                    s.identities.len(),
+                    MAX_IDENTITIES,
+                    "identity",
+                )?;
+            }
+            let logical_key = address.as_bytes().to_vec();
+            let key = *key;
+            self.flash.run(move |flash| {
+                flash.put_record(&flash.identities, &logical_key, &key, "identity")
+            })?;
+            let mut s = self.lock();
+            s.identities.insert(address.to_string(), key);
+            if !crate::runtime::HAS_PSRAM && s.identities.len() > 8 {
+                let excess = s.identities.len() - 8;
+                let keys_to_remove: Vec<_> = s.identities.keys().take(excess).cloned().collect();
+                for k in keys_to_remove {
+                    s.identities.remove(&k);
+                }
+            }
+        }
         Ok(())
     }
 
     async fn load_identity(&self, address: &str) -> Result<Option<[u8; 32]>> {
-        Ok(self.lock().identities.get(address).copied())
+        if let Some(key) = self.lock().identities.get(address).copied() {
+            return Ok(Some(key));
+        }
+        let address_bytes = address.as_bytes().to_vec();
+        let payload = self.flash.run(move |flash| {
+            flash.load_record(&flash.identities, &address_bytes, 32)
+        })?;
+        if let Some(ref bytes) = payload {
+            if let Ok(key) = bytes.as_slice().try_into() {
+                self.lock().identities.insert(address.to_string(), key);
+                return Ok(Some(key));
+            }
+        }
+        Ok(None)
     }
 
     async fn delete_identity(&self, address: &str) -> Result<()> {
@@ -871,7 +948,19 @@ impl SignalStore for NvsStore {
     }
 
     async fn get_session(&self, address: &str) -> Result<Option<Bytes>> {
-        Ok(self.lock().sessions.get(address).cloned())
+        if let Some(session) = self.lock().sessions.get(address).cloned() {
+            return Ok(Some(session));
+        }
+        let address_bytes = address.as_bytes().to_vec();
+        let payload = self.flash.run(move |flash| {
+            flash.load_record(&flash.sessions, &address_bytes, MAX_SIGNAL_RECORD_LEN)
+        })?;
+        if let Some(bytes) = payload {
+            let session_bytes = Bytes::from(bytes);
+            self.lock().sessions.insert(address.to_string(), session_bytes.clone());
+            return Ok(Some(session_bytes));
+        }
+        Ok(None)
     }
 
     async fn put_session(&self, address: &str, session: &[u8]) -> Result<()> {
@@ -890,6 +979,54 @@ impl SignalStore for NvsStore {
             flash.put_record(&flash.sessions, &logical_key, &persisted, "session")
         })?;
         s.sessions.insert(address.to_string(), mirrored);
+        if !crate::runtime::HAS_PSRAM && s.sessions.len() > 8 {
+            let excess = s.sessions.len() - 8;
+            let keys_to_remove: Vec<_> = s.sessions.keys().take(excess).cloned().collect();
+            for k in keys_to_remove {
+                s.sessions.remove(&k);
+            }
+        }
+        Ok(())
+    }
+
+    /// Store several sessions with one call. Same prefix semantics as
+    /// [`Self::put_identities_batch`]: each record commits as written, so a
+    /// failure partway leaves the prefix persisted and the next flush rewrites
+    /// the rest.
+    async fn put_sessions_batch(&self, sessions: &[(Arc<str>, Bytes)]) -> Result<()> {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let _operation = self.write_operation()?;
+        for (address, session) in sessions {
+            // Same capacity gate as the single-put path, before flash is touched.
+            // One guard: two `self.lock()` temporaries in one expression would
+            // deadlock, since the first lives until the end of the statement.
+            {
+                let address_str: &str = address;
+                let s = self.lock();
+                ensure_insert_capacity(
+                    s.sessions.contains_key(address_str),
+                    s.sessions.len(),
+                    MAX_SESSIONS,
+                    "session",
+                )?;
+            }
+            let logical_key = address.as_bytes().to_vec();
+            let persisted = session.clone();
+            self.flash.run(move |flash| {
+                flash.put_record(&flash.sessions, &logical_key, &persisted, "session")
+            })?;
+            let mut s = self.lock();
+            s.sessions.insert(address.to_string(), session.clone());
+            if !crate::runtime::HAS_PSRAM && s.sessions.len() > 8 {
+                let excess = s.sessions.len() - 8;
+                let keys_to_remove: Vec<_> = s.sessions.keys().take(excess).cloned().collect();
+                for k in keys_to_remove {
+                    s.sessions.remove(&k);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1041,7 +1178,18 @@ impl SignalStore for NvsStore {
 #[async_trait]
 impl AppSyncStore for NvsStore {
     async fn get_sync_key(&self, key_id: &[u8]) -> Result<Option<AppStateSyncKey>> {
-        Ok(self.lock().sync_keys.get(key_id).cloned())
+        if let Some(key) = self.lock().sync_keys.get(key_id).cloned() {
+            return Ok(Some(key));
+        }
+        let key_id_vec = key_id.to_vec();
+        let payload = self
+            .flash
+            .run(move |flash| flash.load_sync_key(&key_id_vec))?;
+        if let Some(ref key) = payload {
+            let mut s = self.lock();
+            s.sync_keys.insert(key_id.to_vec(), key.clone());
+        }
+        Ok(payload)
     }
 
     async fn set_sync_key(&self, key_id: &[u8], key: AppStateSyncKey) -> Result<()> {
@@ -1069,6 +1217,20 @@ impl AppSyncStore for NvsStore {
         })?;
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);
+        if !crate::runtime::HAS_PSRAM && s.sync_keys.len() > 8 {
+            let latest = s.latest_sync_key_id.clone();
+            let excess = s.sync_keys.len() - 8;
+            let keys_to_remove: Vec<_> = s
+                .sync_keys
+                .keys()
+                .filter(|k| Some(*k) != latest.as_ref())
+                .take(excess)
+                .cloned()
+                .collect();
+            for k in keys_to_remove {
+                s.sync_keys.remove(&k);
+            }
+        }
         let stored = s.sync_keys.len();
         drop(s);
         // The app-state key share arrives as one batch -- 70 keys on the QEMU
@@ -1109,6 +1271,19 @@ impl AppSyncStore for NvsStore {
         let map = s.mutation_macs.entry(name.to_string()).or_default();
         for m in mutations {
             map.insert(m.index_mac.clone(), m.value_mac.clone());
+        }
+        if !crate::runtime::HAS_PSRAM {
+            // On memory-constrained devices without PSRAM, keeping full mutation MAC histories
+            // across all snapshot collections wastes 15-20 KB of internal DRAM. Since this device
+            // only validates incoming state and does not author mutation patches, bound the cache.
+            const MAX_MUTATION_MACS: usize = 8;
+            if map.len() > MAX_MUTATION_MACS {
+                let excess = map.len() - MAX_MUTATION_MACS;
+                let keys_to_remove: Vec<_> = map.keys().take(excess).cloned().collect();
+                for k in keys_to_remove {
+                    map.remove(&k);
+                }
+            }
         }
         Ok(())
     }

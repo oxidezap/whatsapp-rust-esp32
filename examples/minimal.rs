@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     let (runtime, executor) = Esp32Runtime::create_default()?;
 
     // The executor needs a large stack (the send path has deep frames):
-    // `default_thread_config` is 256 KB of PSRAM, or 64 KB of internal DRAM on a
+    // `default_thread_config` is 256 KB of PSRAM, or 32 KB of internal DRAM on a
     // chip without any.
     let main_thread = spawn_thread(&Esp32Executor::default_thread_config(), move || {
         executor.block_on(async move {

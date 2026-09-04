@@ -312,11 +312,19 @@ cmd_test() {
     local pid_a=$BOOT_PID device
     wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot1.log" "${BOOT_MARKERS[@]}" \
         "WhatsApp NVS loaded: device=false" "QR CODE" "Connected to WhatsApp!"
-    device="$(admin_get "$port_a" /device)"
+    # Guarded like the /send call below: an unguarded assignment under
+    # `set -e` would abort on a transient curl failure with no diagnostic.
+    if ! device="$(admin_get "$port_a" /device)"; then
+        log "board a, boot 1: GET /device failed: $device"
+        return 1
+    fi
     log "board a, boot 1: GET /device -> $device"
     [[ "$(json_field "$device" "d['connected']")" == True ]] || { log "board a is not connected"; return 1; }
     local pn_a
-    pn_a="$(json_field "$device" "d['pn'] or ''")"
+    if ! pn_a="$(json_field "$device" "d['pn'] or ''")"; then
+        log "board a, boot 1: /device was not JSON: $device"
+        return 1
+    fi
     if [[ -z "$pn_a" ]]; then
         log "board a connected without reporting a number; /device -> $device"
         return 1
@@ -335,7 +343,10 @@ cmd_test() {
         log "board a asked for a QR scan after the reboot: the stored credentials were not used"
         return 1
     fi
-    device="$(admin_get "$port_a" /device)"
+    if ! device="$(admin_get "$port_a" /device)"; then
+        log "board a, boot 2: GET /device failed: $device"
+        return 1
+    fi
     log "board a, boot 2: GET /device -> $device"
     [[ "$(json_field "$device" "d['connected'] and d['pn'] == '$pn_a'")" == True ]] \
         || { log "board a did not come back as the same connected device"; return 1; }
@@ -346,17 +357,26 @@ cmd_test() {
     boot b "$port_b" "$OUT_DIR/qemu-b-boot1.log"
     local pid_b=$BOOT_PID
     wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "${BOOT_MARKERS[@]}" "Connected to WhatsApp!"
-    device="$(admin_get "$port_b" /device)"
+    if ! device="$(admin_get "$port_b" /device)"; then
+        log "board b: GET /device failed: $device"
+        return 1
+    fi
     log "board b: GET /device -> $device"
     local to_b sent
-    to_b="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"
+    if ! to_b="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"; then
+        log "board b: /device was not JSON: $device"
+        return 1
+    fi
     if [[ -z "$to_b" ]]; then
         log "board b connected without reporting a number; /device -> $device"
         return 1
     fi
     log "board a -> board b ($to_b): ping"
-    sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
-        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")"
+    if ! sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
+        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")"; then
+        log "curl failed: $sent"
+        return 1
+    fi
     log "POST /send -> $sent"
     [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || { log "send failed"; return 1; }
     wait_for_message "$port_b" "'\U0001f980ping'"

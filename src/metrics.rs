@@ -76,7 +76,10 @@ fn last_reset_str() -> &'static str {
 /// is `u8` on this port, so the high-water mark is already in bytes. `None` if
 /// the task isn't registered (e.g. before it spawns).
 fn stack_free_min(name: &core::ffi::CStr) -> Option<u32> {
-    let handle = unsafe { sys::xTaskGetHandle(name.as_ptr()) };
+    let mut handle = unsafe { sys::xTaskGetHandle(name.as_ptr()) };
+    if handle.is_null() && name == c"wa-main" {
+        handle = unsafe { sys::xTaskGetHandle(c"main".as_ptr()) };
+    }
     if handle.is_null() {
         None
     } else {
@@ -132,12 +135,12 @@ pub mod alloc_note {
 
 /// Log every worker stack's high-water mark together with the internal heap.
 ///
-/// The four worker stacks are `by_ram` constants in `runtime`, `transport` and
-/// `storage`, chosen by reasoning rather than measurement, and on a board with
-/// no PSRAM they are the largest single claim on the heap: 64 + 20 + 12 + 12 KB
-/// out of ~314 KB. `/metrics` has reported the same numbers all along, but the
-/// QEMU end-to-end run never reads it, so the one build where the sizing
-/// actually bites is the one where nobody was looking.
+/// The worker stacks are `by_ram` constants in `runtime`, `transport` and
+/// `storage`: 14 + 6 + 4 KB of spawned threads without PSRAM, plus the 36 KB
+/// IDF main task the demo firmware runs the executor on instead of spawning
+/// the 32 KB `wa-main` thread. `/metrics` has reported the same high-water
+/// marks all along, but the QEMU end-to-end run never reads it, so the one
+/// build where the sizing actually bites is the one where nobody was looking.
 ///
 /// It bites concretely. The ESP32-C3 reaches its first WebSocket connect with
 /// 53,332 bytes free and a 31,744-byte largest block, and whether a stack is
@@ -171,17 +174,22 @@ pub fn log_memory_profile(at: &str) {
     let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
     let free = unsafe { sys::heap_caps_get_free_size(cap) };
     let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
-    let fmt = |v: Option<u32>| match v {
-        Some(v) => v.to_string(),
-        None => "-".to_string(),
-    };
+    struct Opt(Option<u32>);
+    impl std::fmt::Display for Opt {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {
+                Some(v) => write!(f, "{v}"),
+                None => write!(f, "-"),
+            }
+        }
+    }
     log::info!(
         "memory at {at}: internal heap {free} free, largest block {largest}; \
          stack never-used wa-main={} wa-blocking={} ws-transport={} wa-nvs={}",
-        fmt(stack_free_min(c"wa-main")),
-        fmt(stack_free_min(c"wa-blocking")),
-        fmt(stack_free_min(c"ws-transport")),
-        fmt(stack_free_min(c"wa-nvs")),
+        Opt(stack_free_min(c"wa-main")),
+        Opt(stack_free_min(c"wa-blocking")),
+        Opt(stack_free_min(c"ws-transport")),
+        Opt(stack_free_min(c"wa-nvs")),
     );
 }
 

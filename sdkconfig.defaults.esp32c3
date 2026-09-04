@@ -16,13 +16,11 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 
 # --- Internal DRAM budget ---------------------------------------------------
 
-# The main task's stack is internal DRAM held for the life of the firmware, and
-# main() parks in a join() after handing off. 32 KB is what the S3 needs for the
-# one-time NVS replay at boot with a fully populated store; the C3 cannot spare
-# it permanently. 20 KB is the size this port boots on (see docs/esp32c3.md for
-# the measured headroom); it is the one number here to re-check if the store
-# format ever grows.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=20480
+# The main task hosts the WhatsApp executor directly on the C3 rather than
+# spawning a separate 32 KB wa-main thread while main() parks in a join().
+# 36 KB covers the full runtime (measured peak 30.4 KB) and eliminates the
+# second stack entirely, saving 16 KB of contiguous internal DRAM for the heap.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864
 
 # Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
 # this. Everything in src/ names its own size; this is the floor for the rest
@@ -80,11 +78,11 @@ CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 # A peak that fits is worth more here than a peak that is early.
 #
 # So the real constraint is neither knob: the firmware arrives at connect with
-# 53 KB, and roughly 108 KB of that went into four worker stacks (wa-main 64 KB,
-# wa-blocking 20 KB, ws-transport 12 KB, wa-nvs 12 KB). Those are sized on
-# reasoning, never on measurement, which is what src/runtime.rs now logs.
+# 53 KB, and roughly 60 KB of that went into its thread stacks (the 36 KB main
+# task hosting the executor, wa-blocking 14 KB, ws-transport 6 KB, wa-nvs 4 KB;
+# see docs/esp32c3.md). Those are sized from measurement, which is what
+# src/runtime.rs now logs.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
-CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must
 # be able to receive it, but nothing this firmware sends comes close, so the
@@ -101,7 +99,7 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 # negotiate. Each one is code in flash and, for the key exchanges, peak RAM
 # during the handshake.
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=n
-CONFIG_MBEDTLS_DES=n
+CONFIG_MBEDTLS_DES_C=n
 CONFIG_MBEDTLS_CAMELLIA_C=n
 CONFIG_MBEDTLS_BLOWFISH_C=n
 CONFIG_MBEDTLS_XTEA_C=n

@@ -21,7 +21,7 @@ Every number is from this tree, so it moves when the firmware moves.
 | PSRAM presence | **not required**, but everything above assumes it | *measured*: with PSRAM the Rust heap goes to `MALLOC_CAP_SPIRAM` (`src/psram_alloc.rs`) and the executor takes a 256 KB stack; without it both come out of internal DRAM at the sizes in `runtime::by_ram`. The ESP32-C3 does this and runs, at ~314 KB of total heap (§5). |
 | Flash | **≥ 8 MB** (16 MB assumed by `partitions.csv`) | *measured*: 4.5 MB app image (`App/part. size 4,503,680`), a 0x4C0000 factory partition and a 1 MB `wa_store` NVS partition. 4 MB parts are out without a rewrite. |
 | Internal DRAM | **~300 KB, of which ≥ 64 KB in stacks** | *measured*: `CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768` plus the 32 KB **internal** `wa-nvs` stack (`src/storage.rs`; it must be internal because writing flash disables the cache). `internal_min_free` runs at a few KB on the S3. |
-| PSRAM-resident stacks | **~342 KB** | *measured*: `wa-main` 256 KB + `wa-blocking` 32 KB + `ws-transport` 16 KB + `httpd` 6 KB (`src/main.rs`, `src/runtime.rs`, `src/transport.rs`, `src/admin.rs`), all with `MallocCap::Spiram`. Needs `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`. |
+| PSRAM-resident stacks | **~310 KB** | *measured*: `wa-main` 256 KB + `wa-blocking` 32 KB + `ws-transport` 16 KB + `httpd` 6 KB (`src/main.rs`, `src/runtime.rs`, `src/transport.rs`, `src/admin.rs`), all with `MallocCap::Spiram`. Needs `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`. |
 | Radio | **Wi-Fi station**, or Ethernet | *measured*: `bring_up_wifi` vs. the `qemu` feature's `bring_up_ethernet` (`src/main.rs`). Bluetooth is never used. |
 | Toolchain | a **Rust `*-espidf` std target** | *measured*: `.cargo/config.toml`, `build-std`, `ldproxy`. |
 | ESP-IDF | **v5.5.5** today | *measured*: `.cargo/config.toml` and `scripts/build.sh`. |
@@ -205,7 +205,7 @@ The C2 (272 KB, 120 MHz) and the H2 (no Wi-Fi at all) remain below the floor.
 
 The ESP32-C3 lane is done (§5); what is left, in order:
 
-1. **ESP32 classic on QEMU.** One `sdkconfig.defaults.esp32`, one `build.sh` arm,
+1. **ESP32 classic on QEMU.** One `sdkconfig.defaults.esp32`, one `boards.sh` row,
    one `qemu-e2e` matrix axis over `-M esp32 -m 4M`. Reuses the whole existing
    pair → reboot → message script, and puts a genuinely different memory map and a
    second Xtensa core layout under the same test.
