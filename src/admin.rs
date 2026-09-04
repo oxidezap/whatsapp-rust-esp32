@@ -447,7 +447,7 @@ pub fn start_admin_server(
         // time, so on a board without PSRAM -- where the ESP32-C3 fails
         // allocations of 32 KB against a heap that has 50 KB free but only
         // 34 KB contiguous -- the other twelve are session state nobody uses.
-        max_sessions: if crate::runtime::HAS_PSRAM { 16 } else { 4 },
+        max_sessions: if crate::runtime::HAS_PSRAM { 16 } else { 2 },
         task_caps: if crate::runtime::HAS_PSRAM {
             esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT
         } else {
@@ -528,6 +528,7 @@ pub fn start_admin_server(
             "/send",
             esp_idf_svc::http::Method::Post,
             move |mut req| {
+                info!("Admin: POST /send received");
                 if let Err((status, body)) = auth.check(&req) {
                     return json_response_status(req, status, body);
                 }
@@ -547,7 +548,9 @@ pub fn start_admin_server(
                 let Ok(jid) = to.parse::<Jid>() else {
                     return json_response_status(req, 400, r#"{"error":"to is not a JID"}"#);
                 };
+                info!("Admin: POST /send to {to}");
                 let Some(client) = active_client.current() else {
+                    warn!("Admin: POST /send client starting");
                     return json_response_status(
                         req,
                         503,
@@ -555,6 +558,7 @@ pub fn start_admin_server(
                     );
                 };
                 if !client.is_logged_in() {
+                    warn!("Admin: POST /send not connected");
                     return json_response_status(req, 503, r#"{"error":"Not connected"}"#);
                 }
 
@@ -565,9 +569,7 @@ pub fn start_admin_server(
                 let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                 let task_active_client = active_client.clone();
                 let task = Box::pin(async move {
-                    // A reconnect between the check above and this task running
-                    // replaces the client; sending through the old one would go
-                    // out on a socket that is already gone.
+                    info!("Admin: executor starting send_message to {jid}");
                     let result = if task_active_client.is_current(&client) {
                         client
                             .send_message(jid, message)
@@ -577,15 +579,18 @@ pub fn start_admin_server(
                     } else {
                         Err("WhatsApp client reconnected; try again".to_string())
                     };
+                    info!("Admin: executor send_message result: {:?}", result);
                     let _ = result_tx.send(result);
                 });
                 if task_tx.try_send(task).is_err() {
+                    warn!("Admin: executor channel unavailable");
                     return json_response_status(
                         req,
                         503,
                         r#"{"error":"WhatsApp executor is unavailable"}"#,
                     );
                 }
+                info!("Admin: waiting for send_message outcome (timeout {SEND_TIMEOUT:?})");
                 match result_rx.recv_timeout(SEND_TIMEOUT) {
                     Ok(Ok(message_id)) => {
                         info!("Admin: sent {message_id} to {to}");
@@ -596,12 +601,18 @@ pub fn start_admin_server(
                         });
                         json_response(req, &body.to_string())
                     }
-                    Ok(Err(error)) => json_response_status(req, 502, &error_body(&error)),
-                    Err(_) => json_response_status(
-                        req,
-                        504,
-                        r#"{"error":"Send did not complete in time"}"#,
-                    ),
+                    Ok(Err(error)) => {
+                        warn!("Admin: send_message failed: {error}");
+                        json_response_status(req, 502, &error_body(&error))
+                    }
+                    Err(_) => {
+                        warn!("Admin: send_message timed out waiting for executor");
+                        json_response_status(
+                            req,
+                            504,
+                            r#"{"error":"Send did not complete in time"}"#,
+                        )
+                    }
                 }
             },
         )?;

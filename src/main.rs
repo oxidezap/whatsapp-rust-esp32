@@ -199,19 +199,30 @@ fn main() -> Result<()> {
     // on the serial monitor (the compile-time default is INFO). The C log macros are
     // compiled out above INFO, so this only unmasks the Rust-side debug records routed
     // through esp_log_write. It keeps the demo's protocol flow visible on the wire;
-    // drop to LevelFilter::Info for a quieter, slightly faster build.
-    log::set_max_level(log::LevelFilter::Debug);
-    unsafe {
-        esp_idf_svc::sys::esp_log_level_set(
-            c"*".as_ptr(),
-            esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
-        );
-        // Async timers are short-lived RAII objects; their DEBUG drop message is
-        // routine noise rather than a resource failure.
-        esp_idf_svc::sys::esp_log_level_set(
-            c"esp_idf_svc::timer".as_ptr(),
-            esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
-        );
+    // on chips without PSRAM, drop to LevelFilter::Info to avoid allocating massive XML
+    // formatted strings on the heap during multi-device fanout (DisplayableNodeRef).
+    if whatsapp_esp32::runtime::HAS_PSRAM {
+        log::set_max_level(log::LevelFilter::Debug);
+        unsafe {
+            esp_idf_svc::sys::esp_log_level_set(
+                c"*".as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
+            );
+            // Async timers are short-lived RAII objects; their DEBUG drop message is
+            // routine noise rather than a resource failure.
+            esp_idf_svc::sys::esp_log_level_set(
+                c"esp_idf_svc::timer".as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
+            );
+        }
+    } else {
+        log::set_max_level(log::LevelFilter::Info);
+        unsafe {
+            esp_idf_svc::sys::esp_log_level_set(
+                c"*".as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
+            );
+        }
     }
 
     // Capture the REAL cause of a Rust panic (location + message) before the runtime
@@ -320,13 +331,35 @@ fn main() -> Result<()> {
     #[cfg(feature = "admin")]
     info!("Admin: http://{_ip}:{ADMIN_PORT}/dashboard");
 
+    let main_hwm = unsafe { esp_idf_svc::sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
     info!(
-        "Free heap: {} bytes (internal: {} bytes)",
+        "Free heap: {} bytes (internal: {} bytes); main_task stack never-used: {} bytes",
         unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
-        unsafe { esp_idf_svc::sys::esp_get_free_internal_heap_size() }
+        unsafe { esp_idf_svc::sys::esp_get_free_internal_heap_size() },
+        main_hwm
     );
 
-    let jh = spawn_thread(&Esp32Executor::default_thread_config(), move || {
+    if whatsapp_esp32::runtime::HAS_PSRAM {
+        let jh = spawn_thread(&Esp32Executor::default_thread_config(), move || {
+            run_executor(
+                executor,
+                runtime,
+                store,
+                device_status,
+                active_client,
+                maintenance,
+                push_name,
+            );
+        })?;
+
+        if let Err(e) = jh.join() {
+            error!("Executor thread panicked: {:?}", e);
+        }
+        Ok(())
+    } else {
+        unsafe {
+            esp_idf_svc::sys::vTaskPrioritySet(core::ptr::null_mut(), 5);
+        }
         run_executor(
             executor,
             runtime,
@@ -336,12 +369,8 @@ fn main() -> Result<()> {
             maintenance,
             push_name,
         );
-    })?;
-
-    if let Err(e) = jh.join() {
-        error!("Executor thread panicked: {:?}", e);
+        Ok(())
     }
-    Ok(())
 }
 
 /// A string provisioned in the default NVS partition, namespace `wa`.
@@ -471,7 +500,8 @@ fn run_executor(
     // for this core (sdkconfig.defaults), a wedged event loop is otherwise
     // invisible. The feed runs as a task, so it stops exactly when the loop does.
     let watchdog_registered = unsafe {
-        esp_idf_svc::sys::esp_task_wdt_add(core::ptr::null_mut()) == esp_idf_svc::sys::ESP_OK
+        let ret = esp_idf_svc::sys::esp_task_wdt_add(core::ptr::null_mut());
+        ret == esp_idf_svc::sys::ESP_OK || ret == esp_idf_svc::sys::ESP_ERR_INVALID_STATE
     };
     if watchdog_registered {
         runtime.spawn(Box::pin(feed_task_watchdog())).detach();
@@ -479,13 +509,12 @@ fn run_executor(
         error!("Failed to register wa-main with the task watchdog");
     }
 
-    // The zlib inflate state (one ~47.5 KB block) is built on this thread the
-    // first time a compressed frame is decoded, which on a board without PSRAM
-    // is the moment the login's largest frame is already sitting in the heap:
-    // the ESP32-C3 has ~58 KB free then, so the block never fits next to it.
-    // Built here, on a fresh heap, it is parked in the thread's pool and reused
-    // by every compressed frame this executor ever decodes.
-    whatsapp_rust::wacore_binary::zlib_pool::warm_pool();
+    // The zlib inflate state (one ~47.5 KB block) parks in thread-local storage.
+    // On boards without PSRAM (like ESP32-C3), AB props fetch is disabled, so
+    // holding ~47.5 KB in internal DRAM would exhaust the heap during AppState sync.
+    if whatsapp_esp32::runtime::HAS_PSRAM {
+        whatsapp_rust::wacore_binary::zlib_pool::warm_pool();
+    }
 
     executor.block_on(run_whatsapp(
         runtime,
@@ -758,7 +787,12 @@ async fn run_whatsapp_inner(
                         info!("QR CODE (valid for {}s)", qr.timeout.as_secs());
                         ds.set_qr_code(qr.code.clone());
                         if MOCK_AUTOPAIR && !scanned.swap(true, Ordering::Relaxed) {
-                            auto_scan_qr(&qr.code).await;
+                            let code = qr.code.clone();
+                            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                                Box::pin(async move {
+                                    auto_scan_qr(&code).await;
+                                });
+                            fut.await;
                         }
                     }
                     Event::PairingQrCodesExhausted(_) => {
@@ -815,7 +849,11 @@ async fn run_whatsapp_inner(
                             if text == Some(PING_TRIGGER) {
                                 let ctx =
                                     MessageContext::from_inbound(inbound, Arc::clone(&client));
-                                handle_message(&ctx).await;
+                                let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                                    Box::pin(async move {
+                                        handle_message(&ctx).await;
+                                    });
+                                fut.await;
                             }
                         }
                     }

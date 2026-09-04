@@ -76,7 +76,10 @@ fn last_reset_str() -> &'static str {
 /// is `u8` on this port, so the high-water mark is already in bytes. `None` if
 /// the task isn't registered (e.g. before it spawns).
 fn stack_free_min(name: &core::ffi::CStr) -> Option<u32> {
-    let handle = unsafe { sys::xTaskGetHandle(name.as_ptr()) };
+    let mut handle = unsafe { sys::xTaskGetHandle(name.as_ptr()) };
+    if handle.is_null() && name == c"wa-main" {
+        handle = unsafe { sys::xTaskGetHandle(c"main".as_ptr()) };
+    }
     if handle.is_null() {
         None
     } else {
@@ -171,17 +174,22 @@ pub fn log_memory_profile(at: &str) {
     let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
     let free = unsafe { sys::heap_caps_get_free_size(cap) };
     let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
-    let fmt = |v: Option<u32>| match v {
-        Some(v) => v.to_string(),
-        None => "-".to_string(),
-    };
+    struct Opt(Option<u32>);
+    impl std::fmt::Display for Opt {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {
+                Some(v) => write!(f, "{v}"),
+                None => write!(f, "-"),
+            }
+        }
+    }
     log::info!(
         "memory at {at}: internal heap {free} free, largest block {largest}; \
          stack never-used wa-main={} wa-blocking={} ws-transport={} wa-nvs={}",
-        fmt(stack_free_min(c"wa-main")),
-        fmt(stack_free_min(c"wa-blocking")),
-        fmt(stack_free_min(c"ws-transport")),
-        fmt(stack_free_min(c"wa-nvs")),
+        Opt(stack_free_min(c"wa-main")),
+        Opt(stack_free_min(c"wa-blocking")),
+        Opt(stack_free_min(c"ws-transport")),
+        Opt(stack_free_min(c"wa-nvs")),
     );
 }
 
