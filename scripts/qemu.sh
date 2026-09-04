@@ -4,7 +4,7 @@
 #   scripts/qemu.sh build          # cargo build --release --features qemu, with sdkconfig.qemu layered in
 #   scripts/qemu.sh image [NAME]   # 16 MB flash image for board NAME (default "a"), provisioned with its own push name
 #   scripts/qemu.sh run [NAME]     # boot that image; serial on stdout, Ctrl-A X to quit
-#   scripts/qemu.sh test           # pair board "a", reboot it and check it stays paired, then message board "b"
+#   scripts/qemu.sh test           # pair a, reboot it with NVS intact, message b, gate stack floors
 #   scripts/qemu.sh all            # build + image + test (what CI runs)
 #
 # BOARD picks the emulated chip: esp32s3 (default) or esp32c3. Espressif's QEMU
@@ -294,6 +294,47 @@ wait_for_message() {
 # the Noise handshake against the mock server, then the session.
 BOOT_MARKERS=("whatsapp-esp32 starting" "Ethernet connected! IP:" "Bot built, starting run loop")
 
+# Floors for the worker-stack high-water marks in GET /metrics, in bytes.
+# Override per run (WA_MAIN_MIN=...). These are regression gates, not tuning
+# targets: on the C3 the tightest stack runs with only hundreds of bytes of
+# headroom, so a change that silently eats stack must break the suite loudly
+# instead of shipping an OOM to a board nobody boots here.
+WA_MAIN_MIN="${WA_MAIN_MIN:-2048}"
+WA_BLOCKING_MIN="${WA_BLOCKING_MIN:-512}"
+WS_TRANSPORT_MIN="${WS_TRANSPORT_MIN:-512}"
+WA_NVS_MIN="${WA_NVS_MIN:-512}"
+
+# metric_floor METRICS FIELD FLOOR: the high-water mark FIELD in the /metrics
+# document must be at least FLOOR bytes still free, or the run fails.
+metric_floor() {
+    local metrics="$1" field="$2" floor="$3" value
+    if ! value="$(json_field "$metrics" "int(d.get('$field') or 0)")"; then
+        log "/metrics did not parse as JSON: $metrics"
+        return 1
+    fi
+    if (( value < floor )); then
+        log "stack floor violated: $field=$value < $floor"
+        return 1
+    fi
+    log "ok: $field=$value >= $floor"
+}
+
+# metrics_gate PORT NAME: fetch /metrics from a board and check every stack
+# floor. Runs after the messaging stage so the marks cover pairing, reboot
+# and a full ping/pong round trip.
+metrics_gate() {
+    local port="$1" name="$2" metrics
+    if ! metrics="$(admin_get "$port" /metrics)"; then
+        log "GET /metrics failed on board $name: $metrics"
+        return 1
+    fi
+    echo "$metrics" | tee "$OUT_DIR/qemu-metrics-$name.json" >&2
+    metric_floor "$metrics" stack_wa_main_min "$WA_MAIN_MIN" || return 1
+    metric_floor "$metrics" stack_wa_blocking_min "$WA_BLOCKING_MIN" || return 1
+    metric_floor "$metrics" stack_ws_transport_min "$WS_TRANSPORT_MIN" || return 1
+    metric_floor "$metrics" stack_wa_nvs_min "$WA_NVS_MIN" || return 1
+}
+
 cmd_test() {
     trap stop_all EXIT
     local port_a port_b
@@ -383,8 +424,10 @@ cmd_test() {
     wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "Reaction sent" "Send took"
     wait_for_message "$port_a" "'Pong!'"
 
-    # Diagnostic only: the numbers are for the log, not a gate.
-    admin_get "$port_a" /metrics | tee "$OUT_DIR/qemu-metrics.json" >&2 || true
+    # Both boards covered pairing and a full round trip by now, so their
+    # high-water marks are the ones to gate on.
+    metrics_gate "$port_a" a || return 1
+    metrics_gate "$port_b" b || return 1
     echo >&2
     log "PASS"
 }
