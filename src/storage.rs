@@ -772,6 +772,11 @@ impl NvsStore {
                 }
                 inner.session_order.touched(address);
             }
+            // The RAM mirrors are an 8-entry cache over flash without PSRAM:
+            // a reboot with more records persisted must not pin them all in
+            // internal DRAM. Misses reload from NVS on demand.
+            inner.enforce_identities_cap();
+            inner.enforce_sessions_cap();
             for (key, value) in
                 flash.load_records(&flash.prekeys, "prekey", MAX_PREKEYS, MAX_SIGNAL_RECORD_LEN)?
             {
