@@ -596,6 +596,30 @@ fn record_names(namespace: &EspCustomNvs) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Every address persisted in a string-keyed namespace, decoded from the
+/// stored records. The RAM mirrors are an evicting cache without PSRAM, so
+/// anything that must see the *persisted* set (listings, counts, existence)
+/// walks this instead of the mirror. Reads one record at a time and drops
+/// each value immediately, so the transient peak is a single record.
+fn namespace_addresses(namespace: &EspCustomNvs, label: &str) -> Result<Vec<String>> {
+    let names = record_names(namespace)?;
+    let mut addresses = Vec::with_capacity(names.len());
+    for name in names {
+        if let Some(record) = read_blob(
+            namespace,
+            &name,
+            RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN,
+        )? {
+            let (key, _) = decode_record(&record)?;
+            addresses.push(
+                String::from_utf8(key.to_vec())
+                    .map_err(|error| StoreError::Validation(format!("invalid {label} key: {error}")))?,
+            );
+        }
+    }
+    Ok(addresses)
+}
+
 fn read_blob(namespace: &EspCustomNvs, name: &str, max_len: usize) -> Result<Option<Vec<u8>>> {
     let Some(len) = namespace.blob_len(name).map_err(nvs_error)? else {
         return Ok(None);
@@ -879,30 +903,58 @@ impl NvsStore {
         self.inner.lock().unwrap_or_else(recover_poisoned)
     }
 
-    /// Stats for the admin API.
+    /// Stats for the admin API. Without PSRAM the identity/session mirrors
+    /// are an evicting cache, so their counts come from flash (falling back
+    /// to the mirror if flash is unreadable); the other mirrors are complete
+    /// on every board.
     pub fn stats(&self) -> StoreStats {
         let s = self.lock();
+        let (sessions, identities) = if crate::runtime::HAS_PSRAM {
+            (s.sessions.len(), s.identities.len())
+        } else {
+            let sessions = self
+                .flash
+                .run(|flash| record_names(&flash.sessions))
+                .map(|names| names.len())
+                .unwrap_or(s.sessions.len());
+            let identities = self
+                .flash
+                .run(|flash| record_names(&flash.identities))
+                .map(|names| names.len())
+                .unwrap_or(s.identities.len());
+            (sessions, identities)
+        };
         StoreStats {
-            sessions: s.sessions.len(),
-            identities: s.identities.len(),
+            sessions,
+            identities,
             prekeys: s.prekeys.len(),
             sender_keys: s.sender_keys.len(),
             device_exists: s.device.is_some(),
         }
     }
 
-    /// List all signal session addresses.
-    pub fn list_sessions(&self) -> Vec<String> {
-        self.lock().sessions.keys().cloned().collect()
+    /// Every persisted signal session address. Without PSRAM the RAM mirror
+    /// is an evicting cache, so this walks flash (every write persists before
+    /// mirroring, so flash is the complete set); with PSRAM the mirror is
+    /// complete and no flash walk is needed.
+    pub fn list_sessions(&self) -> Result<Vec<String>> {
+        if crate::runtime::HAS_PSRAM {
+            return Ok(self.lock().sessions.keys().cloned().collect());
+        }
+        self.flash
+            .run(|flash| namespace_addresses(&flash.sessions, "session"))
     }
 
-    /// Clear all signal sessions, on flash and in RAM. Returns the count deleted.
+    /// Clear all signal sessions, on flash and in RAM. Returns the count of
+    /// persisted sessions erased (the RAM mirror may hold fewer).
     pub fn clear_sessions(&self) -> Result<usize> {
         let _operation = self.operation.lock().unwrap_or_else(recover_poisoned);
         let mut s = self.lock();
-        self.flash
-            .run(|flash| erase_namespace(&flash.sessions, "session"))?;
-        let count = s.sessions.len();
+        let count = self.flash.run(|flash| {
+            let count = record_names(&flash.sessions)?.len();
+            erase_namespace(&flash.sessions, "session")?;
+            Ok(count)
+        })?;
         s.sessions.clear();
         s.session_order.clear();
         Ok(count)
@@ -1144,7 +1196,10 @@ impl SignalStore for NvsStore {
     /// The trait default answers a conservative `true`, which makes the client
     /// run a full per-device PN->LID migration scan for every user it has never
     /// exchanged Signal state with. Both maps are small here, so answering for
-    /// real is cheap and skips that scan outright.
+    /// real is cheap and skips that scan outright. Without PSRAM the mirrors
+    /// are an evicting cache, so a RAM miss falls back to the persisted
+    /// addresses: answering `false` for state that is on flash would skip a
+    /// migration scan the client actually needs.
     async fn has_signal_state_for_user(&self, user: &str) -> Result<bool> {
         // Addresses are `user@server` (device 0) or `user:dev@server`, so a bare
         // `starts_with` would also match a longer user id with the same prefix.
@@ -1153,9 +1208,23 @@ impl SignalStore for NvsStore {
                 .strip_prefix(user)
                 .is_some_and(|rest| rest.starts_with('@') || rest.starts_with(':'))
         }
-        let s = self.lock();
-        Ok(s.sessions.keys().any(|k| matches(k, user))
-            || s.identities.keys().any(|k| matches(k, user)))
+        {
+            let s = self.lock();
+            if s.sessions.keys().any(|k| matches(k, user))
+                || s.identities.keys().any(|k| matches(k, user))
+            {
+                return Ok(true);
+            }
+            if crate::runtime::HAS_PSRAM {
+                return Ok(false);
+            }
+        }
+        let addresses = self.flash.run(|flash| {
+            let mut addresses = namespace_addresses(&flash.sessions, "session")?;
+            addresses.extend(namespace_addresses(&flash.identities, "identity")?);
+            Ok(addresses)
+        })?;
+        Ok(addresses.iter().any(|address| matches(address, user)))
     }
 
     async fn store_prekey(&self, id: u32, record: &[u8], _uploaded: bool) -> Result<()> {

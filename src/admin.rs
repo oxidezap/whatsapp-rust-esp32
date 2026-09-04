@@ -835,7 +835,16 @@ pub fn start_admin_server(
                 if let Err((status, body)) = auth.check(&req) {
                     return json_response_status(req, status, body);
                 }
-                let sessions = store.list_sessions();
+                let sessions = match store.list_sessions() {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        return json_response_status(
+                            req,
+                            500,
+                            &format!(r#"{{"error":"session list failed: {error}"}}"#),
+                        );
+                    }
+                };
                 let body = serde_json::json!({
                     "count": sessions.len(),
                     "addresses": sessions,
