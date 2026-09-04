@@ -337,6 +337,12 @@ Signal state and sync keys) is separate from the app, so flashing a new build
 keeps the device linked. A factory reset from the dashboard, or erasing that
 partition, is what unlinks it.
 
+Where the image goes, measured object by object, and what the size levers are
+actually worth: [docs/app-image-size.md](docs/app-image-size.md). Three of them
+are on by default (`std` without its backtrace symbolizer, `debug!`/`trace!`
+compiled out of release builds, the common-CA certificate bundle), together 5.7%
+of the image.
+
 ## Test without hardware
 
 Two layers stand in for a board, and both run in CI (`.github/workflows/ci.yml`)

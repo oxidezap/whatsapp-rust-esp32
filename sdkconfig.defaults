@@ -42,6 +42,20 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 # lives in the shared `sdkconfig.psram` overlay, not here and not in the chip
 # overlays.
 CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384
+
+# Root certificates: the common set (43 CAs) rather than the full Mozilla bundle.
+# The full one is 68,987 bytes, the second-largest object in the image after all
+# of our own Rust put together; this is 40,032 bytes of that back (see
+# docs/app-image-size.md). The common set includes 11 DigiCert roots, the CA
+# family Meta issues from, plus Amazon, GlobalSign, Google Trust Services, ISRG,
+# Sectigo, GoDaddy and IdenTrust.
+#
+# Only production builds are affected: a `mock-server` build configures no CA at
+# all (see SKIP_TLS_VERIFY in src/main.rs), so neither CI nor the QEMU suite
+# exercises this. If the gateway ever presents a chain rooted outside this set
+# the symptom is a loud TLS handshake failure at connect, not a silent downgrade;
+# the fix is this line, or a custom bundle via CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
 # Hardware AES accelerator.
 CONFIG_MBEDTLS_HARDWARE_AES=y
 

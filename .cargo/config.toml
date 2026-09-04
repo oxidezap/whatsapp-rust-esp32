@@ -19,6 +19,16 @@ target = "xtensa-esp32s3-espidf"
 
 [unstable]
 build-std = ["std", "panic_abort"]
+# Naming the feature set at all is what drops `std`'s default `backtrace`
+# feature, and with it the DWARF symbolizer (gimli and std's symbolize glue)
+# that `panic = "abort"` alone does NOT collect: 87,792 bytes of app image for
+# a symbolizer this firmware can never reach, since it aborts on panic and
+# captures the message and location through the hook in src/crash.rs and the
+# ESP-IDF core dump instead. See docs/app-image-size.md.
+#
+# `compiler-builtins-mem` is carried over from the default set; it is the one
+# entry there this build actually wants.
+build-std-features = ["compiler-builtins-mem"]
 
 [env]
 # Shared ESP-IDF version for every supported board.

@@ -30,7 +30,12 @@ esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
 # the `Request` type esp-idf-svc re-exports implements it but does not re-export it.
 embedded-svc = { version = "0.29", default-features = false, optional = true }
 
-log = "0.4"
+# `release_max_level_info` compiles out every `debug!`/`trace!` call site AND its
+# format string in release builds: measured at 83,456 bytes of the app image (see
+# docs/app-image-size.md). Debug builds are unaffected, so the protocol-level
+# tracing is still one `cargo build` away. Every marker the QEMU end-to-end suite
+# waits on is `info!`, so the release image still logs its way through pairing.
+log = { version = "0.4", features = ["release_max_level_info"] }
 # anyhow stays a direct dependency: esp-idf-svc errors are converted with `?`,
 # which needs anyhow's `std` feature. whatsapp-rust pulls anyhow with
 # default-features = false, so relying on its re-export alone would lose that.
