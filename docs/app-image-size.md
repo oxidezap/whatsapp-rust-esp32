@@ -8,8 +8,11 @@ actually in there, of what the obvious levers are really worth, and -- at the en
 
 The image measured throughout is the **4,112,672-byte baseline** this analysis
 started from. Three of the levers found here are now applied as defaults (A, B
-and D), so the tree currently builds **3,879,360 bytes -- 233,312 fewer, 5.7%**,
-and the factory partition went from 82.6% to 77.9% full. The composition tables
+and D), so the tree currently builds **3,914,320 bytes -- 198,352 fewer, 4.8%**,
+and the factory partition went from 82.6% to 78.6% full. (Re-measured 2026-09-04
+with `scripts/build.sh --board esp32c3 --release --features mock-server` plus
+`check-app-size.sh`: upstream memory work and review fixes since added ~35 KB
+back over the 3,879,360 the levers first landed at.) The composition tables
 below are the baseline's; the levers and what they cost are at the end. Every
 number was produced by building and measuring, not estimated.
 
@@ -275,7 +278,7 @@ App partitions align to 64 KiB, so what a 4 MB part has left after the app is:
 | Image | App slot | Left for core dump + store |
 | --- | --- | --- |
 | baseline 4,112,672 | 0x3F0000 | **0** -- does not fit at all |
-| A+B+D, what this tree builds, 3,879,360 | 0x3C0000 | 192 KB |
+| A+B+D, what this tree builds, 3,914,320 | 0x3C0000 | 192 KB |
 | A+B+C 3,776,016 | 0x3A0000 | 320 KB |
 
 So the shipped build would fit a 4 MB board with the 64 KB core dump and a
