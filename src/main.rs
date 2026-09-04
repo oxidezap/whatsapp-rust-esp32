@@ -219,7 +219,6 @@ fn main() -> Result<()> {
             esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
         );
     }
-    }
 
     // Capture the REAL cause of a Rust panic (location + message) before the runtime
     // aborts. The serial log is gone after reboot, so also persist it to RTC RAM

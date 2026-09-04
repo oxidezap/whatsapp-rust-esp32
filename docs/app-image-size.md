@@ -70,11 +70,12 @@ the map the way the linker resolved it.
 
 ## The top-level split
 
-```
+```text
 .flash.text     3,429,156   83.4%
 .flash.rodata     598,836   14.6%
 .iram0.text        71,606
 .dram0.data        12,416
+app descriptor, init array and alignment   658
                 ---------
 image total     4,112,672
 ```
@@ -138,8 +139,8 @@ the whole image. It is dominated by one type:
 `Message` and its variants together are **341,134 bytes, 8.3% of the image**, and
 the four largest single symbols in the entire binary are its codecs:
 
-```
- 66,812  <waproto::whatsapp::Message as buffa::Message>::merge_field::<&[u8]>
+```text
+  66,812  <waproto::whatsapp::Message as buffa::Message>::merge_field::<&[u8]>
  46,778  <waproto::whatsapp::Message as buffa::Message>::compute_size
  44,100  <waproto::whatsapp::Message as buffa::Message>::write_to::<Vec<u8>>
  21,782  <waproto::whatsapp::Message as core::clone::Clone>::clone
@@ -162,6 +163,10 @@ defined, `BotMetadata` and `AIRichResponseSubMessage` included.
 | `store` | 19,046 |
 | `history_sync` | 16,474 |
 | `download` | 7,056 |
+
+The module rows overlap -- shared generics are counted under each module that
+instantiates them -- so they sum past the 760,000-byte crate total, which is
+the authoritative figure. `client` dominates either way.
 
 ### 116 KB of backtrace symbolizer that can never run
 
@@ -203,6 +208,7 @@ references it unconditionally.
 | source paths (`.rs`, `/.cargo/`) | 37,888 |
 | protobuf/JSON field names | 11,383 |
 | dashboard HTML/CSS/JS | 7,286 |
+| unclassified runs | 68,012 |
 
 The largest single literals are the WhatsApp binary-XMPP token dictionaries in
 `wacore_binary` (`TOK_KEYS` 16,384, `TOK_BLOB` 9,080, `TOK_META` 8,192, `TOK_OFF`
