@@ -14,6 +14,8 @@ use std::sync::Arc;
 // Single upstream dependency: whatsapp-rust re-exports wacore/waproto/buffa and
 // the shared support crates, so there is no way for them to drift out of sync.
 use whatsapp_rust::bytes;
+#[cfg(feature = "mock-server")]
+use whatsapp_rust::handshake::NoiseCertPolicy;
 use whatsapp_rust::prelude::{wa, Bot, Event, MessageContext, MessageExt as _, MessageField};
 use whatsapp_rust::wacore::net::{HttpClient as _, HttpRequest};
 use whatsapp_rust::wacore::runtime::Runtime as _;
@@ -712,7 +714,7 @@ async fn run_whatsapp_inner(
 
     let event_status = device_status.clone();
     let event_active_client = active_client.clone();
-    let bot = Bot::builder()
+    let builder = Bot::builder()
         .with_backend_arc(backend)
         .with_transport_factory(transport_factory)
         .with_http_client(http_client)
@@ -760,7 +762,12 @@ async fn run_whatsapp_inner(
         // so a history sync buys this firmware nothing and costs it a lot:
         // upstream measures the drain at ~14 MB of allocation churn, more than
         // the whole PSRAM. Drop this line if the store ever keeps the history.
-        .skip_history_sync()
+        .skip_history_sync();
+
+    #[cfg(feature = "mock-server")]
+    let builder = builder.with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
+
+    let bot = builder
         .with_event_handler(ClientExitObserver {
             outcome: exit_outcome.clone(),
             temporary_ban_seconds: temporary_ban_seconds.clone(),
