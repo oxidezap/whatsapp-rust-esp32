@@ -178,6 +178,13 @@ pub struct Esp32Transport {
     shutdown: Arc<AtomicBool>,
 }
 
+impl Drop for Esp32Transport {
+    fn drop(&mut self) {
+        // Version resolution can cancel a connection before disconnect() is called.
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
 #[async_trait]
 impl Transport for Esp32Transport {
     async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {

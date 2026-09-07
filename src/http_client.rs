@@ -7,6 +7,10 @@ use whatsapp_rust::wacore::net::{HttpClient, HttpRequest, HttpResponse, Streamin
 
 use crate::transport::EspTlsStream;
 
+#[path = "http_chunked.rs"]
+mod http_chunked;
+use http_chunked::ChunkedReader;
+
 /// Socket-level bound on every media/version request. Without one a peer that
 /// accepts the connection and then goes quiet holds the calling thread forever;
 /// with the blocking download path that is the executor.
@@ -97,8 +101,19 @@ impl HttpClient for EspHttpClient {
         )?;
 
         let dial = qemu_host(host);
-        let mut stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
-        do_request(&mut stream, &raw_request, request.body.as_deref())
+        let response = (|| {
+            let mut stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
+            do_request(&mut stream, &raw_request, request.body.as_deref())
+        })();
+        if let Err(error) = &response {
+            log::error!(
+                "HTTP {} {}:{} failed: {error:#}",
+                request.method,
+                dial,
+                port
+            );
+        }
+        response
     }
 
     /// Advertised so upstream streams media straight into its decryptor instead
@@ -385,7 +400,7 @@ fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
     };
 
     let status_code = parse_status_code(&header_buf[..header_end])?;
-    let content_length = parse_streaming_body_length(&header_buf[..header_end])?;
+    let framing = parse_body_framing(&header_buf[..header_end])?;
 
     // Any bytes past the header delimiter were over-read body data. When the
     // response declares a length the reader stops there, so a decrypt-as-you-go
@@ -394,32 +409,37 @@ fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
     // reading to EOF is the only framing available.
     let overflow = header_buf.split_off(header_end);
     let rest = std::io::Cursor::new(overflow).chain(stream);
-    let body: Box<dyn std::io::Read + Send> = match content_length {
-        Some(length) => Box::new(ExactLengthReader {
+    let body: Box<dyn std::io::Read + Send> = match framing {
+        BodyFraming::Length(length) => Box::new(ExactLengthReader {
             inner: rest,
             remaining: length,
         }),
-        None => Box::new(rest),
+        BodyFraming::Close => Box::new(rest),
+        BodyFraming::Chunked => Box::new(ChunkedReader::new(rest)),
     };
 
     Ok(StreamingHttpResponse { status_code, body })
 }
 
-/// The declared body length, or `None` when the response is delimited by the
-/// connection closing. A transfer encoding we cannot decode is an error rather
-/// than a `None`: handing the framed bytes back as the body would corrupt the
-/// download and report it as a success.
-fn parse_streaming_body_length(header_bytes: &[u8]) -> Result<Option<u64>> {
+enum BodyFraming {
+    Close,
+    Length(u64),
+    Chunked,
+}
+
+fn parse_body_framing(header_bytes: &[u8]) -> Result<BodyFraming> {
     let header = std::str::from_utf8(header_bytes)?;
     let mut content_length = None;
+    let mut chunked = false;
     for line in header.lines().skip(1) {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        if name.trim().eq_ignore_ascii_case("transfer-encoding")
-            && !value.trim().eq_ignore_ascii_case("identity")
-        {
-            anyhow::bail!("Unsupported HTTP transfer encoding: {}", value.trim());
+        if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                anyhow::bail!("Unsupported HTTP transfer encoding: {}", value.trim());
+            }
+            chunked = true;
         }
         if name.trim().eq_ignore_ascii_case("content-length") {
             let parsed = value.trim().parse::<u64>()?;
@@ -428,7 +448,12 @@ fn parse_streaming_body_length(header_bytes: &[u8]) -> Result<Option<u64>> {
             }
         }
     }
-    Ok(content_length)
+    match (chunked, content_length) {
+        (true, Some(_)) => anyhow::bail!("Conflicting HTTP Transfer-Encoding and Content-Length"),
+        (true, None) => Ok(BodyFraming::Chunked),
+        (false, Some(length)) => Ok(BodyFraming::Length(length)),
+        (false, None) => Ok(BodyFraming::Close),
+    }
 }
 
 fn parse_status_code(header_bytes: &[u8]) -> Result<u16> {
@@ -451,9 +476,14 @@ fn parse_http_response(response_buf: &[u8]) -> Result<HttpResponse> {
         .ok_or_else(|| anyhow::anyhow!("Malformed HTTP response"))?;
 
     let status_code = parse_status_code(&response_buf[..header_end])?;
-    let content_length = parse_streaming_body_length(&response_buf[..header_end])?;
+    let framing = parse_body_framing(&response_buf[..header_end])?;
     let body_slice = &response_buf[header_end + 4..];
-    if let Some(expected_len) = content_length {
+    if let BodyFraming::Chunked = framing {
+        let mut body = Vec::new();
+        ChunkedReader::new(body_slice).read_to_end(&mut body)?;
+        return Ok(HttpResponse { status_code, body });
+    }
+    if let BodyFraming::Length(expected_len) = framing {
         let expected_usize = usize::try_from(expected_len)
             .map_err(|_| anyhow::anyhow!("Content-Length {expected_len} exceeds address space"))?;
         if body_slice.len() < expected_usize {
@@ -545,5 +575,71 @@ mod tests {
         // Subsequent read after EOF returns 0
         let mut after_eof = [0u8; 10];
         assert_eq!(reader.read(&mut after_eof).unwrap(), 0);
+    }
+
+    #[test]
+    fn buffered_chunked_response() {
+        let response = parse_http_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n",
+        ).unwrap();
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, b"abcde");
+        assert!(parse_http_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn streaming_chunked_response() {
+        struct Socket(std::io::Cursor<Vec<u8>>);
+        impl Read for Socket {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+        impl Write for Socket {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let socket = Socket(std::io::Cursor::new(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n".to_vec(),
+        ));
+        let mut response = do_streaming_request(socket, "GET / HTTP/1.1\r\n\r\n").unwrap();
+        let mut body = Vec::new();
+        response.body.read_to_end(&mut body).unwrap();
+        assert_eq!(response.status_code, 200);
+        assert_eq!(body, b"abc");
+    }
+
+    #[test]
+    fn rejects_ambiguous_body_framing() {
+        for headers in [
+            "Transfer-Encoding: chunked\r\nContent-Length: 0",
+            "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked",
+            "Transfer-Encoding: gzip, chunked",
+            "Content-Length: 1\r\nContent-Length: 1",
+        ] {
+            assert!(
+                parse_body_framing(format!("HTTP/1.1 200 OK\r\n{headers}\r\n\r\n").as_bytes())
+                    .is_err()
+            );
+        }
+        assert!(matches!(
+            parse_body_framing(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: ChUnKeD\r\n\r\n").unwrap(),
+            BodyFraming::Chunked
+        ));
+        assert!(matches!(
+            parse_body_framing(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n").unwrap(),
+            BodyFraming::Length(5)
+        ));
+        assert!(matches!(
+            parse_body_framing(b"HTTP/1.1 200 OK\r\n\r\n").unwrap(),
+            BodyFraming::Close
+        ));
     }
 }

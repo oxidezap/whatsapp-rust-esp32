@@ -97,6 +97,7 @@ cmd_build() {
     MCU="$BOARD" \
     ESP_IDF_SDKCONFIG_DEFAULTS="$(board_sdkconfig_defaults sdkconfig.qemu)" \
     ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
+    CARGO_WORKSPACE_DIR="$PWD" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
         cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
     test -f "$ELF"
@@ -233,6 +234,15 @@ crash_context() {
     log "--- end crash context ---"
 }
 
+connection_context() {
+    local serial="$1" line from
+    line=$(grep -n -m1 -E 'failed:|Failed to connect:|TLS connect failed:' "$serial" | cut -d: -f1) || true
+    [[ -n "$line" ]] || return 0
+    from=$(( line > 10 ? line - 10 : 1 ))
+    log "--- first connection failure, serial lines $from-$((line + 5)) ---"
+    sed -n "${from},$((line + 5))p" "$serial"
+}
+
 # wait_markers PID LOG MARKER...: each marker must show up in the serial log, in
 # order, before the deadline; a crash signature or a QEMU exit fails at once.
 wait_markers() {
@@ -248,7 +258,7 @@ wait_markers() {
                 log "firmware crashed before '$marker'"; crash_context "$serial"; return 1
             fi
             if (( SECONDS >= deadline )); then
-                log "timed out waiting for '$marker'"; tail -n 60 "$serial"; return 1
+                log "timed out waiting for '$marker'"; connection_context "$serial"; tail -n 60 "$serial"; return 1
             fi
             sleep 1
         done
