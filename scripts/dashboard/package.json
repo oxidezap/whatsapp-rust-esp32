@@ -1,0 +1,15 @@
+{
+  "name": "esp32-dashboard-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node vendor.mjs --check && node test.mjs",
+    "vendor": "node vendor.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "jsqr": "1.4.0",
+    "playwright": "1.63.0",
+    "qrcode": "1.5.4"
+  }
+}

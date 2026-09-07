@@ -1,7 +1,7 @@
 use embedded_svc::http::server::Connection;
 use embedded_svc::http::Headers;
 use esp_idf_svc::http::server::{Configuration, EspHttpServer, Request};
-use esp_idf_svc::io::Read;
+use esp_idf_svc::io::{Read, Write};
 use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,7 +92,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ESP32 WhatsApp</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js" integrity="sha384-Izc791esqyEy3BEIC42q7jbE0AaOkACziN+dyyXgYeDmpeMCLz0xA+xYN3aCd5zz" crossorigin="anonymous"></script>
+<script src="/qrcode.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0;padding:20px;max-width:600px;margin:0 auto}
@@ -111,7 +111,7 @@ input{width:100%;background:#111;color:#fff;border:1px solid #444;border-radius:
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
 .dot.ok{background:#25D366}.dot.err{background:#e53935}.dot.wait{background:#FFA000}
 #qr-section{text-align:center;padding:20px}
-#qr-section canvas{margin:10px auto;border-radius:8px}
+#qr-section canvas{display:block;margin:10px auto;max-width:100%;height:auto!important;image-rendering:pixelated}
 .pair-code{font-family:monospace;font-size:2em;font-weight:bold;letter-spacing:0.12em;color:#25D366;text-align:center;margin:14px 0}
 .hint{color:#888;font-size:0.85em;margin-top:8px}
 .device-info{font-family:monospace;font-size:0.85em;color:#aaa;word-break:break-all}
@@ -214,15 +214,21 @@ async function refresh(){
 
   // QR code
   const qrSec=document.getElementById('qr-section');
+  const qrCanvas=document.getElementById('qr-canvas');
   if(d.qr_code && d.qr_code!==lastQr){
-    lastQr=d.qr_code;
     qrSec.classList.remove('hidden');
-    document.getElementById('qr-canvas').innerHTML='';
-    QRCode.toCanvas(document.createElement('canvas'),d.qr_code,{width:280,margin:2,color:{dark:'#000',light:'#fff'}},function(err,canvas){
-      if(!err)document.getElementById('qr-canvas').appendChild(canvas);
-    });
+    qrCanvas.replaceChildren();
+    lastQr=null;
+    try{
+      QRCode.toCanvas(document.createElement('canvas'),d.qr_code,{width:280,margin:4,color:{dark:'#000',light:'#fff'}},function(err,canvas){
+        if(err){qrCanvas.textContent='Could not render QR code. Retrying...';return}
+        qrCanvas.replaceChildren(canvas);
+        lastQr=d.qr_code;
+      });
+    }catch(e){qrCanvas.textContent='Could not render QR code. Reload the dashboard to retry loading the renderer.'}
   } else if(!d.qr_code){
     qrSec.classList.add('hidden');
+    qrCanvas.replaceChildren();
     lastQr=null;
   }
 
@@ -464,6 +470,24 @@ pub fn start_admin_server(
         resp.write(DASHBOARD_HTML.as_bytes())?;
         Ok(())
     })?;
+
+    server.fn_handler::<anyhow::Error, _>(
+        "/qrcode.min.js",
+        esp_idf_svc::http::Method::Get,
+        |req| {
+            let mut resp = req.into_response(
+                200,
+                None,
+                &[
+                    ("Content-Type", "application/javascript"),
+                    ("Cache-Control", "no-cache"),
+                    ("X-Content-Type-Options", "nosniff"),
+                ],
+            )?;
+            resp.write_all(include_bytes!("assets/qrcode.min.js"))?;
+            Ok(())
+        },
+    )?;
 
     // GET /: JSON store stats
     {

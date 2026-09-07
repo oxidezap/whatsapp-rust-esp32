@@ -33,6 +33,26 @@ env:
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
 
 jobs:
+  dashboard:
+    name: Dashboard QR browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/dashboard/package-lock.json
+      - run: npm ci --ignore-scripts --prefix scripts/dashboard
+      - name: Install Chromium
+        run: |
+          mkdir -p target/dashboard-tmp
+          TMPDIR="$PWD/target/dashboard-tmp" npm exec --prefix scripts/dashboard -- playwright install --with-deps chromium
+      - run: npm test --prefix scripts/dashboard
+
   build:
     name: Build (${{ matrix.flavor }})
     runs-on: ubuntu-latest

@@ -422,12 +422,17 @@ the device is alive and its timers work.
 
 ## Admin endpoints
 
-The dashboard pulls `qrcode.min.js` from a CDN, so the browser needs internet.
+The firmware serves the dashboard and its QR renderer locally. The browser needs
+only access to the device, not internet access. QR contents and the admin token
+are never sent to an external QR service. The ESP32 still needs internet access
+to connect to WhatsApp. See [QR asset provenance](src/assets/README.md) for the
+vendored source, licenses, and browser test instructions.
 The API on port 8081:
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/dashboard` | The HTML dashboard. |
+| GET | `/qrcode.min.js` | Embedded QR renderer, no CDN dependency. |
 | GET | `/` | JSON store stats (heap, sessions, identities, prekeys, paired). |
 | GET | `/device` | Pairing status: QR, connection, PN/LID, linking-code state (redacted without token). |
 | GET | `/messages` | Last 16 inbound messages. Needs the token. |
