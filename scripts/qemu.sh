@@ -2,7 +2,7 @@
 # Build, image, and run the firmware inside Espressif's QEMU.
 #
 #   scripts/qemu.sh build          # cargo build --release --features qemu, with sdkconfig.qemu layered in
-#   scripts/qemu.sh image [NAME]   # 16 MB flash image for board NAME (default "a"), provisioned with its own push name
+#   scripts/qemu.sh image [NAME]   # 16 MB flash image for board NAME (default "a")
 #   scripts/qemu.sh run [NAME]     # boot that image; serial on stdout, Ctrl-A X to quit
 #   scripts/qemu.sh test           # pair a, reboot it with NVS intact, message b, gate stack floors
 #   scripts/qemu.sh all            # build + image + test (what CI runs)
@@ -102,10 +102,10 @@ cmd_build() {
     test -f "$ELF"
 }
 
-# The provisioning image for the default `nvs` partition: the push name the
-# firmware pairs under (src/main.rs `push_name`). Against the mock server the
-# push name selects the account, so this is what makes two boards from one
-# firmware image two different WhatsApp numbers.
+# The provisioning image for the default `nvs` partition: currently only the
+# admin token, when ADMIN_TOKEN is set in the environment. The mock server hands
+# each board its own number without any pre-seeding, so no per-board identity is
+# needed here; NAME only keeps the two boards' images apart.
 nvs_image() {
     local name="$1"
     local out="$OUT_DIR/nvs-$name.bin"
@@ -113,7 +113,6 @@ nvs_image() {
     cat > "$csv" <<CSV
 key,type,encoding,value
 wa,namespace,,
-push_name,data,string,esp32-qemu-$name
 CSV
     if [[ -n "${ADMIN_TOKEN:-}" ]]; then
         printf 'admin_token,data,string,"%s"\n' "${ADMIN_TOKEN//\"/\"\"}" >> "$csv"
@@ -137,7 +136,7 @@ cmd_image() {
     log "elf2image -> $app"
     "$ESPTOOL" --chip "$BOARD" elf2image --flash_size "$FLASH_SIZE" -o "$app" "$ELF"
     nvs="$(nvs_image "$name")"
-    log "merge_bin -> $image (push name esp32-qemu-$name)"
+    log "merge_bin -> $image"
     "$ESPTOOL" --chip "$BOARD" merge_bin --fill-flash-size "$FLASH_SIZE" -o "$image" \
         0x0 "$OUT_DIR/bootloader.bin" \
         0x8000 "$OUT_DIR/partition-table.bin" \
@@ -392,8 +391,8 @@ cmd_test() {
     [[ "$(json_field "$device" "d['connected'] and d['pn'] == '$pn_a'")" == True ]] \
         || { log "board a did not come back as the same connected device"; return 1; }
 
-    # 3. A second board with its own push name, so the mock server gives it its
-    #    own number. Board a pings it; b's bot answers with a reaction, a quoted
+    # 3. A second board, which the mock server pairs as its own number.
+    #    Board a pings it; b's bot answers with a reaction, a quoted
     #    reply and an edit; both sides must see the other's message land.
     boot b "$port_b" "$OUT_DIR/qemu-b-boot1.log"
     local pid_b=$BOOT_PID

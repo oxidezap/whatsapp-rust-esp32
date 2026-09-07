@@ -1,43 +1,24 @@
 # whatsapp-esp32
 
-> **How far down the hardware ladder can a real WhatsApp client go?**
->
-> We maintain [Baileys](https://github.com/WhiskeySockets/Baileys) and we wrote
-> [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust), so the WhatsApp
-> protocol is kind of our thing. One day we got curious about how small the
-> hardware running it could actually get. This is what came out, and honestly it
-> went a lot further than we expected.
->
-> It's a full, end-to-end-encrypted WhatsApp client running on an **ESP32-S3**: a
-> **240 MHz** microcontroller with **512 KB of internal SRAM** (only a few tens of
-> KB of it actually free at runtime) and **8 MB of external PSRAM**. That's the
-> kind of chip you'd normally use to blink an LED or read a temperature sensor.
->
-> And it genuinely works. It pairs over a QR code like any other linked device. It
-> runs the full Noise handshake and Signal double-ratchet crypto in software, with
-> no hardware AES. It sends and receives messages, reacts, edits, and serves a live
-> status dashboard over HTTP. All of that on a chip with thousands of times less
-> RAM and a small fraction of the clock speed a phone takes for granted.
+A real, end-to-end-encrypted WhatsApp client on an ESP32. We maintain
+[Baileys](https://github.com/WhiskeySockets/Baileys) and wrote
+[`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust), and at some point
+we started wondering how small a chip could still run the whole thing. Turns out
+the answer is a 240 MHz microcontroller with a few hundred KB of RAM. It pairs
+over QR like any linked device, does the Noise handshake and the Signal
+double ratchet in software, sends and receives messages, and serves a status
+dashboard over HTTP.
 
-A WhatsApp client running on **ESP32-S3**, **ESP32-C5** and **ESP32-C3**
-microcontrollers -- the last of those with no PSRAM at all, on ~400 KB of on-chip
-SRAM -- built on top of
-[`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
+It runs on the ESP32-S3, the ESP32-C5 and the ESP32-C3, the last one with no
+PSRAM at all. Pairing and Signal state live in flash, so a reboot comes back as
+the same linked device.
 
-It pairs over QR code or a phone-number linking code, keeps the pairing and its
-Signal state in flash so a reboot comes back as the same linked device, connects
-to WhatsApp (or a local mock server) over an encrypted WebSocket, runs a small
-demo bot, and serves a status dashboard over HTTP. See
-[Pair and use](#pair-and-use) for the bot behavior and dashboard.
-
-> **Heads up:** this is a demonstration and research project, not a product, and it
-> is not affiliated with, endorsed by, or connected to WhatsApp or Meta in any way.
-> Running an unofficial client against the real WhatsApp service can break their Terms
-> of Service and may get the number banned, so test with a spare number and the local
-> mock server. The `mock-server` cargo feature is deliberately insecure for that
-> local setup (any TLS certificate is accepted, the Noise server certificate is not
-> verified, and the firmware scans its own pairing QR); it is off by default, and a
-> build without it is what you point at the real gateway.
+> Not a product, and not affiliated with WhatsApp or Meta in any way. An
+> unofficial client can get the number banned, so test with a spare number and
+> the local mock server. The `mock-server` cargo feature is deliberately
+> insecure (any TLS cert accepted, Noise cert check skipped, QR auto-scanned).
+> It is off by default. A build without it is the one you point at the real
+> gateway.
 
 ## Hardware
 
@@ -45,74 +26,64 @@ demo bot, and serves a status dashboard over HTTP. See
 |-------|------|---------------|---------|-------|
 | ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release --features mock-server` |
 | [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release --features mock-server` |
-| ESP32-C3, 16 MB flash | RISC-V, single core | 16 MB / **none** | v5.5.5 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
+| ESP32-C3, 16 MB flash | RISC-V, single core | 16 MB / none | v5.5.5 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
 
-The source is the same for every board, and so is ESP-IDF v5.5.5. What differs is
-the target triple, whether the chip has PSRAM, and one chip-specific
-`sdkconfig.defaults.<chip>` overlay -- all of it in
-[`scripts/boards.sh`](scripts/boards.sh), the one table `scripts/build.sh`,
-`scripts/qemu.sh` and CI read. Adding a board is a row there plus that one file;
-neither script needs a per-board arm. CI is separate: a board is built, or
-emulated, only once it also has a row in the `build` (or `qemu-e2e`) matrix in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Same source and same ESP-IDF on all three. A board is one row in
+[`scripts/boards.sh`](scripts/boards.sh) plus one `sdkconfig.defaults.<chip>`
+overlay. That table drives `scripts/build.sh`, `scripts/qemu.sh` and CI. A board
+only gets built or emulated in CI once it also has a row in the `build` or
+`qemu-e2e` matrix in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-PSRAM is not required, but its absence is the interesting case. On the S3 and the
-C5 the whole Rust heap, the 256 KB executor stack and every worker stack but one
-live in 8 MB of external RAM -- the exception is `wa-nvs`, which is internal DRAM
-on every board because writing flash disables the cache. The **ESP32-C3 has none**: ~400 KB of on-chip SRAM is the
-entire memory system, ESP-IDF hands about 314 KB of it to the heap, and the
-firmware adapts by reading `CONFIG_SPIRAM`; no logic in `src/` branches on chip
-identity. What that changes, what it cost, and what is and is not verified:
+On the S3 and C5 the Rust heap, the 256 KB executor stack and every worker stack
+but one live in 8 MB of PSRAM. The exception is `wa-nvs`, which stays in
+internal DRAM on every board because writing flash disables the cache. The C3
+has no PSRAM, so its ~400 KB of on-chip SRAM is the whole memory system
+(about 314 KB reaches the heap) and the firmware sizes everything from
+`CONFIG_SPIRAM`. Nothing in `src/` checks which chip it is. The full story is in
 [docs/esp32c3.md](docs/esp32c3.md).
 
-Flash is the one hard floor: the app image is 4.1--4.5 MB and `partitions.csv`
-also wants 1 MB for the store, so a board needs **at least 8 MB** and the table as
-written assumes 16 MB. The common 4 MB C3 devkits cannot hold it.
-
-Which other Espressif parts could host this firmware, what each would cost, and
-which emulator can stand in for it in CI:
-[docs/board-support-map.md](docs/board-support-map.md).
+Flash is the hard floor. The app is ~4.2 MB and `partitions.csv` reserves 1 MB
+for the store, so a board needs at least 8 MB and the table assumes 16 MB. The
+common 4 MB C3 devkits do not fit. For what else could run this and on which
+emulator, see [docs/board-support-map.md](docs/board-support-map.md).
 
 ## How it works
 
-`whatsapp-rust` is platform-agnostic: the protocol engine is written against
-four traits, and a platform supplies them. This repository is one crate with two
-targets. The library, `whatsapp_esp32`, is the ESP32 platform: exactly those four
-implementations, plus the pieces a firmware around them tends to need. The
-binary, `whatsapp-esp32`, is the demo firmware built on it.
+`whatsapp-rust` does not know about hardware. It defines four traits and the
+platform fills them in. This repo is one crate with two targets. The library is
+the ESP32 platform, the binary is a demo firmware on top of it.
 
-| Module | Provides | `whatsapp-rust` contract |
-|--------|----------|--------------------------|
-| `storage` | `NvsStore` | `Backend`. The linked device, the Signal state and the app-state sync keys live in an NVS partition (`wa_store` by default) and survive reboots; the rest is a RAM cache. |
-| `transport` | `Esp32TransportFactory` | `TransportFactory`. ESP-IDF mbedTLS under the crate's own single-owner WebSocket client (`ws`), driven on its own thread. |
-| `http_client` | `EspHttpClient` | `HttpClient`. Streaming HTTP/1.1 over ESP-IDF TLS/TCP with bounded RAM (media, version fetch). |
-| `runtime` | `Esp32Runtime`, `Esp32Executor`, `BlockingWorker` | `Runtime`. `edge-executor` event loop that parks when idle; `spawn_blocking` runs on a dedicated `wa-blocking` thread so key generation never stalls the loop. |
+| Module | Provides | Contract |
+|--------|----------|----------|
+| `storage` | `NvsStore` | `Backend`. Device, Signal state and sync keys live in the `wa_store` NVS partition and survive reboots. The rest is a RAM cache. |
+| `transport` | `Esp32TransportFactory` | `TransportFactory`. ESP-IDF mbedTLS under the crate's own single-owner WebSocket client (`ws`), on its own thread. |
+| `http_client` | `EspHttpClient` | `HttpClient`. Streaming HTTP/1.1 over ESP-IDF TLS/TCP with bounded RAM. |
+| `runtime` | `Esp32Runtime`, `Esp32Executor`, `BlockingWorker` | `Runtime`. An `edge-executor` loop that parks when idle. `spawn_blocking` runs on a dedicated thread so key generation never stalls the loop. |
 | `psram_alloc` | `PsramAllocator` | Optional global allocator that keeps the Rust heap in PSRAM. |
-| `supervisor` | `DeviceStatus`, `ActiveClient`, `MaintenanceCoordinator` | Firmware bookkeeping: which client is live, what the dashboard shows, the one path that erases or reboots. |
-| `metrics`, `crash` | system telemetry, panic and core-dump capture | What the dashboard's `/metrics` reports. |
-| `admin` (feature `admin`, default on) | `start_admin_server` | The HTTP dashboard and API. |
-| `src/main.rs` | the demo firmware | WiFi + SNTP + mDNS bringup, the executor thread, a supervisor that rebuilds the bot when it exits, the ping/pong bot. |
+| `supervisor` | `DeviceStatus`, `ActiveClient`, `MaintenanceCoordinator` | Bookkeeping. Which client is live, what the dashboard shows, the one path that erases or reboots. |
+| `metrics`, `crash` | telemetry, panic and core-dump capture | What `/metrics` reports. |
+| `admin` (default on) | `start_admin_server` | The dashboard and API. |
+| `src/main.rs` | demo firmware | WiFi + SNTP + mDNS, the executor thread, a supervisor that rebuilds the bot when it exits, the ping/pong bot. |
 
 ## Using it as a library
 
-There is no wrapper around `Bot`, no ESP32 event type and no extension trait:
-a firmware on this crate writes the same `Bot::builder()` code as a desktop
-program, with the four platform values plugged in, and reads `whatsapp-rust`'s
-own documentation for everything else.
+No wrapper around `Bot` and no ESP32 event type. You write the same
+`Bot::builder()` code as on desktop, plug in the four platform values, and read
+`whatsapp-rust` docs for the rest.
 
 ```toml
 [dependencies]
 # Both from git, at the same whatsapp-rust revision this crate's Cargo.toml
-# names: two different whatsapp_rust packages in one build would give the
-# Bot builder trait objects the platform types do not implement.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "bb5aa3aa3f3881a4bb958aaa9b7daa66c6f863d7", default-features = false }
+# names. Two different whatsapp_rust copies in one build would hand the Bot
+# builder trait objects the platform types do not implement.
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "2dfdb1d44fe8d56007e3e805c217999d6c1c1321", default-features = false }
 whatsapp-esp32 = { git = "https://github.com/oxidezap/whatsapp-rust-esp32", default-features = false }
 esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
 anyhow = "1"
 log = "0.4"
 ```
 
-`examples/minimal.rs`, which CI compiles for the target (this is a copy):
+`examples/minimal.rs`, compiled by CI so it cannot rot (this is a copy):
 
 ```rust
 //! The smallest firmware on the library: the same `Bot::builder()` code as on a
@@ -130,6 +101,10 @@ use whatsapp_rust::bot::Bot;
 use whatsapp_rust::prelude::MessageExt as _;
 
 // The Rust heap goes to PSRAM; internal DRAM stays free for FreeRTOS and mbedTLS.
+// Only on a build that has PSRAM: on the ESP32-C3 there is one heap and it is
+// internal DRAM, so the plain ESP-IDF allocator is the right one. `esp_idf_spiram`
+// is the cfg esp-idf-sys derives from CONFIG_SPIRAM.
+#[cfg(esp_idf_spiram)]
 #[global_allocator]
 static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
     whatsapp_esp32::psram_alloc::PsramAllocator;
@@ -146,8 +121,9 @@ fn main() -> anyhow::Result<()> {
     // One runtime, one executor. The runtime is cheap to clone; clone it per Bot.
     let (runtime, executor) = Esp32Runtime::create_default()?;
 
-    // The executor needs a large stack (the send path has deep frames), which
-    // only PSRAM can afford; `default_thread_config` is 256 KB there.
+    // The executor needs a large stack (the send path has deep frames):
+    // `default_thread_config` is 256 KB of PSRAM, or 32 KB of internal DRAM on a
+    // chip without any.
     let main_thread = spawn_thread(&Esp32Executor::default_thread_config(), move || {
         executor.block_on(async move {
             let bot = Bot::builder()
@@ -185,61 +161,35 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-`Esp32TransportFactory::default()` and `EspHttpClient::default()` talk to the
-production gateway with the server certificate verified against ESP-IDF's root
-bundle; `::new(url, skip_tls_verify)` is for a local mock server. The threads the
-library starts (`ws-transport`, `wa-blocking`) can be given other stacks,
-priorities or cores through `Esp32TransportFactory::with_thread_config` and
-`BlockingWorker::start_with`, both taking esp-idf-hal's own
-`ThreadSpawnConfiguration`.
+`::default()` on the transport and HTTP client targets the production gateway
+with certificates verified. `::new(url, skip_tls_verify)` is for a local mock
+server. Thread stacks, priorities and cores can be tuned through
+`Esp32TransportFactory::with_thread_config` and `BlockingWorker::start_with`.
 
-What the firmware around it has to provide, all of which `src/main.rs`,
-`sdkconfig.defaults` and `partitions.csv` show working:
+The firmware around it provides four things (`src/main.rs`,
+`sdkconfig.defaults` and `partitions.csv` show all of them working). PSRAM for
+`malloc` and task stacks plus a 256 KB executor stack. A `wa_store` NVS
+partition, 1 MB here. mbedTLS allocating from external memory, and the task
+watchdog leaving the executor's idle task alone since the blocking worker runs
+below idle priority. And time, because the Noise handshake needs a roughly
+correct clock, so SNTP starts before the first connect.
 
-- **PSRAM**, enabled for `malloc` and for task stacks
-  (`CONFIG_SPIRAM_USE_MALLOC`, `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM`), and a
-  large stack for the executor thread (`Esp32Executor::default_thread_config`
-  takes 256 KB there).
-- **A `wa_store` NVS partition** (1 MB here), or any name passed to `NvsStore::open`.
-- **mbedTLS allocating from external memory** (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`),
-  and the **task watchdog not checking the idle task** on the executor's core,
-  since the blocking worker runs below idle priority there.
-- **Time**: the Noise handshake needs a roughly correct clock, so start SNTP
-  before the first connect.
-
-Since `whatsapp-rust` 0.7.0 a single upstream dependency is enough: the crate re-exports
-`wacore`, `waproto`, `buffa` and the shared support crates, so they can never
-resolve to a different version than the one it was built against. It is pinned
-to a git revision in `Cargo.toml` (the builder options this firmware relies on
-are newer than the 0.7.0 release) with `default-features = false`, which drops
-the desktop-only features (tokio, SQLite, ureq, SIMD). A consumer of the library
-must name the same revision.
-
-Everything is then reached through it — `whatsapp_rust::wacore::net`,
-`whatsapp_rust::prelude::{wa, MessageField, ...}`, `whatsapp_rust::async_trait`,
-and so on. `anyhow` and `futures` remain direct dependencies because this crate
-needs feature flags (`anyhow/std`, `futures/executor`) that `whatsapp-rust` does
-not enable.
-
-Requires a Rust toolchain of at least **1.94** (the 0.7.0 workspace MSRV; its
-crates are edition 2024). The Xtensa `esp` channel is well past that.
+One upstream dependency is enough since `whatsapp-rust` 0.7.0. It re-exports
+`wacore`, `waproto`, `buffa` and the shared crates, so they can never drift out
+of sync. Pin the same git revision this crate names, with
+`default-features = false` to drop the desktop-only pieces (tokio, SQLite,
+ureq, SIMD). `anyhow` and `futures` stay direct because this crate needs feature
+flags on them that `whatsapp-rust` does not enable. Needs Rust 1.94 or newer.
 
 ## Prerequisites
 
-- The Espressif Rust toolchain: `cargo install espup && espup install`
-  (`rust-toolchain.toml` pins `channel = "esp"`; the same toolchain carries the
-  RISC-V target the C5 uses).
-- `cargo install ldproxy` (the linker wrapper referenced by `.cargo/config.toml`).
-- `cargo install espflash` for flashing and monitoring.
-- ESP-IDF is downloaded and built automatically by `esp-idf-sys` on the first
-  build (into `.embuild/`, a few GB; subsequent builds reuse it): **v5.5.5**
-  unified for all three boards.
-- Host tools the ESP-IDF build needs: `git`, `python3`, `cmake`, `ninja`, `clang`.
+- `cargo install espup && espup install` (`rust-toolchain.toml` pins the `esp` channel).
+- `cargo install ldproxy` and `cargo install espflash`.
+- ESP-IDF v5.5.5, fetched and built by `esp-idf-sys` on the first build into
+  `.embuild/`. A few GB, reused afterwards.
+- Host tools: `git`, `python3`, `cmake`, `ninja`, `clang`.
 
 ## Configure
-
-Copy the template and fill it in (the project still builds without a `.env`, but
-won't connect until WiFi is set):
 
 ```bash
 cp .env.example .env
@@ -248,202 +198,163 @@ cp .env.example .env
 ```dotenv
 WIFI_SSID=your-ssid          # 2.4 GHz only
 WIFI_PASS=your-password
-WHATSAPP_WS_URL=wss://192.168.0.4:8080/ws/chat   # optional; defaults to the mock (with `mock-server`) or the gateway
-WHATSAPP_PUSH_NAME=esp32-test                    # optional; the name the device pairs under
+WHATSAPP_WS_URL=wss://192.168.0.4:8080/ws/chat   # optional; mock default (with `mock-server`) or gateway
 ADMIN_TOKEN=                                     # optional; see "Securing the dashboard"
 ```
 
-These are read at build time and baked into the firmware, so changing them needs
-a rebuild + reflash.
+Everything here is baked in at build time, so a change means rebuild plus
+reflash. The project builds without a `.env` but will not connect until WiFi is
+set.
 
-The push name alone can also be set at flash time, without a rebuild, as a string
-in the default NVS partition (namespace `wa`, key `push_name`). Against the mock
-server the push name selects the account, so this is how several boards flashed
-with one image end up as different numbers; it is also what the two-board QEMU
-test uses. `esp-idf-nvs-partition-gen` (pip) turns a CSV into the partition image:
+The admin token can also be flashed in without a rebuild, as an `admin_token`
+string in the `wa` namespace of the default NVS partition. That keeps it out of
+the firmware image:
 
 ```bash
-printf 'key,type,encoding,value\nwa,namespace,,\npush_name,data,string,kitchen-esp32\n' > nvs.csv
+printf 'key,type,encoding,value\nwa,namespace,,\nadmin_token,data,string,kitchen-secret\n' > nvs.csv
 python -m esp_idf_nvs_partition_gen generate nvs.csv nvs.bin 0x6000
 espflash write-bin 0x9000 nvs.bin        # the `nvs` partition in partitions.csv
 ```
 
-Which server the firmware trusts is the `mock-server` cargo feature, off by
-default. With it the firmware defaults to the mock server URL and connects with
-**no** CA configured, so esp-tls applies `MBEDTLS_SSL_VERIFY_NONE` and accepts
-whatever certificate the server presents (the mock server, `barback`, mints a
-fresh ephemeral self-signed cert on every start, so there is nothing stable to pin
-against; this relies on `CONFIG_ESP_TLS_INSECURE=y` +
-`CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` in `sdkconfig.defaults`),
-`whatsapp-rust` skips Noise server-certificate verification, and the pairing QR is
-auto-scanned:
+Which server to trust is the `mock-server` cargo feature, off by default. With
+it the firmware talks to the mock URL with no CA configured, so esp-tls skips
+verification entirely (the mock mints a fresh self-signed cert per start, so
+pinning is pointless), `whatsapp-rust` skips the Noise cert check, and the QR
+is auto-scanned:
 
 ```bash
 cargo build --release --features mock-server
 ```
 
-Without it (a bare `cargo build --release`) the firmware defaults to the real
-WhatsApp gateway and verifies both the ESP-IDF root certificate bundle and the
-Noise certificate chain.
+Without it the firmware talks to the real gateway and verifies both the TLS
+chain and the Noise certificates.
 
 ### Securing the dashboard
 
-The dashboard and its API listen on port 8081 for anyone who can reach the
-device. That was already enough to factory-reset it, and this firmware also lets
-that port read recent messages and send as the linked account, so there is a
-shared secret you can require:
+Port 8081 is open to the LAN. Without a token it reads recent messages, sends
+as the account and factory-resets the device. Set one:
 
 ```dotenv
 ADMIN_TOKEN=something-long-and-random
 ```
 
-With one set, `/send`, `/messages`, `/pair-code`, `/reset`, `/reboot`, and
-`/sessions` (both GET and DELETE) answer `401` unless the request carries
-`X-Admin-Token`. The dashboard has a field for it and keeps it in that browser's
-session storage. The status routes (`/`, `/device`, `/metrics`, `/health`) stay
-open so the page can render before you type it in; sensitive pairing fields
-(`qr_code`, `pair_code`, `pn`, `lid`) on `/device` are redacted until the token is provided.
+Then `/send`, `/messages`, `/pair-code`, `/reset`, `/reboot` and `/sessions`
+answer `401` without an `X-Admin-Token` header. The dashboard asks for the token
+once and keeps it in session storage. Status routes (`/`, `/device`,
+`/metrics`, `/health`) stay open so the page renders first, with pairing fields
+redacted until the token is given. Leave it unset and the device works as
+before, with a warning at boot.
 
-Leave it unset and the device behaves as it always has, with a warning in the
-boot log naming what is exposed. Like the push name, it can also be provisioned
-at flash time as an `admin_token` string in the `wa` NVS namespace, which keeps
-it out of the firmware image.
-
-Two things a token does not fix: the API is plain HTTP, so the token and
-everything else crosses the LAN in cleartext (restrict device access to trusted,
-isolated local networks), and the `wa_store` partition is unencrypted, so anyone
-who can read the flash can read the pairing and the Signal state. Treat physical
-access to the board as full access to the account.
+A token does not fix two things. The API is plain HTTP, so everything crosses
+the LAN in cleartext; keep the device on a trusted network. And `wa_store` is
+unencrypted, so anyone reading the flash gets the pairing and the Signal state.
+Physical access is full access.
 
 ## Build
 
 ```bash
-cargo build --features mock-server              # ESP32-S3, debug (opt-level "z", fat LTO, ~14 MB ELF with debug info)
-cargo build --release --features mock-server    # ESP32-S3, release, against the local mock server
-cargo build --release                           # ESP32-S3, release, against the real gateway (see "Configure")
-scripts/build.sh --board esp32c5 --release --features mock-server   # ESP32-C5 (riscv32imac-esp-espidf, ESP-IDF v5.5.5)
+cargo build --features mock-server              # S3 debug against the mock server
+cargo build --release --features mock-server    # S3 release against the mock server
+cargo build --release                           # S3 release against the real gateway
+scripts/build.sh --board esp32c5 --release --features mock-server   # C5
 ```
 
-The S3 target (`xtensa-esp32s3-espidf`), `build-std`, and the `MCU` /
-`ESP_IDF_VERSION` environment variables all come from `.cargo/config.toml`, so a
-bare `cargo build` is the S3 build. `scripts/build.sh` is the same `cargo build`
-with the target and those two variables switched for the board named (`BOARD=...`
-in the environment works too, and `CARGO_CMD=clippy` runs clippy instead). Each
-board's ESP-IDF tree and build outputs never share a directory, so
-switching between them costs nothing but disk.
+A bare `cargo build` is the S3 build. Target, `build-std` and the `MCU` /
+`ESP_IDF_VERSION` variables come from `.cargo/config.toml`.
+`scripts/build.sh` repeats the same build for the named board (`BOARD=...` works
+too, `CARGO_CMD=clippy` runs clippy instead). Each board gets its own ESP-IDF
+tree and output dir, so switching boards costs disk only.
 
-What persists across a reflash of the app: the `wa_store` partition (the pairing,
-Signal state and sync keys) is separate from the app, so flashing a new build
-keeps the device linked. A factory reset from the dashboard, or erasing that
-partition, is what unlinks it.
+Reflashing the app keeps the device linked. Pairing, Signal state and sync keys
+live in `wa_store`, separate from the app partition. Only a factory reset, or
+erasing that partition, unlinks it.
 
-Where the image goes, measured object by object, and what the size levers are
-actually worth: [docs/app-image-size.md](docs/app-image-size.md). Three of them
-are on by default (`std` without its backtrace symbolizer, `debug!`/`trace!`
-compiled out of release builds, the common-CA certificate bundle), together 5.7%
-of the image.
+For where the bytes go and which size levers paid off:
+[docs/app-image-size.md](docs/app-image-size.md).
 
 ## Test without hardware
 
-Two layers stand in for a board, and both run in CI (`.github/workflows/ci.yml`)
-on pull requests and on pushes to `main`:
+CI runs two layers on pull requests and pushes to `main`.
 
-1. **Build for the real targets.** The `build` job compiles the firmware with
-   the pinned `esp` toolchain in five flavors -- the ESP32-S3, ESP32-C5 and
-   ESP32-C3 board builds, plus a QEMU build for each of the two emulated chips --
-   and fails when an app image no longer fits the factory partition
-   (`scripts/check-app-size.sh`). All five ELFs are uploaded as artifacts.
-2. **Pair, persist and message on QEMU.** The `qemu-e2e` job runs the QEMU
-   flavor on [Espressif's QEMU](https://github.com/espressif/esp-toolchain-docs/tree/main/qemu/esp32s3)
-   (an ESP32-S3 with 8 MB PSRAM and an OpenCores Ethernet MAC) against the same
-   mock server `whatsapp-rust`'s E2E suite uses, in three stages:
-   1. Board `a` boots with an empty `wa_store`, pairs over the QR flow and
-      reaches `Connected to WhatsApp!`; its dashboard must report the session.
-   2. Board `a` is stopped and booted again **from the same flash image**. It
-      must log `WhatsApp NVS loaded: device=true`, connect without ever
-      printing a QR code, and report the same number as before. That is the
-      persistence guarantee: what the firmware wrote to the emulated flash on
-      the first boot is what it reads back on the second.
-   3. Board `b`, provisioned with a different push name and so a different
-      number, boots alongside. `POST /send` on `a` sends it `🦀ping`; `b`'s
-      bot must receive it, react, reply quoting it and edit the reply; `a`
-      must see the `🏓 Pong!` land in its own `/messages`.
+1. Build all five flavors with the pinned toolchain (S3, C5 and C3 board
+   builds, plus a QEMU build per emulated chip) and fail if an image outgrows
+   the factory partition. All five ELFs upload as artifacts.
+2. Pair, persist and message on QEMU. Espressif's QEMU boots an emulated S3
+   (8 MB PSRAM, OpenCores Ethernet) against the same mock server the
+   `whatsapp-rust` E2E suite uses:
+   1. Board `a` boots with an empty store, pairs over QR, reaches
+      `Connected to WhatsApp!`.
+   2. Board `a` reboots from the same flash image. It must log
+      `WhatsApp NVS loaded: device=true`, connect without printing a QR, and
+      report the same number. That is the persistence guarantee.
+   3. Board `b` boots alongside with its own number. `POST /send` on `a`
+      sends `🦀ping`. `b` reacts, replies quoting it and edits the reply.
+      `a` sees the `🏓 Pong!` in `/messages`.
 
-   Nothing in that path is a stub: the instruction stream, the ESP-IDF build,
-   mbedTLS, the Noise handshake, the Signal key generation, the NVS writes and
-   the message encryption in both directions all run as they would on the chip.
+   Real instruction stream, real mbedTLS, real Noise handshake and real NVS
+   writes in both directions. Only the radio and the crypto accelerators are
+   missing (see below).
 
-The same flow runs locally with `scripts/qemu.sh`:
+Locally, same flow through `scripts/qemu.sh`:
 
 ```bash
-# once: Espressif's QEMU (these machines are not in upstream QEMU) and esptool.
-# The release ships one binary per architecture: xtensa for the S3, riscv32 for
-# the C3. Fetch the one for the board you want to emulate.
+# once: Espressif's QEMU fork (upstream QEMU lacks these machines) and esptool.
 R=https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417
 V=esp_develop_9.2.2_20260417-x86_64-linux-gnu
 
-# ESP32-S3 (Xtensa)
+# S3 (Xtensa)
 curl -sSfL -o qemu-xtensa.tar.xz "$R/qemu-xtensa-softmmu-$V.tar.xz"
 mkdir -p ~/qemu-xtensa && tar -xJf qemu-xtensa.tar.xz -C ~/qemu-xtensa
 export QEMU_XTENSA=~/qemu-xtensa/qemu/bin/qemu-system-xtensa
 
-# ESP32-C3 (RISC-V)
+# C3 (RISC-V)
 curl -sSfL -o qemu-riscv32.tar.xz "$R/qemu-riscv32-softmmu-$V.tar.xz"
 mkdir -p ~/qemu-riscv32 && tar -xJf qemu-riscv32.tar.xz -C ~/qemu-riscv32
 export QEMU_RISCV32=~/qemu-riscv32/qemu/bin/qemu-system-riscv32
 # both need libsdl2, libslirp, glib and pixman at runtime
 pip install esptool esp-idf-nvs-partition-gen   # the ESP-IDF python env under .embuild already has both
 
-scripts/qemu.sh build      # release build with --features qemu and sdkconfig.qemu, into target/qemu-esp32s3/
-BOARD=esp32c3 scripts/qemu.sh all   # the same, end to end, on the emulated ESP32-C3
-scripts/qemu.sh image a    # 16 MB flash image for board "a": bootloader + partition table + its NVS + app
-scripts/qemu.sh run a      # interactive: serial console on the terminal, Ctrl-A X quits
+scripts/qemu.sh build      # release + `qemu` feature + sdkconfig.qemu, into target/qemu-esp32s3/
+BOARD=esp32c3 scripts/qemu.sh all   # same, end to end, on the emulated C3
+scripts/qemu.sh image a    # 16 MB flash image for board "a": bootloader + partition table + NVS + app
+scripts/qemu.sh run a      # interactive serial console, Ctrl-A X quits
 scripts/qemu.sh test       # headless: the three stages above (needs images a and b)
 ```
 
-`run` reuses the image, so a board you paired interactively stays paired across
-runs, exactly as a real one would; delete `target/qemu-<board>/.../flash_image-a.bin` (or
+`run` reuses the image, so an interactively paired board stays paired across
+runs. Delete `target/qemu-<board>/.../flash_image-a.bin` (or rerun
 `scripts/qemu.sh image a`) for a fresh one.
 
-What the `qemu` feature changes, and nothing else: the network comes up over the
-emulated Ethernet MAC instead of WiFi (QEMU has no radio), so no `.env` is needed,
-and the default server URL becomes `wss://10.0.2.2:8080/ws/chat`, the host as seen
-from QEMU's user-mode network. `WHATSAPP_WS_URL` still overrides it, and a media or app-state URL the server
-hands out on `127.0.0.1`/`localhost` is dialed as `10.0.2.2` too, since inside the
-emulator loopback is the guest. The dashboard is forwarded to
-`http://localhost:8081` (board `b`: 8082), on loopback only, since it is unauthenticated. The overlay `sdkconfig.qemu` enables the
-OpenCores driver, switches the PSRAM probe to quad mode (what QEMU's generic SPI
-PSRAM answers), and moves mbedTLS's AES and SHA to software, because the emulated
-AES block never completes a DMA transfer and every TLS connect would spin forever
-in `aes_hal_wait_done()`. The heap routing, the 256 KB PSRAM stack and every
-other setting stay as on the board, so what the emulator exercises is the same
-firmware minus the radio and the crypto accelerators.
+The `qemu` feature changes one thing. The network comes up over emulated
+Ethernet instead of WiFi, since QEMU has no radio, so no `.env` is needed and
+the default server URL is the host as the guest sees it (`10.0.2.2`).
+`WHATSAPP_WS_URL` still overrides it, `127.0.0.1`/`localhost` URLs from the
+server are remapped there too, and the dashboard forwards to
+`http://localhost:8081` (`b` gets 8082). `sdkconfig.qemu` enables the OpenCores
+driver, switches the PSRAM probe to quad mode, and moves AES and SHA to
+software because the emulated AES block never finishes a DMA transfer. Heap
+routing and stacks stay as on hardware.
 
-`QEMU_GDB=1 scripts/qemu.sh run` starts QEMU with a gdb stub on port 1234 and the
-CPUs halted; `xtensa-esp32s3-elf-gdb` (from Espressif's binutils-gdb releases)
-with `target remote :1234` then shows every FreeRTOS task's backtrace, which is a
-far better view of a hang than the serial console.
+`QEMU_GDB=1 scripts/qemu.sh run` halts the CPUs with a gdb stub on port 1234.
+Attach `xtensa-esp32s3-elf-gdb` for a backtrace of every FreeRTOS task, which
+beats staring at a hung serial log.
 
-For `test` and `run` the mock server has to be listening on the host's port 8080,
-which is where the `whatsapp-rust` E2E setup puts it (see its
-`agent_docs/e2e_testing.md`). On a fork, CI skips `qemu-e2e` because the mock
-server image is private; the build job still runs.
+The mock server must listen on host port 8080, where the `whatsapp-rust` E2E
+setup puts it (see its `agent_docs/e2e_testing.md`). On forks CI skips
+`qemu-e2e` because the mock image is private. The build job still runs.
 
-What this cannot tell you: anything about the radio (WiFi association, RF
-calibration, PMF), timing that depends on real flash and PSRAM latency, and power.
-Those still need the board.
+QEMU cannot tell you about the radio, real flash/PSRAM timing, or power. Those
+need the board.
 
 ## Flash and monitor
 
-Install `cargo install espflash`. On Arch your user must be in the `uucp` group to
-access the serial port (`dialout` on Debian/Ubuntu).
+On Arch the user must be in `uucp` (`dialout` on Debian/Ubuntu).
 
-The S3 and C5 expose a built-in USB-Serial/JTAG (USB id `303a:1001`), so they show
-up directly as `/dev/ttyACM0`, with no external UART adapter needed; most ESP32-C3
-devkits bring UART0 out through a USB-serial bridge instead, so the C3 usually
-appears as `/dev/ttyUSB0` (which is also why its overlay leaves the console on
-UART0 -- see [docs/esp32c3.md](docs/esp32c3.md)). The commands below are for the
-S3; for another board add its `--chip` and use its target directory:
+The S3 and C5 show up as `/dev/ttyACM0` over built-in USB-Serial/JTAG (USB id
+`303a:1001`). Most C3 devkits use a USB-serial bridge instead and appear as
+`/dev/ttyUSB0`, which is why the C3 overlay leaves the console on UART0 (see
+[docs/esp32c3.md](docs/esp32c3.md)). Below is the S3 path. Other boards add
+`--chip` and use their target dir:
 
 | Board | `--chip` | Target directory |
 |-------|----------|------------------|
@@ -451,15 +362,13 @@ S3; for another board add its `--chip` and use its target directory:
 | ESP32-C5 | `esp32c5` | `target/riscv32imac-esp-espidf/<profile>/` |
 | ESP32-C3 | `esp32c3` | `target/riscv32imc-esp-espidf/<profile>/` |
 
-Confirm the link first:
-
 ```bash
-espflash board-info --port /dev/ttyACM0   # prints chip type, flash size, MAC
+espflash board-info --port /dev/ttyACM0   # chip type, flash size, MAC
 ```
 
-Flash the firmware. You must pass the ESP-IDF bootloader and **our** custom
-partition table explicitly. Without `--partition-table`, espflash falls back to a
-1.5 MB factory partition that the ~4.3 MB app does not fit:
+Flash with our bootloader and partition table spelled out. Without
+`--partition-table` espflash falls back to a 1.5 MB factory partition and the
+~4.2 MB app does not fit:
 
 ```bash
 espflash flash \
@@ -469,80 +378,71 @@ espflash flash \
   target/xtensa-esp32s3-espidf/debug/whatsapp-esp32
 ```
 
-`espflash` takes the ELF directly and converts it on the fly. The `dev` profile
-already builds at `opt-level = "z"`, so that path is the normal flow (use
-`release/` if you ran `cargo build --release`). The bootloader/partition-table
-binaries are produced by the ESP-IDF build under `target/.../debug/`. A successful
-flash prints `App/part. size 4,503,680/4,980,736 (90.42%)`. The second number is
-our 4864K partition, confirming it is in use.
-
-Useful flags: `--baud 921600` to flash faster, `--monitor` to drop into the serial
-console afterwards.
+`espflash` converts the ELF on the fly. The `dev` profile already builds at
+`opt-level = "z"`, so that path is the normal one (`release/` if you built
+with `--release`). A good flash prints something like
+`App/part. size 4,237,872/4,980,736 (85.09%)`. The second number is our 4864K
+partition, which confirms it is in use. Add `--baud 921600` to go faster,
+`--monitor` to land in the console afterwards.
 
 ### Watching the serial log
 
-In an interactive terminal, just append `--monitor` to the flash command (or run
-`espflash monitor --port /dev/ttyACM0 --elf target/.../whatsapp-esp32`; the `--elf`
-lets it symbolize panic backtraces). `CTRL+R` resets the chip, `CTRL+C` exits.
+Interactive: append `--monitor` to the flash command, or run
+`espflash monitor --port /dev/ttyACM0 --elf target/.../whatsapp-esp32`.
+The `--elf` symbolizes panic backtraces. `CTRL+R` resets, `CTRL+C` exits.
 
-Headless/scripted, `espflash monitor` is awkward (it wants to sync with the
-bootloader). To capture a fresh boot non-interactively, reset and read the raw
-device (the USB-CDC port ignores baud):
+Headless: `espflash monitor` wants to sync with the bootloader, so reset and
+read the raw device instead (USB-CDC ignores baud):
 
 ```bash
 espflash reset --port /dev/ttyACM0          # restart the app
-timeout 20 cat /dev/ttyACM0                  # capture boot: WiFi, IP, admin URL, heap
+timeout 20 cat /dev/ttyACM0                  # boot log: WiFi, IP, admin URL, heap
 ```
 
-A healthy boot ends with `WiFi connected! IP: <ip>`, the admin server starting on
-port 8081, and `Bot built, starting run loop`. With no server reachable at the
-configured URL you'll see TLS connect failures and an exponential reconnect backoff
-(`935ms → 1.056s → …`). That's expected, and a quick way to confirm the device is
-alive and its async timers work.
+A healthy boot ends with `WiFi connected! IP: <ip>`, the admin server on port
+8081 and `Bot built, starting run loop`. With no server reachable you get TLS
+failures and exponential backoff instead. That is still a good sign. It means
+the device is alive and its timers work.
 
 ## Pair and use
 
-1. After flashing, watch the serial log (or the dashboard) for the QR code.
-2. On your phone: WhatsApp > Linked Devices > Link a Device, and scan it. No
-   camera at hand? The dashboard's "Link with phone number" form asks the server
-   for an 8-character linking code instead (Link a Device > Link with phone
-   number instead).
-3. Open the dashboard at `http://esp32-whatsapp.local:8081/dashboard`
-   (mDNS) or `http://<device-ip>:8081/dashboard`. It renders the QR, shows the
-   paired PN/LID, the last inbound messages, free heap, and
-   session/identity/prekey counts, lets you send a text, and exposes Clear
-   Sessions / Factory Reset / Reboot actions.
-4. From a linked chat, send `🦀ping`. The device reacts with 🏓, replies
-   `🏓 Pong!` quoting your message, then edits the reply with the measured send
-   latency.
-5. Reboot or power-cycle it: it comes back linked. The pairing, the Signal
-   sessions and the app-state sync keys are in the `wa_store` flash partition;
-   only a factory reset (dashboard, or the server unlinking the device) erases
-   them.
+1. Flash, then watch the serial log or dashboard for the QR code.
+2. On the phone: WhatsApp > Linked Devices > Link a Device, and scan it. No
+   camera handy: the dashboard's "Link with phone number" form fetches an
+   8-character code instead.
+3. Dashboard at `http://esp32-whatsapp.local:8081/dashboard` (mDNS) or
+   `http://<device-ip>:8081/dashboard`. QR, paired PN/LID, recent messages,
+   free heap, session counts, a send box, and Clear Sessions / Factory Reset /
+   Reboot.
+4. Send `🦀ping` from a linked chat. The device reacts with 🏓, replies
+   `🏓 Pong!` quoting you, then edits the reply with the send latency.
+5. Reboot or power-cycle it. It comes back linked. Pairing, Signal sessions
+   and sync keys live in `wa_store`. Only a factory reset, or the server
+   unlinking the device, erases them.
 
 ## Admin endpoints
 
-The dashboard is backed by a small HTTP API on port 8081 (the dashboard page
-itself pulls `qrcode.min.js` from a CDN, so the browser needs internet access):
+The dashboard pulls `qrcode.min.js` from a CDN, so the browser needs internet.
+The API on port 8081:
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/dashboard` | The HTML dashboard. |
 | GET | `/` | JSON store stats (heap, sessions, identities, prekeys, paired). |
-| GET | `/device` | Pairing status: QR code, connection, PN/LID, linking-code state (pairing credentials redacted without token). |
-| GET | `/messages` | The last 16 inbound messages (id, chat, sender, truncated text, timestamp). Needs the token. |
-| POST | `/send` | `{"to":"<jid>","text":"..."}`: send a text and wait for the outcome (`message_id` on success). Needs the token. |
-| POST | `/pair-code` | `{"phone_number":"+15551234567"}`: request a linking code; poll `/device` for it. Needs the token. |
-| GET | `/metrics` | Live system telemetry (see Diagnostics below). |
+| GET | `/device` | Pairing status: QR, connection, PN/LID, linking-code state (redacted without token). |
+| GET | `/messages` | Last 16 inbound messages. Needs the token. |
+| POST | `/send` | `{"to":"<jid>","text":"..."}`. Sends a text, returns `message_id`. Needs the token. |
+| POST | `/pair-code` | `{"phone_number":"+15551234567"}`. Requests a linking code, poll `/device`. Needs the token. |
+| GET | `/metrics` | Live telemetry (see below). |
 | GET | `/health` | Liveness check (`ok`). |
 | GET | `/sessions` | List Signal session addresses. Needs the token. |
-| DELETE | `/sessions` | Disconnect, erase all Signal sessions from flash, reboot. Needs the token. |
+| DELETE | `/sessions` | Disconnect, erase Signal sessions from flash, reboot. Needs the token. |
 | POST | `/reset` | Factory reset: log out, erase `wa_store`, reboot to re-pair. Needs the token. |
 | POST | `/reboot` | Disconnect cleanly and reboot. Needs the token. |
-| POST | `/test-panic` | Deliberately panic, to exercise the persistent crash capture (see Diagnostics). |
+| POST | `/test-panic` | Panic on purpose, to exercise crash capture (see below). |
 
-Handy for a quick liveness check from the same network, using the IP from the boot
-log (mDNS `.local` resolution is unreliable across some routers / 2.4-vs-5 GHz SSIDs):
+Quick check from the LAN (mDNS `.local` often fails across routers or bands,
+so prefer the IP from the boot log):
 
 ```bash
 curl http://<device-ip>:8081/         # {"status":"running","heap_free":...}
@@ -551,16 +451,15 @@ curl -H 'Content-Type: application/json' -d '{"to":"15551234567@s.whatsapp.net",
 curl -X POST http://<device-ip>:8081/reboot
 ```
 
-The three maintenance actions (`/reset`, `DELETE /sessions`, `/reboot`) answer
-`202` at once and finish on the client's executor: the live client is logged out
-or disconnected first, the flash is erased with it offline, and the reboot runs
-from a thread whose stack is in internal RAM (the chip disables PSRAM access
-while restarting). Concurrent requests are merged into the most destructive one.
+`/reset`, `DELETE /sessions` and `/reboot` answer `202` at once and finish on
+the executor. The live client logs out or disconnects first, flash is erased
+while it is offline, and the reboot runs from a thread with an internal-RAM
+stack (PSRAM is unreachable during restart). Concurrent requests merge into the
+most destructive one.
 
-## Diagnostics & telemetry
+## Diagnostics
 
-The dashboard and `GET /metrics` expose live numbers read straight from ESP-IDF
-(nothing is estimated):
+`GET /metrics` reads straight from ESP-IDF, nothing estimated:
 
 ```bash
 curl http://<device-ip>:8081/metrics
@@ -568,56 +467,47 @@ curl http://<device-ip>:8081/metrics
 #  "heap_internal_free":29775,"heap_min_free":3299632,
 #  "internal_largest_block":7680,"internal_min_free":4755,
 #  "psram_free":3463948,"rssi_dbm":-65}
-# (abbreviated: the full document also reports `internal_8bit_*`,
-# `psram_largest_block`, per-thread `stack_*_min`, `last_panic` and `coredump`)
+# (full document also has `internal_8bit_*`, `psram_largest_block`,
+# per-thread `stack_*_min`, `last_panic`, `coredump`)
 ```
 
-`internal_*` is the scarce resource on this board: **internal DRAM** (~tens of KB,
-DMA-capable), separate from the 8 MB PSRAM. `internal_min_free` is the all-time
-low-water mark. Watch it, since the AES/TLS/prekey paths compete for internal
-DRAM and that's what OOMs first.
+`internal_*` is the scarce resource: internal DRAM in the tens of KB, separate
+from the 8 MB PSRAM. `internal_min_free` is the all-time low. The AES/TLS and
+prekey paths all fight over it, so that is what OOMs first. Watch it.
 
-**Crash cause is captured, not guessed:**
-- A panic hook logs the real Rust panic with its source location and message,
-  e.g. `RUST PANIC: panicked at src/admin.rs:NN: <message>`, before the abort.
-- `reset_reason` (also logged at boot as `last reset: ...`) tells you why the
-  *previous* run ended: `Panic`, `TaskWatchdog`, `Brownout`, `PowerOn`, etc.
-- Hardware exceptions (LoadProhibited, …) print a `Backtrace: 0x... 0x...` of PCs.
-  Symbolize it with the monitor (`espflash monitor --elf target/.../whatsapp-esp32`)
-  or directly:
+Crash cause is captured, not guessed. A panic hook logs the Rust panic with
+location and message before aborting. `reset_reason` (also in the boot log as
+`last reset: ...`) says why the previous run ended: `Panic`,
+`TaskWatchdog`, `Brownout`, `PowerOn`. Hardware exceptions print a
+`Backtrace: 0x...` of PCs, symbolized with the monitor
+(`espflash monitor --elf target/.../whatsapp-esp32`) or directly:
 
-  ```bash
-  xtensa-esp32s3-elf-addr2line -fCe target/xtensa-esp32s3-espidf/debug/whatsapp-esp32 0x42002fe2 0x...
-  ```
+```bash
+xtensa-esp32s3-elf-addr2line -fCe target/xtensa-esp32s3-espidf/debug/whatsapp-esp32 0x42002fe2 0x...
+```
 
 ## Troubleshooting
 
-- **`Stack canary watchpoint triggered` / stack overflow:** give the executor
-  thread more stack (`Esp32Executor::default_thread_config` is 256 KB; the full
-  send path with a quoted reply and edit is stack-heavy).
-- **TLS handshake fails against the mock server (`mbedtls_ssl_handshake returned
-  -0x2700` / "Failed to verify peer certificate"):** the mock server regenerates its
-  self-signed cert on every start, so verification cannot succeed against any pinned CA.
-  Ensure the build has `--features mock-server` **and** that
-  `CONFIG_ESP_TLS_INSECURE=y` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` are in
-  `sdkconfig.defaults`, then rebuild + reflash. With those set the firmware skips cert
-  verification entirely and the regenerated ephemeral cert no longer matters.
-- **`AtomicU64` / 64-bit atomic link errors from a dependency:** Xtensa has no
-  native 64-bit atomics; dependencies must use `portable_atomic`. The project
-  relies on `portable-atomic` with the `fallback` feature for this.
-- **ESP-IDF build fails on very new host toolchains:** ESP-IDF v5.5.5 is happiest
-  with cmake < 4 and Python <= 3.12 (or Python 3.14 with the venv esp-idf-sys
-  provisions). If your host ships newer ones, the `esp-idf-sys` bootstrap may complain.
-- **`Failed to open WhatsApp NVS ... rebooting to retry` in a loop:** the
-  `wa_store` partition is unreadable (a partition table from before it existed,
-  or a corrupted page). The firmware never erases it on its own, because that
-  would silently unlink the device; erase it deliberately with
+- `Stack canary watchpoint triggered` or stack overflow: grow the executor
+  thread (`Esp32Executor::default_thread_config`, 256 KB; the quoted-reply plus
+  edit path runs deep).
+- TLS handshake fails against the mock (`mbedtls_ssl_handshake returned
+  -0x2700`): the mock regenerates its self-signed cert every start, so no
+  pinned CA can verify it. Build with `--features mock-server` and confirm
+  `CONFIG_ESP_TLS_INSECURE=y` plus `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y`
+  are set, then rebuild and reflash.
+- `AtomicU64` link errors from a dependency: Xtensa has no 64-bit atomics.
+  Dependencies must use `portable_atomic`; this project pins it with `fallback`.
+- ESP-IDF build fails on new host toolchains: v5.5.5 wants cmake < 4 and
+  Python <= 3.12 (or 3.14 under the venv esp-idf-sys provisions).
+- `Failed to open WhatsApp NVS ... rebooting to retry` in a loop: the
+  `wa_store` partition is unreadable, usually a partition table from before it
+  existed. The firmware never erases it on its own, since that would silently
+  unlink the device. Erase deliberately with
   `espflash erase-parts --partition-table target/.../partition-table.bin wa_store`
   and pair again.
-- **Two boards on the mock server land on the same number:** they pair under the
-  same push name. Provision distinct ones (see Configure).
 
 ## License
 
-MIT, the same license as [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
+MIT, same as [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
 See [LICENSE](LICENSE).

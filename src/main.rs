@@ -82,18 +82,8 @@ const SKIP_TLS_VERIFY: bool = cfg!(feature = "mock-server");
 // real WhatsApp gateway (no such endpoint exists there; you scan with your phone).
 const MOCK_AUTOPAIR: bool = cfg!(feature = "mock-server");
 
-// The name this device pairs under. Against the mock server the push name is also
-// what selects the account, so two boards with the same name share one number.
-// `WHATSAPP_PUSH_NAME` in .env bakes one in; the `push_name` key of the `wa`
-// namespace in the default NVS partition overrides it at flash time (see README
-// "Configure"), which is how the two-board QEMU test tells its boards apart from
-// one firmware image.
-const DEFAULT_PUSH_NAME: &str = match option_env!("WHATSAPP_PUSH_NAME") {
-    Some(n) => n,
-    None => "esp32-test",
-};
 /// Shared secret the sensitive admin routes require, when one is configured.
-/// Same two sources as the push name: `.env` at build time, or the `wa`
+/// Two provisioning sources: `.env` at build time, or the `wa`
 /// namespace of the default NVS partition (key `admin_token`) at flash time.
 /// Empty means unset, which keeps the historical unauthenticated behavior.
 #[cfg(feature = "admin")]
@@ -260,17 +250,6 @@ fn main() -> Result<()> {
     let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
-    let push_name = match nvs_string(&nvs, "push_name") {
-        Ok(Some(name)) => {
-            info!("Push name from NVS: {name}");
-            name
-        }
-        Ok(None) => DEFAULT_PUSH_NAME.to_string(),
-        Err(e) => {
-            warn!("Could not read 'push_name' from NVS ({e}); falling back to default");
-            DEFAULT_PUSH_NAME.to_string()
-        }
-    };
     // Never logged: it is a shared secret, and the boot log is not private.
     // If an admin token was configured in NVS but cannot be read (corrupt NVS or
     // type error), fail startup instead of silently disabling authentication.
@@ -345,7 +324,6 @@ fn main() -> Result<()> {
                 device_status,
                 active_client,
                 maintenance,
-                push_name,
             );
         })?;
 
@@ -364,7 +342,6 @@ fn main() -> Result<()> {
             device_status,
             active_client,
             maintenance,
-            push_name,
         );
         Ok(())
     }
@@ -491,7 +468,6 @@ fn run_executor(
     device_status: Arc<DeviceStatus>,
     active_client: Arc<ActiveClient>,
     maintenance: Arc<MaintenanceCoordinator>,
-    push_name: String,
 ) {
     // Register this thread with the task watchdog: with the idle-task check off
     // for this core (sdkconfig.defaults), a wedged event loop is otherwise
@@ -519,7 +495,6 @@ fn run_executor(
         device_status,
         active_client,
         maintenance,
-        push_name,
     ));
 }
 
@@ -607,7 +582,6 @@ async fn run_whatsapp(
     device_status: Arc<DeviceStatus>,
     active_client: Arc<ActiveClient>,
     maintenance: Arc<MaintenanceCoordinator>,
-    push_name: String,
 ) {
     // Supervisor loop: the firmware must never let app_main() return (that tears down
     // WiFi/admin and halts the chip). whatsapp-rust reconnects forever internally, but
@@ -619,7 +593,6 @@ async fn run_whatsapp(
             store.clone(),
             device_status.clone(),
             active_client.clone(),
-            push_name.clone(),
         )
         .await;
         let delay = match outcome {
@@ -700,7 +673,6 @@ async fn run_whatsapp_inner(
     backend: Arc<NvsStore>,
     device_status: Arc<DeviceStatus>,
     active_client: Arc<ActiveClient>,
-    push_name: String,
 ) -> Result<ClientExit> {
     // Both would be `::default()` against the real gateway; the demo points them
     // at the mock server and accepts its self-signed certificate.
@@ -719,8 +691,6 @@ async fn run_whatsapp_inner(
         .with_transport_factory(transport_factory)
         .with_http_client(http_client)
         .with_runtime(runtime)
-        .with_push_name(push_name)
-        .with_version((2, 3000, 0))
         .with_device_props(
             DevicePropsOverride::new()
                 .with_os(DEVICE_OS)
