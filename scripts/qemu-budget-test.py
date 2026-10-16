@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import ssl
 import subprocess
 import time
 import urllib.request
@@ -12,6 +13,24 @@ OUT = Path('target/qemu-esp32c3/riscv32imc-esp-espidf/release')
 RESULTS = Path('validation-results')
 RESULTS.mkdir(exist_ok=True)
 PROCESSES = []
+
+
+def reset_mock():
+    container = os.environ.get('MOCK_CONTAINER_ID')
+    if not container:
+        raise RuntimeError('MOCK_CONTAINER_ID is required to isolate server state between repetitions')
+    subprocess.run(['docker', 'restart', container], check=True, capture_output=True)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen('https://127.0.0.1:8080/', timeout=3,
+                                        context=ssl._create_unverified_context()):
+                return
+        except urllib.error.HTTPError:
+            return
+        except OSError:
+            time.sleep(1)
+    raise TimeoutError('mock server did not recover after reset')
 
 
 def get(port, path):
@@ -60,7 +79,10 @@ def boot(name, directory, stage):
 
 def stop(process):
     if process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     try:
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:
@@ -107,6 +129,7 @@ for repetition in range(1, 4):
     directory.mkdir(exist_ok=True)
     outcome = {'repeat': repetition, 'stages': [], 'result': 'failed'}
     try:
+        reset_mock()
         for name in ('a', 'b'):
             subprocess.run(['scripts/qemu.sh', 'image', name], check=True,
                            stdout=subprocess.DEVNULL)

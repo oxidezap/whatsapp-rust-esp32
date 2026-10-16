@@ -88,6 +88,8 @@ jobs:
           echo "ESPTOOL=$PWD/.venv/bin/esptool" >> "$GITHUB_ENV"
           echo "NVS_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
       - name: Three isolated pairing, messaging and reboot cycles
+        env:
+          MOCK_CONTAINER_ID: ${{ job.services.mock.id }}
         run: python3 scripts/qemu-budget-test.py
       - name: Preserve server log and image identity
         if: always()
