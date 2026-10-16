@@ -737,6 +737,17 @@ async fn run_whatsapp_inner(
     #[cfg(feature = "mock-server")]
     let builder = builder.with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
 
+    let builder = if !whatsapp_esp32::runtime::HAS_PSRAM {
+        let mut config = whatsapp_rust::CacheConfig::default();
+        config.app_state_downloads = whatsapp_rust::AppStateDownloadConfig::new(
+            8192,
+            std::num::NonZeroUsize::new(1).expect("one is nonzero"),
+        );
+        builder.with_cache_config(config)
+    } else {
+        builder
+    };
+
     let bot = builder
         .with_event_handler(ClientExitObserver {
             outcome: exit_outcome.clone(),
