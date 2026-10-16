@@ -13,12 +13,6 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 # during that one-time scan on a populated store.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
-# TEMPORARY DIAGNOSTIC (PR #15 C3 triage): FreeRTOS trace facility so the
-# per-telemetry task census (uxTaskGetSystemState) links on every board.
-# Only the C3 census runs (others return early); costs a few bytes of
-# per-task counters. Revert before merge.
-CONFIG_FREERTOS_USE_TRACE_FACILITY=y
-
 # Task watchdog stays enabled with a generous 30 s timeout (protocol init is slow).
 # The idle task on core 0 is not watched: the `wa-blocking` worker runs prekey
 # generation and other CPU-bound upstream jobs at priority 1 on that core, and a
