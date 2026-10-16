@@ -141,6 +141,11 @@ for repetition in range(1, 4):
         messages(a2, b2, directory, 'restored-messages')
         outcome['stages'].append('restored-encrypted-roundtrip')
         outcome['result'] = 'passed'
+        outcome['appstate_sync_failures'] = sum(
+            path.read_text(errors='replace').count('event: AppStateSyncFailed')
+            for path in directory.glob('*-serial.log')
+        )
+        outcome['appstate_complete'] = outcome['appstate_sync_failures'] == 0
     except Exception as error:
         outcome['error'] = f'{type(error).__name__}: {error}'
     finally:
@@ -154,3 +159,6 @@ for repetition in range(1, 4):
             subprocess.run(['python3', 'scripts/decode-panic.py', str(OUT / 'whatsapp-esp32'),
                             str(directory), str(serial)], check=False,
                            stdout=subprocess.DEVNULL)
+
+results = [json.loads(path.read_text()) for path in RESULTS.glob('repeat-*/result.json')]
+raise SystemExit(0 if len(results) == 3 and all(r['result'] == 'passed' for r in results) else 1)
