@@ -201,6 +201,16 @@ pub fn log_memory_profile(at: &str) {
     if !heap_integrity_ok(at) {
         return;
     }
+    // TEMPORARY DIAGNOSTIC (PR #15 C3 triage): dump every heap block while the
+    // heap is still clean. The fault 20 ms later (first ServerAck) reads a
+    // wild block address (MTVAL 0xe56ebc34, deterministic across runs); the
+    // dump maps that address back to the victim block's size/state/neighbors
+    // offline, which identifies what the in-window writer overwrote. Only on
+    // the event path -- connect-time dumps have a different layout and the
+    // ServerAck dump itself faults mid-walk (expected). Revert before merge.
+    if at == "event" {
+        unsafe { sys::heap_caps_dump_all() };
+    }
     let main_stack = stack_free_min(c"wa-main");
     let blocking_stack = stack_free_min(c"wa-blocking");
     let transport_stack = stack_free_min(c"ws-transport");
