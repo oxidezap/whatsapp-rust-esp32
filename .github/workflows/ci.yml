@@ -297,15 +297,7 @@ jobs:
       - name: Pair, reboot, and message between two boards
         env:
           BOARD: ${{ matrix.board }}
-        run: |
-          if [ "$BOARD" = esp32c3 ]; then
-            python3 scripts/trace-c3-tasks.py "$OUT/whatsapp-esp32" "$OUT/qemu-a-boot1.log" > "$OUT/qemu-task-watch.log" 2>&1 &
-            c3_trace_pid=$!
-            trap 'kill "$c3_trace_pid" 2>/dev/null || true' EXIT
-            QEMU_GDB=1 QEMU_GDB_ONCE=1 scripts/qemu.sh test
-          else
-            scripts/qemu.sh test
-          fi
+        run: scripts/qemu.sh test
 
       - name: Upload serial logs
         if: always()

@@ -164,11 +164,8 @@ qemu_cmd() {
         -nic "user,model=open_eth,hostfwd=tcp:127.0.0.1:${port}-:8081"
         -serial mon:stdio
     )
-    if [[ -n "${QEMU_GDB:-}" && -z "${QEMU_GDB_USED:-}" ]]; then
-        QEMU_CMD+=(-gdb tcp:127.0.0.1:1234 -S)
-        if [[ -n "${QEMU_GDB_ONCE:-}" ]]; then
-            QEMU_GDB_USED=1
-        fi
+    if [[ -n "${QEMU_GDB:-}" ]]; then
+        QEMU_CMD+=(-s -S)
     fi
 }
 
@@ -237,6 +234,17 @@ crash_context() {
     log "--- end crash context ---"
 }
 
+# decode_crash LOG: resolve panic addresses to function names with the ELF
+# symtab (pure python3, no ESP toolchain needed) and append the report to
+# qemu-panic-decoded.log, which the CI artifact glob already uploads. Never
+# fails: a diagnostic must not break the test job it observes.
+decode_crash() {
+    local serial="$1"
+    if [[ -f "$ELF" ]] && command -v python3 >/dev/null 2>&1; then
+        python3 scripts/decode-panic.py "$ELF" "$OUT_DIR" "$serial" || true
+    fi
+}
+
 connection_context() {
     local serial="$1" line from
     line=$(grep -n -m1 -E 'failed:|Failed to connect:|TLS connect failed:' "$serial" | cut -d: -f1) || true
@@ -258,7 +266,7 @@ wait_markers() {
                 log "QEMU exited before '$marker'"; tail -n 60 "$serial"; return 1
             fi
             if grep -q -E "$CRASH_RE" "$serial"; then
-                log "firmware crashed before '$marker'"; crash_context "$serial"; return 1
+                log "firmware crashed before '$marker'"; crash_context "$serial"; decode_crash "$serial"; return 1
             fi
             if (( SECONDS >= deadline )); then
                 log "timed out waiting for '$marker'"; connection_context "$serial"; tail -n 60 "$serial"; return 1
