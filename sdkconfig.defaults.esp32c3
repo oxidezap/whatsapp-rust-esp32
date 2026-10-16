@@ -23,17 +23,6 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 # 48 KB restores margin; keep aligned with default_thread_config.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
 
-# TLS record buffers: mbedTLS keeps one input and one output record buffer
-# per connection (16 KB each by default). WhatsApp stanzas arrive fragmented
-# across records and the crate reassembles them, so 4 KB records only cost
-# CPU on this 160 MHz chip -- while the default 32 KB would sit in internal
-# DRAM for the whole session, exactly where the login heap trough bottoms
-# out. C3-only; PSRAM boards keep the defaults. ASYMMETRIC gates both lens:
-# without it the two lines below are silently ignored.
-CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
-CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
-CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
-
 # Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
 # this. Everything in src/ names its own size; this is the floor for the rest
 # (esp-idf-svc's internal helpers), and 32 KB of it is pure loss here.

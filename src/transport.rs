@@ -266,16 +266,18 @@ impl TransportFactory for Esp32TransportFactory {
         // Inbound events carry whole frames (up to the 32 KB read cap). An
         // unbounded channel lets the socket thread queue an entire burst
         // ahead of the executor -- tens of KB of peak heap the C3 does not
-        // have, and exactly where its login trough bottoms out. Bound it
-        // where there is no PSRAM so a burst parks the reader (TCP
-        // backpressure; the peer waits) instead of piling frames in DRAM.
-        // Blocking here cannot deadlock: the executor drains this channel
-        // without ever waiting on the socket thread. PSRAM boards keep the
-        // unbounded channel and their exact current behavior.
+        // have, and exactly where its login trough bottoms out. Bound it to
+        // two where there is no PSRAM: a burst parks the reader (TCP
+        // backpressure; the peer waits) instead of piling frames in DRAM,
+        // which also serializes the commit-batch and ack-storm phases that
+        // otherwise overlap at the trough. Blocking here cannot deadlock:
+        // the executor drains this channel without ever waiting on the
+        // socket thread. PSRAM boards keep the unbounded channel and their
+        // exact current behavior.
         let (event_tx, event_rx) = if crate::runtime::HAS_PSRAM {
             async_channel::unbounded()
         } else {
-            async_channel::bounded(8)
+            async_channel::bounded(2)
         };
         let (data_tx, data_rx) = std::sync::mpsc::sync_channel(SEND_QUEUE_CAP);
         let shutdown = Arc::new(AtomicBool::new(false));
