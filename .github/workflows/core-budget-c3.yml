@@ -4,6 +4,7 @@ on:
     branches: [validation/core1742-c3]
 permissions:
   contents: read
+  actions: read
 jobs:
   compare:
     runs-on: ubuntu-latest
@@ -34,16 +35,46 @@ jobs:
         ports: ['8080:8080']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Reuse matching pilot ELF when available
+        id: pilot
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: core1742-${{ matrix.label }}
+          run-id: 38927733685
+          github-token: ${{ github.token }}
+          path: validation-results
+      - name: Verify reused core, budget and build provenance
+        if: steps.pilot.outcome == 'success'
+        env:
+          REV: ${{ matrix.rev }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, pathlib, shutil, tomllib
+          root = pathlib.Path('validation-results')
+          lock = tomllib.loads((root / 'Cargo.lock').read_text())
+          packages = [p for p in lock['package'] if 'github.com/oxidezap/whatsapp-rust?' in p.get('source', '')]
+          assert packages and all(p['source'].endswith('#' + os.environ['REV']) for p in packages)
+          params = dict(line.split('=', 1) for line in (root / 'parameters.txt').read_text().splitlines())
+          assert params['APPSTATE_BUDGET_BYTES'] == os.environ['APPSTATE_BUDGET_BYTES']
+          out = pathlib.Path('target/qemu-esp32c3/riscv32imc-esp-espidf/release')
+          out.mkdir(parents=True, exist_ok=True)
+          for name in ['whatsapp-esp32', 'bootloader.bin', 'partition-table.bin']:
+              shutil.copy2(root / name, out / name)
+          PYCODE
+          rm -rf validation-results/repeat-1 validation-results/repeat-2 validation-results/repeat-3
       - run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends git cmake ninja-build clang python3-venv libusb-1.0-0 ccache libsdl2-2.0-0 libslirp0 libglib2.0-0 libpixman-1-0
-      - uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4
+      - if: steps.pilot.outcome != 'success'
+        uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4
         with:
           default: true
           buildtargets: esp32s3
           ldproxy: true
           version: '1.98.0.0'
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - if: steps.pilot.outcome != 'success'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry
@@ -55,6 +86,7 @@ jobs:
             c3-budget-${{ matrix.label }}-
             Linux-qemu-esp32c3-1.98.0.0-v5.5.5-
       - name: Resolve exact core and record inputs
+        if: steps.pilot.outcome != 'success'
         env:
           REV: ${{ matrix.rev }}
           LABEL: ${{ matrix.label }}
@@ -76,6 +108,7 @@ jobs:
           env | sort | grep -E '^(BOARD|ESP_IDF_VERSION|APPSTATE_BUDGET_BYTES|REV|LABEL)=' > validation-results/parameters.txt
           if [ -n "$APPSTATE_BUDGET_BYTES" ]; then echo 'EXTRA_FEATURES=core-appstate-budget' >> "$GITHUB_ENV"; fi
       - name: Build C3
+        if: steps.pilot.outcome != 'success'
         run: scripts/qemu.sh build
       - name: Install pinned QEMU and image tools
         run: |
@@ -90,7 +123,9 @@ jobs:
       - name: Three isolated pairing, messaging and reboot cycles
         env:
           MOCK_CONTAINER_ID: ${{ job.services.mock.id }}
-        run: python3 scripts/qemu-budget-test.py
+        run: |
+          git rev-parse HEAD > validation-results/harness-sha.txt
+          python3 scripts/qemu-budget-test.py
       - name: Preserve server log and image identity
         if: always()
         run: |

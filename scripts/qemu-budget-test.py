@@ -8,6 +8,7 @@ import ssl
 import subprocess
 import time
 import urllib.request
+import urllib.error
 
 OUT = Path('target/qemu-esp32c3/riscv32imc-esp-espidf/release')
 RESULTS = Path('validation-results')
