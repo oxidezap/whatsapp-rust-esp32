@@ -29,7 +29,6 @@ const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 /// fast here degrades instead of dying. Streaming downloads are unaffected
 /// (windowed, not buffered). Sized so the login trough deterministically
 /// skips: transient needs are ~10-20 KB against a ~16 KB floor.
-/// skips: transient needs are ~10-20 KB against a ~16 KB floor.
 
 /// Parse a URL into (host, port, path, use_tls).
 /// Supports http://, https://, ws://, wss:// schemes.
