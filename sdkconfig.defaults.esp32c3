@@ -16,15 +16,6 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 
 # --- Internal DRAM budget ---------------------------------------------------
 
-# TEMPORARY DIAGNOSTIC (PR #15 C3 triage): comprehensive heap poisoning while
-# the QEMU C3 login corrupts the heap (Load access fault in tlsf_walk_pool
-# once, in prvSearchForNameWithinSingleList twice, always just after the
-# first ServerAck; poison 0xa5 in the faulting words). Poisoning aborts at
-# the corrupting malloc/free with CORRUPT HEAP instead of faulting later in
-# an unrelated walk, and scripts/decode-panic.py already resolves the abort.
-# No extra heap is needed, only CPU; revert before merge.
-CONFIG_HEAP_POISONING_COMPREHENSIVE=y
-
 # The main task hosts the WhatsApp executor directly on the C3 rather than
 # spawning a separate 32 KB wa-main thread while main() parks in a join().
 # 36 KB covers the full runtime (measured peak 30.4 KB) and eliminates the

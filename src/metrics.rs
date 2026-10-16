@@ -169,6 +169,20 @@ pub fn heap_now() -> (usize, usize) {
     }
 }
 
+/// TEMPORARY DIAGNOSTIC (PR #15 C3 triage): verify every heap's block headers
+/// before any walk that dereferences them. Returns false (and prints the
+/// culprit block via IDF) when a writer has already corrupted the heap, so
+/// callers can skip the TLSF walk and the task-name lookup instead of
+/// faulting inside them. Read-only; revert before merge.
+pub fn heap_integrity_ok(at: &str) -> bool {
+    // SAFETY: read-only ESP-IDF integrity walk, safe from any task context.
+    let ok = unsafe { sys::heap_caps_check_integrity_all(true) };
+    if !ok {
+        log::error!("heap integrity FAILED at {at}: skipping heap/task walks");
+    }
+    ok
+}
+
 pub fn log_memory_profile(at: &str) {
     struct Opt(Option<u32>);
     impl std::fmt::Display for Opt {
@@ -178,6 +192,14 @@ pub fn log_memory_profile(at: &str) {
                 None => write!(f, "-"),
             }
         }
+    }
+    // A corrupted heap can fault inside the walks below (Load access fault in
+    // tlsf_walk_pool once, in prvSearchForNameWithinSingleList twice, always
+    // just after the first ServerAck). Bail out instead: surviving past the
+    // telemetry shows whether the C3 can connect with the corrupted words
+    // unread, which bounds the blast radius for the writer hunt.
+    if !heap_integrity_ok(at) {
+        return;
     }
     let main_stack = stack_free_min(c"wa-main");
     let blocking_stack = stack_free_min(c"wa-blocking");
