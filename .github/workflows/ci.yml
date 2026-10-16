@@ -297,7 +297,19 @@ jobs:
       - name: Pair, reboot, and message between two boards
         env:
           BOARD: ${{ matrix.board }}
-        run: scripts/qemu.sh test
+        run: |
+          if [ "$BOARD" = esp32c3 ]; then
+            # TEMPORARY DIAGNOSTIC (PR #15 C3 triage): one hardware write
+            # watchpoint on the deterministic victim header (see
+            # scripts/watch-c3-slot.py). No breakpoints or stepping, so the
+            # login timing is undisturbed. Revert before merge.
+            python3 scripts/watch-c3-slot.py "$OUT/whatsapp-esp32" "$OUT/qemu-watch.log" 0x3fc9168c > "$OUT/qemu-watch-stdout.log" 2>&1 &
+            c3_watch_pid=$!
+            trap 'kill "$c3_watch_pid" 2>/dev/null || true' EXIT
+            QEMU_GDB=1 QEMU_GDB_ONCE=1 scripts/qemu.sh test
+          else
+            scripts/qemu.sh test
+          fi
 
       - name: Upload serial logs
         if: always()
