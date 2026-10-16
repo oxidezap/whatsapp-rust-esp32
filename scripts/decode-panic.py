@@ -98,6 +98,12 @@ def decode(syms, serial):
     region = lines[start:end]
     out = [f'--- crash in {serial} (line {start + 1}) ---',
            f'signature: {lines[start].strip()}']
+    # Heap-poisoning aborts print the diagnosis (CORRUPT HEAP / assert) above
+    # the abort line the signature anchors on; keep that run-up verbatim.
+    run_up = lines[max(0, start - 20):start]
+    if run_up:
+        out.append('run-up (20 lines before signature):')
+        out.extend('  ' + l.rstrip() for l in run_up)
     shown_regs = 0
     for line in region:
         if REG_RE.search(line) and shown_regs < 25:
