@@ -127,8 +127,10 @@ def main():
             try:
                 sp = regs[2]
                 words = remote.memory(sp, 128)
-                emit('stack ' + ' '.join(f'{int.from_bytes(words[i:i+4], \"little\"):08x}'
-                                         for i in range(0, 128, 4)))
+                parts = []
+                for i in range(0, 128, 4):
+                    parts.append('%08x' % int.from_bytes(words[i:i+4], 'little'))
+                emit('stack ' + ' '.join(parts))
             except RuntimeError as e:
                 emit(f'stack unreadable: {e}')
             # Keep watching: resume the target so the run continues.
