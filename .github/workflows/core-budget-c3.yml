@@ -89,6 +89,13 @@ jobs:
           echo "NVS_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
       - name: Three isolated pairing, messaging and reboot cycles
         run: python3 scripts/qemu-budget-test.py
+      - name: Preserve server log and image identity
+        if: always()
+        run: |
+          mkdir -p validation-results
+          docker logs "${{ job.services.mock.id }}" > validation-results/mock-server.log 2>&1 || true
+          docker inspect --format '{{.Image}}' "${{ job.services.mock.id }}" > validation-results/mock-image.txt || true
+          if [ -f qemu.tar.xz ]; then sha256sum qemu.tar.xz > validation-results/qemu-sha256.txt; fi
       - name: Preserve firmware and generated configuration
         if: always()
         run: |

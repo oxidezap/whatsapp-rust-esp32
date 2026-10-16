@@ -749,9 +749,11 @@ async fn run_whatsapp_inner(
             .unwrap_or("8192")
             .parse::<usize>()?;
         let mut config = whatsapp_rust::CacheConfig::default();
-        config.app_state_downloads =
-            whatsapp_rust::AppStateDownloadConfig::new(bytes, std::num::NonZeroUsize::MIN);
-        info!("validation appstate policy: bytes={bytes} concurrency=1");
+        config.app_state_downloads = whatsapp_rust::AppStateDownloadConfig::new(
+            bytes,
+            std::num::NonZeroUsize::new(4).expect("four is nonzero"),
+        );
+        info!("validation appstate policy: bytes={bytes} concurrency=4");
         builder.with_cache_config(config)
     };
 
