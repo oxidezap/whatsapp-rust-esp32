@@ -190,10 +190,13 @@ struct HeapRegion {
 }
 
 /// C3 internal DRAM heaps (bases/lens from the boot `heap_init` lines).
+/// `first_offset` points at the first block HEADER: the dump prints block
+/// *data* addresses (`multi_heap_get_block_address`), 4 past the header, so
+/// the dump-derived offsets are adjusted down by 4 here.
 const C3_HEAPS: &[HeapRegion] = &[
-    HeapRegion { base: 0x3FC8_FCC0, len: 0x30340, first_offset: 0x3B0 },
-    HeapRegion { base: 0x3FCC_0000, len: 0x1C710, first_offset: 0x36C },
-    HeapRegion { base: 0x3FCD_C710, len: 0x2950, first_offset: 0x1A4 },
+    HeapRegion { base: 0x3FC8_FCC0, len: 0x30340, first_offset: 0x3AC },
+    HeapRegion { base: 0x3FCC_0000, len: 0x1C710, first_offset: 0x368 },
+    HeapRegion { base: 0x3FCD_C710, len: 0x2950, first_offset: 0x1A0 },
 ];
 
 static WALK_TRUSTED: core::sync::atomic::AtomicBool =
