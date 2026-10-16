@@ -196,8 +196,9 @@ pub fn log_memory_profile(at: &str) {
     let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
     let free = unsafe { sys::heap_caps_get_free_size(cap) };
     let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
+    let minimum = unsafe { sys::heap_caps_get_minimum_free_size(cap) };
     log::info!(
-        "memory at {at}: internal heap {free} free, largest block {largest}; \
+        "memory at {at}: internal heap {free} free, minimum free {minimum}, largest block {largest}; \
          stack never-used wa-main={} wa-blocking={} ws-transport={} wa-nvs={}",
         Opt(main_stack),
         Opt(blocking_stack),

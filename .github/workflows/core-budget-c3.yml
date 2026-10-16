@@ -1,0 +1,105 @@
+name: Core budget C3 comparison
+on:
+  push:
+    branches: [validation/core1742-c3]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            rev: 05e4b9d9693dc6d12f9d4d1eb7e5d542db8c59d4
+            budget: ''
+          - label: candidate-8k
+            rev: 69564ef928ba72d6a9b96e3aeb0df0613937d118
+            budget: '8192'
+          - label: candidate-zero
+            rev: 69564ef928ba72d6a9b96e3aeb0df0613937d118
+            budget: '0'
+    env:
+      BOARD: esp32c3
+      ESP_IDF_VERSION: v5.5.5
+      APPSTATE_BUDGET_BYTES: ${{ matrix.budget }}
+    services:
+      mock:
+        image: ghcr.io/whiskeysockets-devtools/bartender@sha256:9f3a49dd9f944414fbda50571bba5f66f2ab6fdc48001e6803d4c09a1042c78e
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.BARTENDER_GHCR_TOKEN }}
+        ports: ['8080:8080']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends git cmake ninja-build clang python3-venv libusb-1.0-0 ccache libsdl2-2.0-0 libslirp0 libglib2.0-0 libpixman-1-0
+      - uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+          version: '1.98.0.0'
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .embuild
+            target
+          key: c3-budget-${{ matrix.label }}-${{ hashFiles('Cargo.lock', 'sdkconfig.*') }}
+          restore-keys: |
+            c3-budget-${{ matrix.label }}-
+            Linux-qemu-esp32c3-1.98.0.0-v5.5.5-
+      - name: Resolve exact core and record inputs
+        env:
+          REV: ${{ matrix.rev }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          mkdir -p validation-results
+          python3 - <<'PY'
+          import os, pathlib, re
+          p = pathlib.Path('Cargo.toml')
+          s = p.read_text()
+          s, n = re.subn(r'(whatsapp-rust = \{ git = "https://github.com/oxidezap/whatsapp-rust", rev = ")[^"]+', lambda m: m[1] + os.environ['REV'], s)
+          assert n == 1
+          p.write_text(s)
+          PY
+          cargo update -p whatsapp-rust --precise "$REV"
+          cargo metadata --locked --format-version 1 --no-deps > validation-results/metadata.json
+          cp Cargo.lock Cargo.toml sdkconfig* partitions.csv validation-results/
+          rustc -Vv > validation-results/toolchain.txt
+          git rev-parse HEAD > validation-results/firmware-sha.txt
+          env | sort | grep -E '^(BOARD|ESP_IDF_VERSION|APPSTATE_BUDGET_BYTES|REV|LABEL)=' > validation-results/parameters.txt
+          if [ -n "$APPSTATE_BUDGET_BYTES" ]; then echo 'EXTRA_FEATURES=core-appstate-budget' >> "$GITHUB_ENV"; fi
+      - name: Build C3
+        run: scripts/qemu.sh build
+      - name: Install pinned QEMU and image tools
+        run: |
+          curl -fL https://dl.espressif.com/github_assets/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-riscv32-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz -o qemu.tar.xz
+          mkdir -p qemu-tools
+          tar -xJf qemu.tar.xz -C qemu-tools
+          echo "QEMU_RISCV32=$PWD/qemu-tools/qemu/bin/qemu-system-riscv32" >> "$GITHUB_ENV"
+          python3 -m venv .venv
+          .venv/bin/pip install esptool esp-idf-nvs-partition-gen
+          echo "ESPTOOL=$PWD/.venv/bin/esptool" >> "$GITHUB_ENV"
+          echo "NVS_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
+      - name: Three isolated pairing, messaging and reboot cycles
+        run: python3 scripts/qemu-budget-test.py
+      - name: Preserve firmware and generated configuration
+        if: always()
+        run: |
+          out=target/qemu-esp32c3/riscv32imc-esp-espidf/release
+          for file in whatsapp-esp32 bootloader.bin partition-table.bin; do
+            if [ -f "$out/$file" ]; then cp "$out/$file" validation-results/; fi
+          done
+          find target -type f \( -name sdkconfig -o -name sdkconfig.h \) -exec cp --parents {} validation-results/ \; 2>/dev/null || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: core1742-${{ matrix.label }}
+          path: validation-results/
+          retention-days: 14

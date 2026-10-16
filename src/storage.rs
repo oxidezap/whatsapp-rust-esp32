@@ -1026,6 +1026,20 @@ impl NvsStore {
         })
     }
 
+    #[cfg(feature = "qemu")]
+    pub fn log_validation_state(&self, stage: &str) {
+        let state = self.lock();
+        log::info!(
+            "validation store at {stage}: sessions={} sync_keys={} versions={}",
+            state.sessions.len(),
+            state.sync_keys.len(),
+            state.versions.len()
+        );
+        for (name, hash) in &state.versions {
+            log::info!("validation version at {stage}: {name}={}", hash.version);
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, StoreInner> {
         self.inner.lock().unwrap_or_else(recover_poisoned)
     }

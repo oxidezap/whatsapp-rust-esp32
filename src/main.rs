@@ -234,6 +234,8 @@ fn main() -> Result<()> {
 
     let last_panic = metrics::last_panic_str();
     info!("whatsapp-esp32 starting... (last reset: {last_reset:?}{last_panic})");
+    #[cfg(feature = "qemu")]
+    crate::metrics::log_memory_profile("boot");
 
     // The credentials come up before the network: a store that cannot be opened
     // is not something to pair over, and a reboot is the only recovery that
@@ -676,6 +678,10 @@ async fn run_whatsapp_inner(
 ) -> Result<ClientExit> {
     // Both would be `::default()` against the real gateway; the demo points them
     // at the mock server and accepts its self-signed certificate.
+    #[cfg(feature = "qemu")]
+    let validation_store = backend.clone();
+    #[cfg(feature = "qemu")]
+    validation_store.log_validation_state("before login");
     let transport_factory = Esp32TransportFactory::new(MOCK_SERVER_WS, SKIP_TLS_VERIFY);
     let http_client = EspHttpClient::new(SKIP_TLS_VERIFY);
 
@@ -737,12 +743,27 @@ async fn run_whatsapp_inner(
     #[cfg(feature = "mock-server")]
     let builder = builder.with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
 
+    #[cfg(feature = "core-appstate-budget")]
+    let builder = {
+        let bytes = option_env!("APPSTATE_BUDGET_BYTES")
+            .unwrap_or("8192")
+            .parse::<usize>()?;
+        let mut config = whatsapp_rust::CacheConfig::default();
+        config.app_state_downloads =
+            whatsapp_rust::AppStateDownloadConfig::new(bytes, std::num::NonZeroUsize::MIN);
+        info!("validation appstate policy: bytes={bytes} concurrency=1");
+        builder.with_cache_config(config)
+    };
+
+    crate::metrics::log_memory_profile("before login");
     let bot = builder
         .with_event_handler(ClientExitObserver {
             outcome: exit_outcome.clone(),
             temporary_ban_seconds: temporary_ban_seconds.clone(),
         })
         .on_event(move |event, client| {
+            #[cfg(feature = "qemu")]
+            let validation_store = validation_store.clone();
             let ds = event_status.clone();
             let scanned = scanned.clone();
             let active_client = event_active_client.clone();
@@ -751,6 +772,12 @@ async fn run_whatsapp_inner(
                 // new one starts; they must not touch the shared status.
                 if !active_client.is_current(&client) {
                     return;
+                }
+                #[cfg(feature = "qemu")]
+                info!("validation event: {:?}", event.kind());
+                #[cfg(feature = "qemu")]
+                if matches!(&*event, Event::Connected(_) | Event::AppStateSyncFailed(_)) {
+                    validation_store.log_validation_state("event");
                 }
                 match &*event {
                     // 0.7.0 sealed the event payloads into `#[non_exhaustive]`
@@ -773,6 +800,7 @@ async fn run_whatsapp_inner(
                         ds.clear_qr_code();
                     }
                     Event::Connected(_) => {
+                        crate::metrics::log_memory_profile("connected");
                         // Send "active" delivery receipts (type omitted) instead of the
                         // default "inactive" ones a passive companion emits. Without this,
                         // the client ACKs incoming messages with <receipt type="inactive">,

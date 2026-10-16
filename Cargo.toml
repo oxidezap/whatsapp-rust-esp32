@@ -72,7 +72,7 @@ bytes = "1.12"
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "633f01480fe3a95510172c6312d01484563dcf3c", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "69564ef928ba72d6a9b96e3aeb0df0613937d118", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing
@@ -105,6 +105,7 @@ linker_messages = "allow"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_spiram)'] }
 
 [features]
+core-appstate-budget = []
 # The dashboard only. `mock-server` is deliberately not a default: a consumer
 # that forgets `default-features = false` must still get a verified connection.
 default = ["admin"]

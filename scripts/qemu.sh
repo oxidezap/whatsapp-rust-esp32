@@ -99,7 +99,7 @@ cmd_build() {
     ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
     CARGO_WORKSPACE_DIR="$PWD" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
+        cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features "qemu${EXTRA_FEATURES:+,$EXTRA_FEATURES}"
     test -f "$ELF"
 }
 
