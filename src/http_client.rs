@@ -19,6 +19,17 @@ const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_RESPONSE_HEADER_BYTES: usize = 8 * 1024;
 /// Maximum response size for non-streaming buffered HTTP requests.
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+/// Refuse a buffered download while the internal heap is below this. A
+/// buffered fetch holds a TLS handshake transient plus the whole body in
+/// RAM at once; starting one with no headroom wedges the chip (the NIC
+/// cannot allocate receive buffers, its retry loop starves the executor,
+/// and nothing ever frees). Upstream logs the failure and omits the blob,
+/// and the sync that needed it already degrades the same way on every
+/// board (see the skipped CriticalBlock collections at login), so failing
+/// fast here degrades instead of dying. Streaming downloads are unaffected
+/// (windowed, not buffered). Sized so the login trough deterministically
+/// skips: transient needs are ~10-20 KB against a ~16 KB floor.
+/// skips: transient needs are ~10-20 KB against a ~16 KB floor.
 
 /// Parse a URL into (host, port, path, use_tls).
 /// Supports http://, https://, ws://, wss:// schemes.
@@ -89,6 +100,14 @@ impl Default for EspHttpClient {
 #[async_trait]
 impl HttpClient for EspHttpClient {
     async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
+        const MIN_HEAP_FOR_BUFFERED_FETCH: usize = 32 * 1024;
+        let (free, _) = crate::metrics::heap_now();
+        if free < MIN_HEAP_FOR_BUFFERED_FETCH {
+            anyhow::bail!(
+                "refusing buffered fetch of {} with only {free} heap free",
+                request.url
+            );
+        }
         let (host, port, path, use_tls) = parse_url(&request.url)?;
         // The Host header keeps the URL's own authority; only the address dialed
         // is remapped under QEMU.
