@@ -896,12 +896,7 @@ async fn auto_scan_qr(code: &str) {
     let url = format!("{scheme}://{host}:{port}/admin/mock-phone/scan-qr");
     info!("auto-pair: POSTing QR to {url}");
     let http = EspHttpClient::new(SKIP_TLS_VERIFY);
-    let req = HttpRequest {
-        url,
-        method: "POST".into(),
-        headers: std::collections::HashMap::new(),
-        body: Some(bytes::Bytes::copy_from_slice(code.as_bytes())),
-    };
+    let req = HttpRequest::post(url).with_body(bytes::Bytes::copy_from_slice(code.as_bytes()));
     match http.execute(req).await {
         Ok(r) if (200..300).contains(&r.status_code) => {
             info!("auto-pair: scan-qr accepted (HTTP {})", r.status_code)
