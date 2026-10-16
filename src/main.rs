@@ -307,6 +307,9 @@ fn main() -> Result<()> {
     #[cfg(feature = "admin")]
     info!("Admin: http://{_ip}:{ADMIN_PORT}/dashboard");
 
+    // TEMPORARY DIAGNOSTIC (PR #15 C3 triage): prove the fault-proof heap-walk
+    // constants before any integrity report is trusted. Revert before merge.
+    whatsapp_esp32::metrics::heap_walk_selftest();
     let main_hwm = unsafe { esp_idf_svc::sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
     info!(
         "Free heap: {} bytes (internal: {} bytes); main_task stack never-used: {} bytes",

@@ -169,18 +169,109 @@ pub fn heap_now() -> (usize, usize) {
     }
 }
 
-/// TEMPORARY DIAGNOSTIC (PR #15 C3 triage): verify every heap's block headers
-/// before any walk that dereferences them. Returns false (and prints the
-/// culprit block via IDF) when a writer has already corrupted the heap, so
-/// callers can skip the TLSF walk and the task-name lookup instead of
-/// faulting inside them. Read-only; revert before merge.
-pub fn heap_integrity_ok(at: &str) -> bool {
-    // SAFETY: read-only ESP-IDF integrity walk, safe from any task context.
-    let ok = unsafe { sys::heap_caps_check_integrity_all(true) };
-    if !ok {
-        log::error!("heap integrity FAILED at {at}: skipping heap/task walks");
+/// TEMPORARY DIAGNOSTIC (PR #15 C3 triage): walk every internal heap's block
+/// headers with pure arithmetic -- read each size word, compute the next
+/// header, range-check it -- and report the first insane header instead of
+/// faulting inside it like the IDF walks do. Returns false when a writer has
+/// already corrupted the heap, so callers skip the TLSF walk and the
+/// task-name lookup. Reads mapped RAM only, never dereferences a heap value,
+/// so this cannot fault even on a corrupted heap. Revert before merge.
+///
+/// Layout constants derived empirically from `heap_caps_dump_all` output on
+/// this chip: 4-byte headers (`next = cur + 4 + (raw & !3)` held for all 914
+/// transitions, all sizes 4-aligned), per-heap first-block offsets below.
+/// `heap_walk_selftest` (called once at boot, when the heap is healthy)
+/// proves the constants before any report is trusted.
+#[derive(Clone, Copy)]
+struct HeapRegion {
+    base: usize,
+    len: usize,
+    first_offset: usize,
+}
+
+/// C3 internal DRAM heaps (bases/lens from the boot `heap_init` lines).
+const C3_HEAPS: &[HeapRegion] = &[
+    HeapRegion { base: 0x3FC8_FCC0, len: 0x30340, first_offset: 0x3B0 },
+    HeapRegion { base: 0x3FCC_0000, len: 0x1C710, first_offset: 0x36C },
+    HeapRegion { base: 0x3FCD_C710, len: 0x2950, first_offset: 0x1A4 },
+];
+
+static WALK_TRUSTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+fn walk_heap(region: HeapRegion, report: bool, at: &str) -> bool {
+    let end = region.base + region.len;
+    let mut cur = region.base + region.first_offset;
+    let mut count = 0usize;
+    loop {
+        if count > 100_000 {
+            if report {
+                log::error!("heap walk at {at}: no termination in heap {:#x}", region.base);
+            }
+            return false;
+        }
+        count += 1;
+        if cur + 4 > end {
+            if report {
+                log::error!(
+                    "heap walk at {at}: header {:#x} outside heap {:#x} (slot!)",
+                    cur, region.base
+                );
+            }
+            return false;
+        }
+        // SAFETY: `cur` is range-checked against mapped DRAM above; the read
+        // itself cannot fault. The value is only used in arithmetic below.
+        let raw = unsafe { (cur as *const u32).read_volatile() } as usize;
+        let next = cur.wrapping_add(4).wrapping_add(raw & !3);
+        if next <= cur || next > end {
+            if report {
+                log::error!(
+                    "heap walk at {at}: corrupt header at {:#x} (raw {:#x}, next {:#x}, heap {:#x})",
+                    cur, raw, next, region.base
+                );
+            }
+            return false;
+        }
+        if next == end {
+            return true;
+        }
+        cur = next;
     }
-    ok
+}
+
+/// Boot-time self-test: the constants above must replay every heap exactly.
+/// Call once when the heap is known healthy; reports are trusted only after.
+pub fn heap_walk_selftest() {
+    if crate::runtime::HAS_PSRAM {
+        return;
+    }
+    for region in C3_HEAPS {
+        if !walk_heap(*region, false, "selftest") {
+            log::error!(
+                "heap walk self-test FAILED on heap {:#x}: constants wrong, walk disabled",
+                region.base
+            );
+            return;
+        }
+    }
+    WALK_TRUSTED.store(true, core::sync::atomic::Ordering::Release);
+    log::info!("heap walk self-test OK");
+}
+
+pub fn heap_integrity_ok(at: &str) -> bool {
+    if crate::runtime::HAS_PSRAM
+        || !WALK_TRUSTED.load(core::sync::atomic::Ordering::Acquire)
+    {
+        return true;
+    }
+    for region in C3_HEAPS {
+        if !walk_heap(*region, true, at) {
+            log::error!("heap integrity FAILED at {at}: skipping heap/task walks");
+            return false;
+        }
+    }
+    true
 }
 
 pub fn log_memory_profile(at: &str) {
@@ -204,13 +295,6 @@ pub fn log_memory_profile(at: &str) {
     // TEMPORARY DIAGNOSTIC (PR #15 C3 triage): dump every heap block while the
     // heap is still clean. The fault 20 ms later (first ServerAck) reads a
     // wild block address (MTVAL 0xe56ebc34, deterministic across runs); the
-    // dump maps that address back to the victim block's size/state/neighbors
-    // offline, which identifies what the in-window writer overwrote. Only on
-    // the event path -- connect-time dumps have a different layout and the
-    // ServerAck dump itself faults mid-walk (expected). Revert before merge.
-    if at == "event" {
-        unsafe { sys::heap_caps_dump_all() };
-    }
     let main_stack = stack_free_min(c"wa-main");
     let blocking_stack = stack_free_min(c"wa-blocking");
     let transport_stack = stack_free_min(c"ws-transport");
