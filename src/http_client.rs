@@ -418,7 +418,7 @@ fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
         BodyFraming::Chunked => Box::new(ChunkedReader::new(rest)),
     };
 
-    Ok(StreamingHttpResponse { status_code, body })
+    Ok(StreamingHttpResponse::new(status_code, body))
 }
 
 enum BodyFraming {
@@ -481,7 +481,7 @@ fn parse_http_response(response_buf: &[u8]) -> Result<HttpResponse> {
     if let BodyFraming::Chunked = framing {
         let mut body = Vec::new();
         ChunkedReader::new(body_slice).read_to_end(&mut body)?;
-        return Ok(HttpResponse { status_code, body });
+        return Ok(HttpResponse::new(status_code, body));
     }
     if let BodyFraming::Length(expected_len) = framing {
         let expected_usize = usize::try_from(expected_len)
@@ -492,16 +492,13 @@ fn parse_http_response(response_buf: &[u8]) -> Result<HttpResponse> {
                 body_slice.len()
             );
         }
-        return Ok(HttpResponse {
+        return Ok(HttpResponse::new(
             status_code,
-            body: body_slice[..expected_usize].to_vec(),
-        });
+            body_slice[..expected_usize].to_vec(),
+        ));
     }
 
-    Ok(HttpResponse {
-        status_code,
-        body: body_slice.to_vec(),
-    })
+    Ok(HttpResponse::new(status_code, body_slice.to_vec()))
 }
 
 #[cfg(test)]

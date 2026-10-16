@@ -586,10 +586,8 @@ pub fn start_admin_server(
                     return json_response_status(req, 503, r#"{"error":"Not connected"}"#);
                 }
 
-                let message = wa::Message {
-                    conversation: Some(text.to_string()),
-                    ..Default::default()
-                };
+                let mut message = wa::Message::default();
+                message.conversation = Some(text.to_string());
                 let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                 let task_active_client = active_client.clone();
                 let task = Box::pin(async move {
@@ -620,7 +618,7 @@ pub fn start_admin_server(
                         info!("Admin: sent {message_id} to {to}");
                         let body = serde_json::json!({
                             "result": "sent",
-                            "message_id": message_id,
+                            "message_id": message_id.as_str(),
                             "to": to,
                         });
                         json_response(req, &body.to_string())
@@ -718,7 +716,7 @@ pub fn start_admin_server(
                 let task_maintenance = maintenance.clone();
                 let task = Box::pin(async move {
                     if client
-                        .wait_for_socket(Duration::from_secs(30))
+                        .wait_for_socket_ready(Duration::from_secs(30))
                         .await
                         .is_err()
                     {

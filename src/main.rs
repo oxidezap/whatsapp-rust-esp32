@@ -760,10 +760,11 @@ async fn run_whatsapp_inner(
                         ds.set_qr_code(qr.code.clone());
                         if MOCK_AUTOPAIR && !scanned.swap(true, Ordering::Relaxed) {
                             let code = qr.code.clone();
-                            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-                                Box::pin(async move {
-                                    auto_scan_qr(&code).await;
-                                });
+                            let fut: std::pin::Pin<
+                                Box<dyn std::future::Future<Output = ()> + Send>,
+                            > = Box::pin(async move {
+                                auto_scan_qr(&code).await;
+                            });
                             fut.await;
                         }
                     }
@@ -821,10 +822,11 @@ async fn run_whatsapp_inner(
                             if text == Some(PING_TRIGGER) {
                                 let ctx =
                                     MessageContext::from_inbound(inbound, Arc::clone(&client));
-                                let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-                                    Box::pin(async move {
-                                        handle_message(&ctx).await;
-                                    });
+                                let fut: std::pin::Pin<
+                                    Box<dyn std::future::Future<Output = ()> + Send>,
+                                > = Box::pin(async move {
+                                    handle_message(&ctx).await;
+                                });
                                 fut.await;
                             }
                         }
@@ -941,13 +943,10 @@ async fn handle_message(ctx: &MessageContext) {
 
     // buffa (the prost replacement in 0.7.0) wraps sub-messages in
     // `MessageField<T>` instead of `Option<Box<T>>`.
-    let edit = wa::Message {
-        extended_text_message: MessageField::some(wa::message::ExtendedTextMessage {
-            text: Some(format!("{PONG_TEXT}\n`{duration}`")),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let mut extended_text = wa::message::ExtendedTextMessage::default();
+    extended_text.text = Some(format!("{PONG_TEXT}\n`{duration}`"));
+    let mut edit = wa::Message::default();
+    edit.extended_text_message = MessageField::some(extended_text);
     if let Err(e) = ctx.edit_message(sent.message_id.clone(), edit).await {
         error!("Failed to edit message {}: {}", sent.message_id, e);
     }

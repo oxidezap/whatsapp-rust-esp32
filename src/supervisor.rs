@@ -194,8 +194,9 @@ pub async fn run_maintenance(
                 logout_attempted = true;
             }
             MaintenanceAction::ClearSessions | MaintenanceAction::Reboot => {
-                log::info!("Maintenance: disconnecting WhatsApp client");
-                client.disconnect().await;
+                log::info!("Maintenance: shutting down WhatsApp client");
+                let report = client.shutdown().await;
+                log::info!("Maintenance: shutdown outcome: {report:?}");
             }
         }
         active_client.clear_if(client);
