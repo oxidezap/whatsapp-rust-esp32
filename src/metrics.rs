@@ -310,7 +310,8 @@ pub fn log_task_census(at: &str) {
         states.set_len((total as usize).min(cap));
         log::info!("tasks at {at}: count={total}");
         for st in &states {
-            let name = core::ffi::CStr::from_ptr(st.pcTaskName.as_ptr()).to_string_lossy();
+            let name = core::ffi::CStr::from_ptr(st.pcTaskName as *const core::ffi::c_char)
+                .to_string_lossy();
             log::info!(
                 "task at {at}: {name} base={:#x} hwm={} state={}",
                 st.pxStackBase as usize,
