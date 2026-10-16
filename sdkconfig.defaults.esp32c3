@@ -16,11 +16,11 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 
 # --- Internal DRAM budget ---------------------------------------------------
 
-# The main task hosts the executor directly, avoiding a second task stack.
-# The current SDK left only 2,356 bytes free on the previous 36 KB stack
-# before a heap-corruption fault during login. Reserve room for deeper frames
-# and keep this budget aligned with Esp32Executor::default_thread_config.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
+# The main task hosts the WhatsApp executor directly on the C3 rather than
+# spawning a separate 32 KB wa-main thread while main() parks in a join().
+# 36 KB covers the full runtime (measured peak 30.4 KB) and eliminates the
+# second stack entirely, saving 16 KB of contiguous internal DRAM for the heap.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864
 
 # Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
 # this. Everything in src/ names its own size; this is the floor for the rest

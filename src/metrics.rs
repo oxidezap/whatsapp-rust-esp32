@@ -170,10 +170,6 @@ pub fn heap_now() -> (usize, usize) {
 }
 
 pub fn log_memory_profile(at: &str) {
-    // SAFETY: read-only ESP-IDF accessors, safe from any context.
-    let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
-    let free = unsafe { sys::heap_caps_get_free_size(cap) };
-    let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
     struct Opt(Option<u32>);
     impl std::fmt::Display for Opt {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -183,13 +179,30 @@ pub fn log_memory_profile(at: &str) {
             }
         }
     }
+    let main_stack = stack_free_min(c"wa-main");
+    let blocking_stack = stack_free_min(c"wa-blocking");
+    let transport_stack = stack_free_min(c"ws-transport");
+    let nvs_stack = stack_free_min(c"wa-nvs");
+    // A corrupted heap can fault inside the TLSF walk below, before the normal
+    // memory line is emitted. Preserve stack evidence first in emulator runs.
+    #[cfg(feature = "qemu")]
+    log::info!(
+        "stack before heap at {at}: wa-main={} wa-blocking={} ws-transport={} wa-nvs={}",
+        Opt(main_stack),
+        Opt(blocking_stack),
+        Opt(transport_stack),
+        Opt(nvs_stack),
+    );
+    let cap = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    let free = unsafe { sys::heap_caps_get_free_size(cap) };
+    let largest = unsafe { sys::heap_caps_get_largest_free_block(cap) };
     log::info!(
         "memory at {at}: internal heap {free} free, largest block {largest}; \
          stack never-used wa-main={} wa-blocking={} ws-transport={} wa-nvs={}",
-        Opt(stack_free_min(c"wa-main")),
-        Opt(stack_free_min(c"wa-blocking")),
-        Opt(stack_free_min(c"ws-transport")),
-        Opt(stack_free_min(c"wa-nvs")),
+        Opt(main_stack),
+        Opt(blocking_stack),
+        Opt(transport_stack),
+        Opt(nvs_stack),
     );
 }
 
