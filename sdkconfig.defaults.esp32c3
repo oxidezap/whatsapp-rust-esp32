@@ -28,7 +28,9 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
 # across records and the crate reassembles them, so 4 KB records only cost
 # CPU on this 160 MHz chip -- while the default 32 KB would sit in internal
 # DRAM for the whole session, exactly where the login heap trough bottoms
-# out. C3-only; PSRAM boards keep the defaults.
+# out. C3-only; PSRAM boards keep the defaults. ASYMMETRIC gates both lens:
+# without it the two lines below are silently ignored.
+CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 
