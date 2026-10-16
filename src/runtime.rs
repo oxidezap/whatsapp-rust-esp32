@@ -284,27 +284,18 @@ impl Esp32Executor {
     /// 256 KB of PSRAM stack (the send path with a quoted reply and an edit has
     /// deep frames), core 0, priority 5. Spawn it with [`spawn_thread`].
     ///
-    /// Without PSRAM this is 32 KB of internal DRAM instead, and it is the
-    /// single largest concession the ESP32-C3 port makes. That number is
-    /// measured, not reasoned: `metrics::log_memory_profile` on the emulated C3
-    /// reports 43,932 of the previous 65,536 bytes never touched across the
-    /// pairing flow, a 515 reconnect and the prekey upload -- a peak of 21,604,
-    /// confirmed a second time at 21,608 once the size was cut. 32 KB keeps 52%
-    /// headroom over that while returning 32 KB to a heap whose largest free
-    /// block, not whose total, is what decides whether the next allocation
-    /// fits. A firmware that adds
-    /// deeper work to the executor should watch `stack_wa_main_min` in
-    /// `GET /metrics` on that chip, or read the line this crate now logs on
-    /// every connect.
+    /// Without PSRAM this reserves 48 KB of internal DRAM. The current SDK's
+    /// login path left only 2,356 bytes free on the demo's previous 36 KB stack
+    /// before a heap-corruption fault. Watch `stack_wa_main_min` in `/metrics`
+    /// when adding work to this executor.
     ///
-    /// The demo firmware does not spawn this thread without PSRAM: there the
-    /// executor runs on the ESP-IDF main task (`CONFIG_ESP_MAIN_TASK_STACK_SIZE`
-    /// in `sdkconfig.defaults.esp32c3`), so the 32 KB arm below is what library
-    /// consumers who spawn the thread themselves get.
+    /// The demo hosts the executor on the ESP-IDF main task without PSRAM.
+    /// Its `CONFIG_ESP_MAIN_TASK_STACK_SIZE` in `sdkconfig.defaults.esp32c3`
+    /// matches this budget; library consumers that spawn a thread get it here.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-main"),
-            stack_size: by_ram(256 * 1024, 32 * 1024),
+            stack_size: by_ram(256 * 1024, 48 * 1024),
             priority: 5,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
