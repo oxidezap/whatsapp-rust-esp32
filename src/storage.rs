@@ -471,14 +471,14 @@ impl FlashNamespaces {
             .map_err(|error| StoreError::Serialization(Box::new(error)))
     }
 
-    fn put_record(
+    fn prepare_record(
         &self,
         namespace: &EspCustomNvs,
         logical_key: &[u8],
         value: &[u8],
         label: &str,
         max_entries: usize,
-    ) -> Result<()> {
+    ) -> Result<(String, Vec<u8>)> {
         if value.len() > MAX_SIGNAL_RECORD_LEN {
             return Err(StoreError::Validation(format!(
                 "{label} record is too large: {} bytes",
@@ -504,6 +504,19 @@ impl FlashNamespaces {
             // budget, otherwise a C3 can write a store it cannot reopen.
             ensure_insert_capacity(false, record_names(namespace)?.len(), max_entries, label)?;
         }
+        Ok((name, record))
+    }
+
+    fn put_record(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        value: &[u8],
+        label: &str,
+        max_entries: usize,
+    ) -> Result<()> {
+        let (name, record) =
+            self.prepare_record(namespace, logical_key, value, label, max_entries)?;
         set_blob(namespace, &name, &record)
     }
 
@@ -1534,20 +1547,18 @@ impl AppSyncStore for NvsStore {
         let logical_key = key_id.to_vec();
         let latest = key_id.to_vec();
         self.flash.run(move |flash| {
-            // Persist the latest-ID marker first: `open` verifies that the key it
-            // names is actually present (`.filter(|id| inner.sync_keys.contains_key(id))`).
-            // If power fails before `put_record` commits, the orphan marker is
-            // ignored and `open` falls back to `timestamp_latest`. If `put_record`
-            // were first, an interrupted write would leave the old marker valid,
-            // selecting an outdated sync key on reboot.
-            flash.save_latest_sync_key_id(&latest)?;
-            flash.put_record(
+            let (name, record) = flash.prepare_record(
                 &flash.sync_keys,
                 &logical_key,
                 &payload,
                 "sync key",
                 MAX_SYNC_KEYS,
-            )
+            )?;
+            // Validate before changing either record. The marker is committed
+            // first so a power loss before the key write leaves an orphan that
+            // open rejects, rather than a valid but stale previous marker.
+            flash.save_latest_sync_key_id(&latest)?;
+            set_blob(&flash.sync_keys, &name, &record)
         })?;
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);
