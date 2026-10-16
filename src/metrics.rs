@@ -291,6 +291,36 @@ pub fn heap_integrity_ok(at: &str) -> bool {
     true
 }
 
+/// TEMPORARY DIAGNOSTIC (PR #15 C3 triage): full task census (name, stack
+/// base, high-water mark, state) at each telemetry point. The corrupt header
+/// reads 0xa5a5a5a5 -- the FreeRTOS stack-fill pattern -- so a task created
+/// in the fault window with a stack overlapping live heap is the prime
+/// suspect; the census proves or kills that theory in one run (a new task
+/// appears, with a stack covering the slot, or the count/names never move).
+/// Revert before merge.
+pub fn log_task_census(at: &str) {
+    // SAFETY: standard FreeRTOS state query; the array is sized from the
+    // live task count plus margin, output truncated to what fits.
+    unsafe {
+        let n = sys::uxTaskGetNumberOfTasks() as usize;
+        let cap = n.saturating_add(4).min(48);
+        let mut states: Vec<sys::TaskStatus_t> = Vec::with_capacity(cap);
+        let total =
+            sys::uxTaskGetSystemState(states.as_mut_ptr(), cap as u32, core::ptr::null_mut());
+        states.set_len((total as usize).min(cap));
+        log::info!("tasks at {at}: count={total}");
+        for st in &states {
+            let name = core::ffi::CStr::from_ptr(st.pcTaskName.as_ptr()).to_string_lossy();
+            log::info!(
+                "task at {at}: {name} base={:#x} hwm={} state={}",
+                st.pxStackBase as usize,
+                st.usStackHighWaterMark,
+                st.eCurrentState as u32,
+            );
+        }
+    }
+}
+
 pub fn log_memory_profile(at: &str) {
     struct Opt(Option<u32>);
     impl std::fmt::Display for Opt {
@@ -309,9 +339,7 @@ pub fn log_memory_profile(at: &str) {
     if !heap_integrity_ok(at) {
         return;
     }
-    // TEMPORARY DIAGNOSTIC (PR #15 C3 triage): dump every heap block while the
-    // heap is still clean. The fault 20 ms later (first ServerAck) reads a
-    // wild block address (MTVAL 0xe56ebc34, deterministic across runs); the
+    log_task_census(at);
     let main_stack = stack_free_min(c"wa-main");
     let blocking_stack = stack_free_min(c"wa-blocking");
     let transport_stack = stack_free_min(c"ws-transport");
