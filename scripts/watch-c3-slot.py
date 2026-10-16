@@ -23,6 +23,11 @@ import time
 from pathlib import Path
 
 SLOT_DEFAULT = 0x3FC9168C
+# Serial marker after which the fault window opens (70 sync keys stored,
+# ~5 history messages, app-state sync, then the first ServerAck). Arming
+# earlier catches boot-time pool init (thousands of legitimate hits and a
+# wedged target); arming here leaves only in-window writers.
+MARKER = 'Processed app state key share'
 
 
 def decode(payload):
@@ -80,14 +85,17 @@ class Remote:
     def memory(self, address, length):
         return bytes.fromhex(self.command(f'm{address:x},{length:x}'))
 
+    def interrupt(self):
+        self.connection.sendall(b'\x03')
+
     def registers(self):
         raw = bytes.fromhex(self.command('g'))
         return [int.from_bytes(raw[i:i + 4], 'little') for i in range(0, 132, 4)]
 
 
 def main():
-    elf, outfile = sys.argv[1], sys.argv[2]
-    slot = int(sys.argv[3], 0) if len(sys.argv) > 3 else SLOT_DEFAULT
+    elf, outfile, serial = sys.argv[1], sys.argv[2], sys.argv[3]
+    slot = int(sys.argv[4], 0) if len(sys.argv) > 4 else SLOT_DEFAULT
     log = open(outfile, 'w')
     def emit(line):
         print(line, flush=True)
@@ -105,17 +113,38 @@ def main():
                 time.sleep(0.1)
         connection.settimeout(600)
         remote = Remote(connection)
-        before = remote.memory(slot, 4)
-        emit(f'SLOT {slot:#x} before={before.hex()}')
-        # Hardware write watchpoint, 4 bytes (Z2). QEMU answers OK or E NN.
-        try:
-            response = remote.command(f'Z2,{slot:x},4')
-            emit(f'WATCH armed on {slot:#x}: {response}')
-        except RuntimeError as e:
-            emit(f'WATCH unsupported: {e}')
-            remote.send('c')
-            connection.close()
-            return 0
+        # Let the target boot undisturbed; the slot is legitimately written
+        # during pool init, so arming now would spam and wedge the run.
+        remote.send('c')
+        emit('target resumed, waiting for marker')
+        armed = False
+        start = time.monotonic()
+        while not armed:
+            if time.monotonic() - start > 540:
+                emit('marker never appeared, leaving target running')
+                connection.close()
+                return 0
+            try:
+                text = Path(serial).read_text(errors='replace')
+            except OSError:
+                text = ''
+            if MARKER in text:
+                remote.interrupt()
+                stop = remote.packet()
+                emit(f'interrupted at marker: {stop}')
+                before = remote.memory(slot, 4)
+                emit(f'SLOT {slot:#x} before={before.hex()}')
+                try:
+                    response = remote.command(f'Z2,{slot:x},4')
+                    emit(f'WATCH armed on {slot:#x}: {response}')
+                except RuntimeError as e:
+                    emit(f'WATCH unsupported: {e}')
+                    remote.send('c')
+                    connection.close()
+                    return 0
+                armed = True
+            else:
+                time.sleep(0.2)
         remote.send('c')
         while True:
             stop = remote.packet()
