@@ -229,10 +229,24 @@ fn walk_heap(region: HeapRegion, report: bool, at: &str) -> bool {
         let next = cur.wrapping_add(4).wrapping_add(raw & !3);
         if next <= cur || next > end {
             if report {
+                // SAFETY: bounded volatile reads of mapped DRAM near `cur`;
+                // shows whether the 0xa5 fill spans KBs (task-stack creation
+                // overlapping live heap) or a few bytes (stray small write).
+                let mut context = [0u32; 40];
+                let base = cur.saturating_sub(32);
+                for (i, slot) in context.iter_mut().enumerate() {
+                    let addr = base + i * 4;
+                    *slot = if addr + 4 <= end {
+                        unsafe { (addr as *const u32).read_volatile() }
+                    } else {
+                        0xDEAD_DEAD
+                    };
+                }
                 log::error!(
                     "heap walk at {at}: corrupt header at {:#x} (raw {:#x}, next {:#x}, heap {:#x})",
                     cur, raw, next, region.base
                 );
+                log::error!("heap walk context {:#x}: {:08x?}", base, context);
             }
             return false;
         }
