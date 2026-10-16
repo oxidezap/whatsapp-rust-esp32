@@ -164,8 +164,11 @@ qemu_cmd() {
         -nic "user,model=open_eth,hostfwd=tcp:127.0.0.1:${port}-:8081"
         -serial mon:stdio
     )
-    if [[ -n "${QEMU_GDB:-}" ]]; then
-        QEMU_CMD+=(-s -S)
+    if [[ -n "${QEMU_GDB:-}" && -z "${QEMU_GDB_USED:-}" ]]; then
+        QEMU_CMD+=(-gdb tcp:127.0.0.1:1234 -S)
+        if [[ -n "${QEMU_GDB_ONCE:-}" ]]; then
+            QEMU_GDB_USED=1
+        fi
     fi
 }
 
