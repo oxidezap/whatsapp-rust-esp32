@@ -13,9 +13,10 @@
 //! `wa-nvs` thread with an internal-RAM stack, because the flash cache is off
 //! while flash is being written and a PSRAM stack would fault.
 //!
-//! Reads are served from the in-RAM mirror that is filled once at boot; a
-//! write updates flash first and the mirror only once flash has committed, so
-//! RAM never claims more than flash holds.
+//! Writes update flash before any RAM mirror. Without PSRAM, raw session
+//! records are not retained in a second mirror beside the SDK's parsed cache;
+//! cache misses reload from NVS. Durable namespace limits and collision checks
+//! remain authoritative regardless of mirror eviction.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -201,7 +202,10 @@ impl StoreInner {
         if crate::runtime::HAS_PSRAM {
             return;
         }
-        for key in self.session_order.overflow(self.sessions.len(), 8) {
+        // The SDK already caches parsed sessions. Without PSRAM, retaining
+        // another eight serialized records consumes the space needed by
+        // background persistence and TLS; reload raw records from NVS.
+        for key in self.session_order.overflow(self.sessions.len(), 0) {
             self.sessions.remove(&key);
             self.session_order.removed(&key);
         }
