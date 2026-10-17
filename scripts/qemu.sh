@@ -507,7 +507,12 @@ cmd_test() {
     log "reloaded Signal sessions: repeating encrypted ping/quoted pong"
     sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
         -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")" || return 1
-    [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || return 1
+    log "POST /send after session reboot -> $sent"
+    [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || {
+        check_crashes || return 1
+        connection_context "$OUT_DIR/qemu-a-boot3.log"
+        return 1
+    }
     sent_id="$(json_field "$sent" "d['message_id']")"
     [[ -n "$sent_id" ]] || return 1
     wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"

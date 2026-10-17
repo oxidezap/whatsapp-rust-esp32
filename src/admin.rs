@@ -586,24 +586,34 @@ pub fn start_admin_server(
                     return json_response_status(req, 503, r#"{"error":"Not connected"}"#);
                 }
 
-                let mut message = wa::Message::default();
-                message.conversation = Some(text.to_string());
+                let text = text.to_string();
+                let memory_gate = active_client.memory_gate();
                 let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                 let task_active_client = active_client.clone();
-                let task = Box::pin(async move {
+                let task = Box::pin(bounded_admin_future(async move {
+                    let _admission = match memory_gate {
+                        Some(gate) => Some(gate.acquire().await),
+                        None => None,
+                    };
                     info!("Admin: executor starting send_message to {jid}");
                     let result = if task_active_client.is_current(&client) {
-                        client
-                            .send_message(jid, message)
+                        Box::pin(bounded_admin_future(prepare_text_send(&client, jid, text)))
                             .await
                             .map(|sent| sent.message_id)
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| {
+                                let mut cause = std::error::Error::source(&error);
+                                while let Some(source) = cause {
+                                    warn!("Admin: send_message source: {source}");
+                                    cause = source.source();
+                                }
+                                error.to_string()
+                            })
                     } else {
                         Err("WhatsApp client reconnected; try again".to_string())
                     };
                     info!("Admin: executor send_message result: {:?}", result);
                     let _ = result_tx.send(result);
-                });
+                }));
                 if task_tx.try_send(task).is_err() {
                     warn!("Admin: executor channel unavailable");
                     return json_response_status(
@@ -906,4 +916,25 @@ pub fn start_admin_server(
 
     info!("Admin server ready on port {port}");
     Ok(server)
+}
+
+// Construct the protobuf only after transient-memory admission and outside the
+// suspended dashboard task, as the bot's synchronous send helpers already do.
+fn prepare_text_send(
+    client: &whatsapp_rust::Client,
+    jid: Jid,
+    text: String,
+) -> impl std::future::Future<Output = Result<whatsapp_rust::SendResult, whatsapp_rust::SendError>> + '_
+{
+    client.send_message(jid, wa::Message::text(text))
+}
+
+fn bounded_admin_future<F: std::future::Future>(future: F) -> F {
+    const {
+        assert!(
+            std::mem::size_of::<F>() <= 1024,
+            "admin send future exceeds 1 KiB"
+        );
+    }
+    future
 }

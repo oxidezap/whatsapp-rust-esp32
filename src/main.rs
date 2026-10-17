@@ -606,7 +606,7 @@ async fn run_whatsapp(
     active_client: Arc<ActiveClient>,
     maintenance: Arc<MaintenanceCoordinator>,
 ) {
-    let memory_gate = (!whatsapp_esp32::runtime::HAS_PSRAM).then(MemoryGate::default);
+    let memory_gate = active_client.memory_gate();
     // Supervisor loop: the firmware must never let app_main() return (that tears down
     // WiFi/admin and halts the chip). whatsapp-rust reconnects forever internally, but
     // if the bot future ever does end, re-create it after a short delay. This task also
@@ -872,6 +872,7 @@ async fn run_whatsapp_inner(
                                     inbound,
                                     Arc::clone(&client),
                                     memory_gate.clone(),
+                                    active_client.as_ref(),
                                 )
                                 .await;
                             }
@@ -962,6 +963,7 @@ fn prepare_message_task<'a>(
     inbound: &'a whatsapp_rust::wacore::types::events::InboundMessage,
     client: Arc<whatsapp_rust::Client>,
     gate: Option<MemoryGate>,
+    active_client: &'a ActiveClient,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     match gate {
         None => prepare_admitted_message_task(inbound, client),
@@ -969,7 +971,9 @@ fn prepare_message_task<'a>(
             // This demo's response uses only WS and NVS. HTTP admission waits
             // before occupying a blocking worker, so crypto offloads can run.
             let _admission = gate.acquire().await;
-            prepare_admitted_message_task(inbound, client).await;
+            if active_client.is_current(&client) {
+                prepare_admitted_message_task(inbound, client).await;
+            }
         })),
     }
 }

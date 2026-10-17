@@ -33,6 +33,7 @@ const MESSAGE_LOG_CAPACITY: usize = 16;
 /// send through it and events from a superseded instance can be ignored.
 pub struct ActiveClient {
     inner: Mutex<Option<Arc<Client>>>,
+    memory_gate: Option<crate::http_client::MemoryGate>,
 }
 
 impl Default for ActiveClient {
@@ -45,7 +46,14 @@ impl ActiveClient {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            memory_gate: (!crate::runtime::HAS_PSRAM).then(crate::http_client::MemoryGate::default),
         }
+    }
+
+    /// One reservation shared by HTTP, the demo bot and dashboard sends, kept
+    /// across client replacements until every older operation releases it.
+    pub fn memory_gate(&self) -> Option<crate::http_client::MemoryGate> {
+        self.memory_gate.clone()
     }
 
     pub fn set(&self, client: Arc<Client>) {
