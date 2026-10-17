@@ -926,7 +926,9 @@ fn prepare_text_send(
     text: String,
 ) -> impl std::future::Future<Output = Result<whatsapp_rust::SendResult, whatsapp_rust::SendError>> + '_
 {
-    client.send_message(jid, wa::Message::text(text))
+    let mut message = wa::Message::default();
+    message.conversation = Some(text);
+    client.send_message(jid, message)
 }
 
 fn bounded_admin_future<F: std::future::Future>(future: F) -> F {
