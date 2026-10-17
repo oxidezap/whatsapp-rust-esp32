@@ -148,7 +148,8 @@ type MsgSecretKey = (Arc<str>, Arc<str>, Arc<str>);
 type MsgSecretValue = (MessageSecretBytes, i64, i64);
 
 /// Use order for a RAM-capped mirror map. Without PSRAM the mirror holds at
-/// most 8 entries as a cache over flash (a miss reloads from NVS), and
+/// most 8 identities/keys or one encoded session as a cache over flash
+/// (a miss reloads from NVS), and
 /// eviction must drop the least-recently-used entry: dropping an arbitrary
 /// `HashMap` key can discard the just-written hot session the encrypt path is
 /// about to read, paying a flash read immediately. Both writes and read hits
@@ -201,7 +202,11 @@ impl StoreInner {
         if crate::runtime::HAS_PSRAM {
             return;
         }
-        for key in self.session_order.overflow(self.sessions.len(), 8) {
+        // The SDK already retains decoded hot Signal sessions. Avoid keeping
+        // eight additional encoded records in scarce internal RAM; misses
+        // still reload the complete durable record from NVS. This is only
+        // a read-through mirror cap, not a persisted-session limit.
+        for key in self.session_order.overflow(self.sessions.len(), 1) {
             self.sessions.remove(&key);
             self.session_order.removed(&key);
         }
@@ -924,7 +929,7 @@ impl NvsStore {
             // once, and the capped mirrors below exist precisely so a large
             // store does not sit in internal DRAM. Each record is validated,
             // mirrored, and dropped before the next is read; the mirror keeps
-            // the newest 8 in NVS order and misses reload from flash.
+            // its configured capped subset in NVS order; misses reload from flash.
             flash.visit_records(
                 &flash.identities,
                 "identity",
