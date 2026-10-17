@@ -217,7 +217,7 @@ stop() {
 }
 
 # The signatures that mean the firmware died rather than merely fell behind.
-CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)'
+CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)|WS send error:.*32512'
 
 # crash_context LOG: print the serial around the crash signature.
 #
