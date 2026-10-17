@@ -71,7 +71,11 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # the extension and neither peer here does.
 CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
-CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+# Isolated trial: halve only outgoing record capacity. ESP-IDF v5.5.5
+# esp_mbedtls_write fragments arbitrary-length writes at this configured
+# limit; callers retain write_all, so logical messages are not truncated.
+# Preserve the full 16 KiB peer receive capacity and all original gates.
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
 
 # Trim ciphersuites and features the WhatsApp gateway and the mock server never
 # negotiate. Each one is code in flash and, for the key exchanges, peak RAM
