@@ -247,6 +247,17 @@ decode_crash() {
     fi
 }
 
+# These callbacks do not retry a failed operation. Once one fails the
+# required success marker cannot qualify this ping; retain the complete cause.
+check_message_failure() {
+    local serial="$1" line
+    line=$(grep -n -m1 -E 'Failed to send reaction:|Failed to send pong:|Failed to edit message ' "$serial" | cut -d: -f1) || true
+    [[ -n "$line" ]] || return 0
+    log "firmware reported a required messaging failure: $serial"
+    sed -n "${line},$((line + 4))p" "$serial"
+    return 1
+}
+
 check_crashes() {
     local serial
     for serial in "${QEMU_SERIAL_LOGS[@]:-}"; do
@@ -257,6 +268,7 @@ check_crashes() {
             decode_crash "$serial"
             return 1
         fi
+        check_message_failure "$serial" || return 1
     done
 }
 
@@ -283,6 +295,7 @@ wait_markers() {
             if grep -q -E "$CRASH_RE" "$serial"; then
                 log "firmware crashed before '$marker'"; crash_context "$serial"; decode_crash "$serial"; return 1
             fi
+            check_message_failure "$serial" || return 1
             if (( SECONDS >= deadline )); then
                 log "timed out waiting for '$marker'"; connection_context "$serial"; tail -n 60 "$serial"; return 1
             fi
