@@ -19,17 +19,6 @@ const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_RESPONSE_HEADER_BYTES: usize = 8 * 1024;
 /// Maximum response size for non-streaming buffered HTTP requests.
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
-/// Refuse a buffered download while the internal heap is below this. A
-/// buffered fetch holds a TLS handshake transient plus the whole body in
-/// RAM at once; starting one with no headroom wedges the chip (the NIC
-/// cannot allocate receive buffers, its retry loop starves the executor,
-/// and nothing ever frees). Upstream logs the failure and omits the blob,
-/// and the sync that needed it already degrades the same way on every
-/// board (see the skipped CriticalBlock collections at login), so failing
-/// fast here degrades instead of dying. Streaming downloads are unaffected
-/// (windowed, not buffered). Sized so the login trough deterministically
-/// skips: transient needs are ~10-20 KB against a ~16 KB floor.
-
 /// Parse a URL into (host, port, path, use_tls).
 /// Supports http://, https://, ws://, wss:// schemes.
 pub fn parse_url(url: &str) -> Result<(String, u16, String, bool)> {
@@ -210,6 +199,29 @@ fn connect_stream(
     skip_tls_verify: bool,
 ) -> Result<HttpStream> {
     let stream = if use_tls {
+        // Best-effort admission before creating a second TLS connection next
+        // to the websocket. The blob byte budget excludes TLS and cannot
+        // protect Signal/NVS writes from its record/handshake allocations.
+        // CI observed post-reboot send failures at 43-47 KiB free, then less
+        // than 12 KiB after HTTP activity. Keep 32 KiB for protocol/persistence
+        // work beside a conservative 32 KiB TLS allowance. Full 16 KiB peer
+        // records also need a contiguous block plus context overhead.
+        // This check does not reserve memory or guarantee later success.
+        if !crate::runtime::HAS_PSRAM {
+            const MIN_INTERNAL_FREE: usize = 64 * 1024;
+            const MIN_INTERNAL_BLOCK: usize = 20 * 1024;
+            let (free, largest) = crate::metrics::heap_now();
+            if free < MIN_INTERNAL_FREE || largest < MIN_INTERNAL_BLOCK {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    format!(
+                        "HTTP TLS admission refused: internal heap {free} free/{largest} largest; \
+                         requires {MIN_INTERNAL_FREE}/{MIN_INTERNAL_BLOCK}"
+                    ),
+                )
+                .into());
+            }
+        }
         HttpStream::Tls(EspTlsStream::connect_with_timeout(
             host,
             port,

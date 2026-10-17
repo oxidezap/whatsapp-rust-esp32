@@ -13,7 +13,7 @@ name: CI
 
 on:
   push:
-    branches: [agent/c3-flush-diagnostic]
+    branches: [agent/c3-http-admission]
   pull_request:
 
 # Nothing here writes to the repository; the token only needs to read it.
