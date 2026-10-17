@@ -1,0 +1,32 @@
+name: Diagnose pinned C3 ELF
+on:
+  push:
+    branches: [agent/c3-oom-diagnostics]
+    paths: [.github/workflows/c3-oom-diagnostics.yml]
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: 12091180136
+          run-id: 39004744443
+          github-token: ${{ github.token }}
+          path: firmware
+      - name: Install architecture-aware DWARF tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils-riscv64-linux-gnu
+      - name: Decode exact failing firmware
+        run: |
+          elf="$(find firmware -name whatsapp-esp32 -type f -print -quit)"
+          test -n "$elf"
+          echo 'Source consumer e7307542a60c25ed8c66429fc6a311f5e9e55043; core 4b8dfd20fcc20a01954d8e94e75c469108677ded'
+          sha256sum "$elf"
+          riscv64-linux-gnu-addr2line -a -f -C -i -e "$elf" 0x4219ad6a 0x4209ba50 0x421bf380 0x421cc98e 0x421cced6 0x42204536
+          riscv64-linux-gnu-objdump -d -C --start-address=0x4219acb0 --stop-address=0x4219ae00 "$elf"
