@@ -940,7 +940,10 @@ async fn handle_message(ctx: &MessageContext) {
     info!("Sending reaction...");
     match boxed_message_phase(|| ctx.react(REACTION_EMOJI)).await {
         Ok(_) => info!("Reaction sent! Building pong reply..."),
-        Err(e) => error!("Failed to send reaction: {}; building pong reply...", e),
+        Err(e) => error!(
+            "Failed to send reaction: {}; building pong reply...",
+            SendFailure(&e)
+        ),
     }
 
     let start = std::time::Instant::now();
@@ -949,7 +952,7 @@ async fn handle_message(ctx: &MessageContext) {
         // Only the ID is needed for editing; release the quoted payload now.
         Ok(r) => r.message_id,
         Err(e) => {
-            error!("Failed to send pong: {}", e);
+            error!("Failed to send pong: {}", SendFailure(&e));
             return;
         }
     };
@@ -959,7 +962,7 @@ async fn handle_message(ctx: &MessageContext) {
 
     match prepare_demo_edit(ctx, message_id.clone(), &duration).await {
         Ok(_) => info!("Edit sent for message {}", message_id),
-        Err(e) => error!("Failed to edit message {}: {}", message_id, e),
+        Err(e) => error!("Failed to edit message {}: {}", message_id, SendFailure(&e)),
     }
 }
 
@@ -995,4 +998,20 @@ fn bounded_message_future<F: std::future::Future>(future: F) -> F {
         );
     }
     future
+}
+
+// Backend context must retain its allocation/NVS cause in the serial log.
+// Display the source chain without Debug-printing requests or crypto state.
+struct SendFailure<'a>(&'a (dyn std::error::Error + 'static));
+
+impl std::fmt::Display for SendFailure<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.0, f)?;
+        let mut cause = self.0.source();
+        while let Some(error) = cause {
+            write!(f, ": {error}")?;
+            cause = error.source();
+        }
+        Ok(())
+    }
 }
