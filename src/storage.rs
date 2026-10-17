@@ -1211,6 +1211,10 @@ pub struct StoreStats {
 
 #[async_trait]
 impl SignalStore for NvsStore {
+    fn reuse_session_flush_buffer(&self) -> bool {
+        !crate::runtime::HAS_PSRAM
+    }
+
     fn session_flush_batch_limit(&self) -> usize {
         if crate::runtime::HAS_PSRAM {
             usize::MAX
