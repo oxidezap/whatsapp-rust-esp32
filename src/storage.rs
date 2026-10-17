@@ -153,7 +153,7 @@ type MsgSecretValue = (MessageSecretBytes, i64, i64);
 /// Use order for a RAM-capped mirror map. Without PSRAM the mirror holds at
 /// most 8 identities/keys as a cache over flash. Encoded sessions have no
 /// mirror without PSRAM; the SDK caches decoded sessions. Other mirrors
-/// eviction must drop the least-recently-used entry: dropping an arbitrary
+/// evict the least-recently-used entry: dropping an arbitrary
 /// `HashMap` key can discard the just-written hot session the encrypt path is
 /// about to read, paying a flash read immediately. Both writes and read hits
 /// count as use; the back holds the most-recently-used key.
@@ -949,8 +949,9 @@ impl NvsStore {
             // Streamed, not batched: `load_records` would hold every blob at
             // once, and the capped mirrors below exist precisely so a large
             // store does not sit in internal DRAM. Each record is validated,
-            // mirrored, and dropped before the next is read; the mirror keeps
-            // the newest 8 in NVS order and misses reload from flash.
+            // mirrored, and dropped before the next is read. Other mirrors
+            // retain their capped subset; encoded sessions are not retained
+            // without PSRAM, and a miss always reloads from flash.
             flash.visit_records(
                 &flash.identities,
                 "identity",

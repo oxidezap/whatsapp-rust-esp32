@@ -101,6 +101,28 @@ const MDNS_HOSTNAME: &str = "esp32-whatsapp";
 #[cfg(feature = "admin")]
 const ADMIN_PORT: u16 = admin::DEFAULT_ADMIN_PORT;
 
+// The SDK processes acks/receipts independently. Subscribe only to events
+// consumed here so unused payloads cannot queue behind a reply on the C3.
+// Keep lifecycle/failure visibility and the startup memory checkpoints.
+const HANDLED_EVENTS: &[EventKind] = &[
+    EventKind::PairingQrCode,
+    EventKind::PairingQrCodesExhausted,
+    EventKind::Connected,
+    EventKind::Disconnected,
+    EventKind::LoggedOut,
+    EventKind::Messages,
+    EventKind::UndecryptableMessage,
+    EventKind::ClientOutdated,
+    EventKind::StreamReplaced,
+    EventKind::TemporaryBan,
+    EventKind::ConnectFailure,
+    EventKind::AppStateSyncFailed,
+    EventKind::DirtyState,
+    EventKind::OfflineSyncPreview,
+    EventKind::OfflineSyncCompleted,
+    EventKind::DeviceListUpdate,
+];
+
 const PING_TRIGGER: &str = "\u{1f980}ping"; // 🦀ping
 const PONG_TEXT: &str = "\u{1f3d3} Pong!"; // 🏓 Pong!
 const REACTION_EMOJI: &str = "\u{1f3d3}"; // 🏓
@@ -753,7 +775,7 @@ async fn run_whatsapp_inner(
             outcome: exit_outcome.clone(),
             temporary_ban_seconds: temporary_ban_seconds.clone(),
         })
-        .on_event(move |event, client| {
+        .on_event_for(HANDLED_EVENTS, move |event, client| {
             let ds = event_status.clone();
             let scanned = scanned.clone();
             let active_client = event_active_client.clone();
