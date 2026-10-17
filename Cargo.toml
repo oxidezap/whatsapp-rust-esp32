@@ -133,6 +133,9 @@ dotenvy = "0.15"
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/mdns", version = "1.2" }
 
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/openeth_rx_backoff"]
+
 [patch.crates-io]
 # ESP-IDF v5.5.5 (the version the ESP32-C5 build uses) backported an sdmmc_host_t
 # field after esp-idf-hal 0.46.2 shipped; this revision adds it behind a version

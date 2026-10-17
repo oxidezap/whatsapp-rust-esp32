@@ -125,6 +125,10 @@ jobs:
       # needs is installed by ESP-IDF's own tool installer during the first build.
       - name: Espressif Rust toolchain
         uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7
+        env:
+          # espup queries release metadata; unauthenticated shared-runner API
+          # limits otherwise fail before compilation. This token is read-only.
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           default: true
           buildtargets: esp32s3
@@ -142,7 +146,7 @@ jobs:
             ~/.cargo/git
             .embuild
             target
-          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.*', 'components_*.lock', '.cargo/config.toml', 'scripts/*.sh') }}
+          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.*', 'components_*.lock', 'components/**', '.cargo/config.toml', 'scripts/*.sh') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-
 
