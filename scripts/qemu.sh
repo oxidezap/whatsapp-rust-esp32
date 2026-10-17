@@ -423,11 +423,12 @@ cmd_test() {
         return 1
     fi
     log "board b: GET /device -> $device"
-    local to_b sent
-    if ! to_b="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"; then
+    local to_b sent pn_b
+    if ! pn_b="$(json_field "$device" "d['pn'] or ''")"; then
         log "board b: /device was not JSON: $device"
         return 1
     fi
+    to_b="$(account_jid "$pn_b")"
     if [[ -z "$to_b" ]]; then
         log "board b connected without reporting a number; /device -> $device"
         return 1
@@ -444,8 +445,41 @@ cmd_test() {
     wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "Reaction sent" "Send took"
     wait_for_message "$port_a" "'Pong!'"
 
-    # Both boards covered pairing and a full round trip by now, so their
-    # high-water marks are the ones to gate on.
+    metrics_gate "$port_a" a-before-session-reboot || return 1
+    metrics_gate "$port_b" b-before-session-reboot || return 1
+
+    # Both Signal sessions now exist. Reboot both peers, not only the device
+    # that paired before the first message: the next exchange must decrypt
+    # persisted sessions and handle the sender counter's reserved range.
+    stop "$pid_a"
+    stop "$pid_b"
+    boot a "$port_a" "$OUT_DIR/qemu-a-boot3.log"
+    pid_a=$BOOT_PID
+    boot b "$port_b" "$OUT_DIR/qemu-b-boot2.log"
+    pid_b=$BOOT_PID
+    wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot3.log" "${BOOT_MARKERS[@]}" \
+        "WhatsApp NVS loaded: device=true" "Connected to WhatsApp!"
+    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot2.log" "${BOOT_MARKERS[@]}" \
+        "WhatsApp NVS loaded: device=true" "Connected to WhatsApp!"
+    if grep -q -F "QR CODE" "$OUT_DIR/qemu-a-boot3.log" "$OUT_DIR/qemu-b-boot2.log"; then
+        log "a peer requested QR pairing after persisting its Signal session"
+        return 1
+    fi
+    device="$(admin_get "$port_a" /device)" || return 1
+    [[ "$(json_field "$device" "d['connected'] and d['pn'] == '$pn_a'")" == True ]] || return 1
+    device="$(admin_get "$port_b" /device)" || return 1
+    [[ "$(json_field "$device" "d['connected'] and d['pn'] == '$pn_b'")" == True ]] || return 1
+    # These are fresh processes: /messages cannot satisfy the assertions with
+    # the previous ping/pong. The bot's Pong is a quoted encrypted reply.
+    log "reloaded Signal sessions: repeating encrypted ping/quoted pong"
+    sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
+        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")" || return 1
+    [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || return 1
+    wait_for_message "$port_b" "'\U0001f980ping'"
+    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot2.log" "Reaction sent" "Send took"
+    wait_for_message "$port_a" "'Pong!'"
+
+    # Gate both peaks after the reloaded-session roundtrip as well.
     metrics_gate "$port_a" a || return 1
     metrics_gate "$port_b" b || return 1
     echo >&2
