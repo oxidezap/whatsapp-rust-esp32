@@ -13,7 +13,7 @@ name: CI
 
 on:
   push:
-    branches: [agent/c3-write-completion]
+    branches: [agent/c3-transient-gate]
   pull_request:
 
 # Nothing here writes to the repository; the token only needs to read it.

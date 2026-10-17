@@ -3,13 +3,18 @@ use std::net::ToSocketAddrs;
 
 use anyhow::Result;
 use whatsapp_rust::async_trait;
-use whatsapp_rust::wacore::net::{HttpClient, HttpRequest, HttpResponse, StreamingHttpResponse};
+use whatsapp_rust::wacore::net::{
+    HttpClient, HttpRequest, HttpResponse, StreamingHttpResponse, StreamingRequestPermit,
+};
 
 use crate::transport::EspTlsStream;
 
 #[path = "http_chunked.rs"]
 mod http_chunked;
 use http_chunked::ChunkedReader;
+
+mod memory_gate;
+pub use memory_gate::{MemoryGate, MemoryPermit};
 
 /// Socket-level bound on every media/version request. Without one a peer that
 /// accepts the connection and then goes quiet holds the calling thread forever;
@@ -81,11 +86,20 @@ fn qemu_host(host: String) -> String {
 
 pub struct EspHttpClient {
     skip_tls_verify: bool,
+    memory_gate: Option<MemoryGate>,
 }
 
 impl EspHttpClient {
     pub fn new(skip_tls_verify: bool) -> Self {
-        Self { skip_tls_verify }
+        Self {
+            skip_tls_verify,
+            memory_gate: None,
+        }
+    }
+
+    pub fn with_memory_gate(mut self, gate: MemoryGate) -> Self {
+        self.memory_gate = Some(gate);
+        self
     }
 }
 
@@ -99,6 +113,10 @@ impl Default for EspHttpClient {
 #[async_trait]
 impl HttpClient for EspHttpClient {
     async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
+        let _admission = match &self.memory_gate {
+            Some(gate) => Some(gate.acquire().await),
+            None => None,
+        };
         const MIN_HEAP_FOR_BUFFERED_FETCH: usize = 32 * 1024;
         let (free, _) = crate::metrics::heap_now();
         if free < MIN_HEAP_FOR_BUFFERED_FETCH {
@@ -138,6 +156,15 @@ impl HttpClient for EspHttpClient {
     /// of buffering a whole download, which on this chip means PSRAM, not RAM.
     fn supports_streaming(&self) -> bool {
         true
+    }
+
+    fn streaming_admission(
+        &self,
+    ) -> Option<whatsapp_rust::wacore::runtime::BoxFuture<'_, Result<StreamingRequestPermit>>> {
+        let gate = self.memory_gate.as_ref()?.clone();
+        Some(Box::pin(async move {
+            Ok(Box::new(gate.acquire().await) as StreamingRequestPermit)
+        }))
     }
 
     fn execute_streaming(&self, request: HttpRequest) -> Result<StreamingHttpResponse> {

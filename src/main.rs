@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 // Single upstream dependency: whatsapp-rust re-exports wacore/waproto/buffa and
 // the shared support crates, so there is no way for them to drift out of sync.
+use whatsapp_esp32::http_client::MemoryGate;
 use whatsapp_rust::bytes;
 #[cfg(feature = "mock-server")]
 use whatsapp_rust::handshake::NoiseCertPolicy;
@@ -100,6 +101,28 @@ const DEVICE_OS: &str = "whatsapp-esp32";
 const MDNS_HOSTNAME: &str = "esp32-whatsapp";
 #[cfg(feature = "admin")]
 const ADMIN_PORT: u16 = admin::DEFAULT_ADMIN_PORT;
+
+// The SDK processes acks/receipts independently. Subscribe only to events
+// consumed here so unused payloads cannot queue behind a reply on the C3.
+// Keep lifecycle/failure visibility and the startup memory checkpoints.
+const HANDLED_EVENTS: &[EventKind] = &[
+    EventKind::PairingQrCode,
+    EventKind::PairingQrCodesExhausted,
+    EventKind::Connected,
+    EventKind::Disconnected,
+    EventKind::LoggedOut,
+    EventKind::Messages,
+    EventKind::UndecryptableMessage,
+    EventKind::ClientOutdated,
+    EventKind::StreamReplaced,
+    EventKind::TemporaryBan,
+    EventKind::ConnectFailure,
+    EventKind::AppStateSyncFailed,
+    EventKind::DirtyState,
+    EventKind::OfflineSyncPreview,
+    EventKind::OfflineSyncCompleted,
+    EventKind::DeviceListUpdate,
+];
 
 const PING_TRIGGER: &str = "\u{1f980}ping"; // 🦀ping
 const PONG_TEXT: &str = "\u{1f3d3} Pong!"; // 🏓 Pong!
@@ -583,6 +606,7 @@ async fn run_whatsapp(
     active_client: Arc<ActiveClient>,
     maintenance: Arc<MaintenanceCoordinator>,
 ) {
+    let memory_gate = (!whatsapp_esp32::runtime::HAS_PSRAM).then(MemoryGate::default);
     // Supervisor loop: the firmware must never let app_main() return (that tears down
     // WiFi/admin and halts the chip). whatsapp-rust reconnects forever internally, but
     // if the bot future ever does end, re-create it after a short delay. This task also
@@ -593,6 +617,7 @@ async fn run_whatsapp(
             store.clone(),
             device_status.clone(),
             active_client.clone(),
+            memory_gate.clone(),
         )
         .await;
         let delay = match outcome {
@@ -673,11 +698,15 @@ async fn run_whatsapp_inner(
     backend: Arc<NvsStore>,
     device_status: Arc<DeviceStatus>,
     active_client: Arc<ActiveClient>,
+    memory_gate: Option<MemoryGate>,
 ) -> Result<ClientExit> {
     // Both would be `::default()` against the real gateway; the demo points them
     // at the mock server and accepts its self-signed certificate.
     let transport_factory = Esp32TransportFactory::new(MOCK_SERVER_WS, SKIP_TLS_VERIFY);
-    let http_client = EspHttpClient::new(SKIP_TLS_VERIFY);
+    let mut http_client = EspHttpClient::new(SKIP_TLS_VERIFY);
+    if let Some(gate) = &memory_gate {
+        http_client = http_client.with_memory_gate(gate.clone());
+    }
 
     // One-shot guard so dev auto-pair POSTs the QR only once per bot session.
     let scanned = Arc::new(AtomicBool::new(false));
@@ -753,10 +782,11 @@ async fn run_whatsapp_inner(
             outcome: exit_outcome.clone(),
             temporary_ban_seconds: temporary_ban_seconds.clone(),
         })
-        .on_event(move |event, client| {
+        .on_event_for(HANDLED_EVENTS, move |event, client| {
             let ds = event_status.clone();
             let scanned = scanned.clone();
             let active_client = event_active_client.clone();
+            let memory_gate = memory_gate.clone();
             bounded_message_future(async move {
                 // A superseded instance can still drain a few events while the
                 // new one starts; they must not touch the shared status.
@@ -838,7 +868,12 @@ async fn run_whatsapp_inner(
                                 from_me: inbound.info.source.is_from_me,
                             });
                             if text == Some(PING_TRIGGER) {
-                                prepare_message_task(inbound, Arc::clone(&client)).await;
+                                prepare_message_task(
+                                    inbound,
+                                    Arc::clone(&client),
+                                    memory_gate.clone(),
+                                )
+                                .await;
                             }
                         }
                     }
@@ -923,7 +958,23 @@ async fn auto_scan_qr(code: &str) {
 
 // Build/own the context before creating a suspended callback task. The event
 // callback retains only this task pointer while processing one inbound at a time.
-fn prepare_message_task(
+fn prepare_message_task<'a>(
+    inbound: &'a whatsapp_rust::wacore::types::events::InboundMessage,
+    client: Arc<whatsapp_rust::Client>,
+    gate: Option<MemoryGate>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    match gate {
+        None => prepare_admitted_message_task(inbound, client),
+        Some(gate) => Box::pin(bounded_message_future(async move {
+            // This demo's response uses only WS and NVS. HTTP admission waits
+            // before occupying a blocking worker, so crypto offloads can run.
+            let _admission = gate.acquire().await;
+            prepare_admitted_message_task(inbound, client).await;
+        })),
+    }
+}
+
+fn prepare_admitted_message_task(
     inbound: &whatsapp_rust::wacore::types::events::InboundMessage,
     client: Arc<whatsapp_rust::Client>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -940,7 +991,10 @@ async fn handle_message(ctx: &MessageContext) {
     info!("Sending reaction...");
     match boxed_message_phase(|| ctx.react(REACTION_EMOJI)).await {
         Ok(_) => info!("Reaction sent! Building pong reply..."),
-        Err(e) => error!("Failed to send reaction: {}; building pong reply...", e),
+        Err(e) => error!(
+            "Failed to send reaction: {}; building pong reply...",
+            SendFailure(&e)
+        ),
     }
 
     let start = std::time::Instant::now();
@@ -949,7 +1003,7 @@ async fn handle_message(ctx: &MessageContext) {
         // Only the ID is needed for editing; release the quoted payload now.
         Ok(r) => r.message_id,
         Err(e) => {
-            error!("Failed to send pong: {}", e);
+            error!("Failed to send pong: {}", SendFailure(&e));
             return;
         }
     };
@@ -959,7 +1013,7 @@ async fn handle_message(ctx: &MessageContext) {
 
     match prepare_demo_edit(ctx, message_id.clone(), &duration).await {
         Ok(_) => info!("Edit sent for message {}", message_id),
-        Err(e) => error!("Failed to edit message {}: {}", message_id, e),
+        Err(e) => error!("Failed to edit message {}: {}", message_id, SendFailure(&e)),
     }
 }
 
@@ -995,4 +1049,20 @@ fn bounded_message_future<F: std::future::Future>(future: F) -> F {
         );
     }
     future
+}
+
+// Backend context must retain its allocation/NVS cause in the serial log.
+// Display the source chain without Debug-printing requests or crypto state.
+struct SendFailure<'a>(&'a (dyn std::error::Error + 'static));
+
+impl std::fmt::Display for SendFailure<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.0, f)?;
+        let mut cause = self.0.source();
+        while let Some(error) = cause {
+            write!(f, ": {error}")?;
+            cause = error.source();
+        }
+        Ok(())
+    }
 }
