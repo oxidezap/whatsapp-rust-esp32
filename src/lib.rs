@@ -64,6 +64,9 @@ pub mod supervisor;
 pub mod transport;
 pub mod ws;
 
+// Keep the dashboard DTO independent of ESP-IDF for host regression tests.
+pub(crate) use whatsapp_rust::{serde, serde_json};
+
 #[cfg(feature = "admin")]
 pub mod admin;
 

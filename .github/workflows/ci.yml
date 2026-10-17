@@ -33,6 +33,23 @@ env:
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
 
 jobs:
+  dashboard-json:
+    name: Dashboard JSON regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      # This DTO has no ESP-IDF dependencies. Avoid the firmware's target and
+      # build-std defaults by invoking its host harness outside the repository.
+      - name: Verify the actual message-log serializer on the host
+        working-directory: ${{ runner.temp }}
+        run: cargo test --locked --manifest-path "$GITHUB_WORKSPACE/tests/dashboard-json/Cargo.toml"
+
   dashboard:
     name: Dashboard QR browser tests
     runs-on: ubuntu-latest

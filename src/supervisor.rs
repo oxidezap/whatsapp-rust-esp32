@@ -17,6 +17,9 @@ use whatsapp_rust::Client;
 
 use crate::storage::{recover_poisoned, NvsStore};
 
+mod message_log;
+pub use message_log::MessageLogEntry;
+
 /// Longest message text kept per entry. The log is a dashboard preview, and the
 /// text is whatever a remote sender chose to send, so it is truncated rather
 /// than retained whole: a handful of maximum-size messages would otherwise pin
@@ -268,16 +271,6 @@ pub async fn run_maintenance(
     }
 }
 
-/// One inbound message as the dashboard and `/messages` show it.
-pub struct MessageLogEntry {
-    pub id: String,
-    pub chat: String,
-    pub sender: String,
-    pub text: Option<String>,
-    pub timestamp: i64,
-    pub from_me: bool,
-}
-
 enum PairCodeState {
     Idle,
     Pending { request_id: u32 },
@@ -477,25 +470,7 @@ impl DeviceStatus {
 
     pub fn messages_json(&self) -> String {
         let s = self.lock();
-        let messages: Vec<serde_json::Value> = s
-            .messages
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "id": m.id,
-                    "chat": m.chat,
-                    "sender": m.sender,
-                    "text": m.text,
-                    "timestamp": m.timestamp,
-                    "from_me": m.from_me,
-                })
-            })
-            .collect();
-        serde_json::json!({
-            "count": messages.len(),
-            "messages": messages,
-        })
-        .to_string()
+        message_log::to_json(&s.messages)
     }
 }
 

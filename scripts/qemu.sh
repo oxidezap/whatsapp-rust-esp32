@@ -189,6 +189,7 @@ cmd_run() {
 # anywhere: the trap runs after the function that set it has returned, and
 # `set -u` would otherwise abort the trap and leave QEMU running.
 QEMU_PIDS=()
+QEMU_SERIAL_LOGS=()
 stop_all() {
     local pid
     for pid in "${QEMU_PIDS[@]:-}"; do
@@ -206,6 +207,7 @@ boot() {
     "${QEMU_CMD[@]}" > "$serial" 2>&1 < /dev/null &
     BOOT_PID=$!
     QEMU_PIDS+=("$BOOT_PID")
+    QEMU_SERIAL_LOGS+=("$serial")
 }
 
 stop() {
@@ -243,6 +245,19 @@ decode_crash() {
     if [[ -f "$ELF" ]] && command -v python3 >/dev/null 2>&1; then
         python3 scripts/decode-panic.py "$ELF" "$OUT_DIR" "$serial" || true
     fi
+}
+
+check_crashes() {
+    local serial
+    for serial in "${QEMU_SERIAL_LOGS[@]:-}"; do
+        [[ -n "$serial" ]] || continue
+        if grep -q -E "$CRASH_RE" "$serial"; then
+            log "firmware crashed during messaging: $serial"
+            crash_context "$serial"
+            decode_crash "$serial"
+            return 1
+        fi
+    done
 }
 
 connection_context() {
@@ -301,6 +316,7 @@ wait_for_message() {
     id_literal="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${3:-}")"
     until messages="$(admin_get "$port" /messages)" \
         && [[ "$(json_field "$messages" "any($needle in (m['text'] or '') and (not $id_literal or m['id'] == $id_literal) for m in d['messages'])")" == True ]]; do
+        check_crashes || return 1
         if (( SECONDS >= deadline )); then
             log "no message containing $needle on port $port; /messages -> $messages"
             return 1
@@ -487,6 +503,7 @@ cmd_test() {
     # Gate both peaks after the reloaded-session roundtrip as well.
     metrics_gate "$port_a" a || return 1
     metrics_gate "$port_b" b || return 1
+    check_crashes || return 1
     echo >&2
     log "PASS"
 }
