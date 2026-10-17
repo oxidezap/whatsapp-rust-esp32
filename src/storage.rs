@@ -13,9 +13,10 @@
 //! `wa-nvs` thread with an internal-RAM stack, because the flash cache is off
 //! while flash is being written and a PSRAM stack would fault.
 //!
-//! Reads are served from the in-RAM mirror that is filled once at boot; a
-//! write updates flash first and the mirror only once flash has committed, so
-//! RAM never claims more than flash holds.
+//! Writes update flash before any RAM mirror. Without PSRAM, raw session
+//! records are not retained in a second mirror beside the SDK's parsed cache;
+//! cache misses reload from NVS. Durable namespace limits and collision checks
+//! remain authoritative regardless of mirror eviction.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -143,9 +144,9 @@ impl FlashWorker {
 /// one `chat`/`sender` allocation across every row — stores refcount clones
 /// instead of re-allocating both JID strings per message.
 type MsgSecretKey = (Arc<str>, Arc<str>, Arc<str>);
-/// `secret` is the protocol-sized [`MessageSecret`] array (32 bytes) since 0.7.0,
+/// `secret` is the protocol-sized [`MessageSecretBytes`] array (32 bytes) since 0.7.0,
 /// so a row costs no separate heap allocation for the secret itself.
-type MsgSecretValue = (MessageSecret, i64, i64);
+type MsgSecretValue = (MessageSecretBytes, i64, i64);
 
 /// Use order for a RAM-capped mirror map. Without PSRAM the mirror holds at
 /// most 8 entries as a cache over flash (a miss reloads from NVS), and
@@ -201,7 +202,10 @@ impl StoreInner {
         if crate::runtime::HAS_PSRAM {
             return;
         }
-        for key in self.session_order.overflow(self.sessions.len(), 8) {
+        // The SDK already caches parsed sessions. Without PSRAM, retaining
+        // another eight serialized records consumes the space needed by
+        // background persistence and TLS; reload raw records from NVS.
+        for key in self.session_order.overflow(self.sessions.len(), 0) {
             self.sessions.remove(&key);
             self.session_order.removed(&key);
         }
@@ -445,7 +449,8 @@ impl FlashNamespaces {
             namespace,
             &name,
             RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + max_value_len,
-        )? else {
+        )?
+        else {
             return Ok(None);
         };
         let (stored_key, value) = decode_record(&record)?;
@@ -470,21 +475,71 @@ impl FlashNamespaces {
             .map_err(|error| StoreError::Serialization(Box::new(error)))
     }
 
+    fn check_record_slot(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        value_len: usize,
+        label: &str,
+        max_entries: usize,
+    ) -> Result<String> {
+        if value_len > MAX_SIGNAL_RECORD_LEN {
+            return Err(StoreError::Validation(format!(
+                "{label} record is too large: {} bytes",
+                value_len
+            )));
+        }
+        if logical_key.len() > MAX_LOGICAL_KEY_LEN {
+            return Err(StoreError::Validation(format!(
+                "logical storage key is too long: {} bytes",
+                logical_key.len()
+            )));
+        }
+        let name = record_name(logical_key);
+        let existing = read_blob(
+            namespace,
+            &name,
+            RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN,
+        )?;
+        if let Some(existing) = existing.as_deref() {
+            let (stored_key, _) = decode_record(existing)?;
+            if stored_key != logical_key {
+                return Err(StoreError::Validation(format!(
+                    "{label} NVS key collision at '{name}'"
+                )));
+            }
+        } else {
+            // RAM mirrors can evict records. The durable namespace owns the
+            // budget, otherwise a C3 can write a store it cannot reopen.
+            ensure_insert_capacity(false, record_count(namespace)?, max_entries, label)?;
+        }
+        Ok(name)
+    }
+
+    fn prepare_record(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        value: &[u8],
+        label: &str,
+        max_entries: usize,
+    ) -> Result<(String, Vec<u8>)> {
+        // Drop the previous record before allocating its replacement.
+        let name =
+            self.check_record_slot(namespace, logical_key, value.len(), label, max_entries)?;
+        Ok((name, encode_record(logical_key, value)?))
+    }
+
     fn put_record(
         &self,
         namespace: &EspCustomNvs,
         logical_key: &[u8],
         value: &[u8],
         label: &str,
+        max_entries: usize,
     ) -> Result<()> {
-        if value.len() > MAX_SIGNAL_RECORD_LEN {
-            return Err(StoreError::Validation(format!(
-                "{label} record is too large: {} bytes",
-                value.len()
-            )));
-        }
-        let name = record_name(logical_key);
-        let record = encode_record(logical_key, value)?;
+        let (name, record) =
+            self.prepare_record(namespace, logical_key, value, label, max_entries)?;
         set_blob(namespace, &name, &record)
     }
 
@@ -658,6 +713,15 @@ fn erase_namespace(namespace: &EspCustomNvs, label: &str) -> Result<()> {
     ))))
 }
 
+fn record_count(namespace: &EspCustomNvs) -> Result<usize> {
+    let mut iterator = namespace.keys(Some(NvsDataType::Blob)).map_err(nvs_error)?;
+    let mut count = 0;
+    while iterator.next_key().is_some() {
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn record_names(namespace: &EspCustomNvs) -> Result<Vec<String>> {
     let mut iterator = namespace.keys(Some(NvsDataType::Blob)).map_err(nvs_error)?;
     let mut names = Vec::new();
@@ -682,10 +746,9 @@ fn namespace_addresses(namespace: &EspCustomNvs, label: &str) -> Result<Vec<Stri
             RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN,
         )? {
             let (key, _) = decode_record(&record)?;
-            addresses.push(
-                String::from_utf8(key.to_vec())
-                    .map_err(|error| StoreError::Validation(format!("invalid {label} key: {error}")))?,
-            );
+            addresses.push(String::from_utf8(key.to_vec()).map_err(|error| {
+                StoreError::Validation(format!("invalid {label} key: {error}"))
+            })?);
         }
     }
     Ok(addresses)
@@ -700,7 +763,10 @@ fn read_blob(namespace: &EspCustomNvs, name: &str, max_len: usize) -> Result<Opt
             "NVS record '{name}' is too large: {len} bytes"
         )));
     }
-    let mut data = vec![0; len];
+    let mut data = Vec::new();
+    data.try_reserve_exact(len)
+        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    data.resize(len, 0);
     let actual_len = namespace
         .get_blob(name, &mut data)
         .map_err(nvs_error)?
@@ -718,7 +784,14 @@ fn encode_record(logical_key: &[u8], value: &[u8]) -> Result<Vec<u8>> {
         )));
     }
     let key_len = logical_key.len() as u16;
-    let mut record = Vec::with_capacity(RECORD_HEADER_LEN + logical_key.len() + value.len());
+    let len = RECORD_HEADER_LEN
+        .checked_add(logical_key.len())
+        .and_then(|len| len.checked_add(value.len()))
+        .ok_or_else(|| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    let mut record = Vec::new();
+    record
+        .try_reserve_exact(len)
+        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
     record.extend_from_slice(RECORD_MAGIC);
     record.extend_from_slice(&key_len.to_le_bytes());
     record.extend_from_slice(logical_key);
@@ -848,18 +921,24 @@ impl NvsStore {
             // store does not sit in internal DRAM. Each record is validated,
             // mirrored, and dropped before the next is read; the mirror keeps
             // the newest 8 in NVS order and misses reload from flash.
-            flash.visit_records(&flash.identities, "identity", MAX_IDENTITIES, 32, |key, value| {
-                let address = decode_string_key(key, "identity")?;
-                let key: [u8; 32] = value.as_slice().try_into().map_err(|_| {
-                    anyhow::anyhow!("identity record for '{address}' has {} bytes", value.len())
-                })?;
-                if inner.identities.insert(address.clone(), key).is_some() {
-                    anyhow::bail!("duplicate identity record in WhatsApp NVS");
-                }
-                inner.identity_order.touched(address);
-                inner.enforce_identities_cap();
-                Ok(())
-            })?;
+            flash.visit_records(
+                &flash.identities,
+                "identity",
+                MAX_IDENTITIES,
+                32,
+                |key, value| {
+                    let address = decode_string_key(key, "identity")?;
+                    let key: [u8; 32] = value.as_slice().try_into().map_err(|_| {
+                        anyhow::anyhow!("identity record for '{address}' has {} bytes", value.len())
+                    })?;
+                    if inner.identities.insert(address.clone(), key).is_some() {
+                        anyhow::bail!("duplicate identity record in WhatsApp NVS");
+                    }
+                    inner.identity_order.touched(address);
+                    inner.enforce_identities_cap();
+                    Ok(())
+                },
+            )?;
             flash.visit_records(
                 &flash.sessions,
                 "session",
@@ -867,7 +946,11 @@ impl NvsStore {
                 MAX_SIGNAL_RECORD_LEN,
                 |key, value| {
                     let address = decode_string_key(key, "session")?;
-                    if inner.sessions.insert(address.clone(), Bytes::from(value)).is_some() {
+                    if inner
+                        .sessions
+                        .insert(address.clone(), Bytes::from(value))
+                        .is_some()
+                    {
                         anyhow::bail!("duplicate session record in WhatsApp NVS");
                     }
                     inner.session_order.touched(address);
@@ -943,6 +1026,19 @@ impl NvsStore {
                     None
                 }
             };
+            if let Some(id) = recorded
+                .as_ref()
+                .filter(|id| !inner.sync_keys.contains_key(*id))
+            {
+                match flash.load_sync_key(id) {
+                    Ok(Some(key)) => {
+                        inner.sync_keys.insert(id.clone(), key);
+                        inner.sync_key_order.touched(id.clone());
+                    }
+                    Ok(None) => {}
+                    Err(error) => log::warn!("Ignoring unreadable latest sync key: {error}"),
+                }
+            }
             inner.latest_sync_key_id = recorded
                 .filter(|id| inner.sync_keys.contains_key(id))
                 .or(timestamp_latest);
@@ -994,13 +1090,11 @@ impl NvsStore {
         } else {
             let sessions = self
                 .flash
-                .run(|flash| record_names(&flash.sessions))
-                .map(|names| names.len())
+                .run(|flash| record_count(&flash.sessions))
                 .unwrap_or(s.sessions.len());
             let identities = self
                 .flash
-                .run(|flash| record_names(&flash.identities))
-                .map(|names| names.len())
+                .run(|flash| record_count(&flash.identities))
                 .unwrap_or(s.identities.len());
             (sessions, identities)
         };
@@ -1031,7 +1125,7 @@ impl NvsStore {
         let _operation = self.operation.lock().unwrap_or_else(recover_poisoned);
         let mut s = self.lock();
         let count = self.flash.run(|flash| {
-            let count = record_names(&flash.sessions)?.len();
+            let count = record_count(&flash.sessions)?;
             erase_namespace(&flash.sessions, "session")?;
             Ok(count)
         })?;
@@ -1102,7 +1196,13 @@ impl SignalStore for NvsStore {
         )?;
         let logical_key = address.as_bytes().to_vec();
         self.flash.run(move |flash| {
-            flash.put_record(&flash.identities, &logical_key, &key, "identity")
+            flash.put_record(
+                &flash.identities,
+                &logical_key,
+                &key,
+                "identity",
+                MAX_IDENTITIES,
+            )
         })?;
         s.identities.insert(address.to_string(), key);
         s.identity_order.touched(address.to_string());
@@ -1137,7 +1237,13 @@ impl SignalStore for NvsStore {
             let logical_key = address.as_bytes().to_vec();
             let key = *key;
             self.flash.run(move |flash| {
-                flash.put_record(&flash.identities, &logical_key, &key, "identity")
+                flash.put_record(
+                    &flash.identities,
+                    &logical_key,
+                    &key,
+                    "identity",
+                    MAX_IDENTITIES,
+                )
             })?;
             let mut s = self.lock();
             s.identities.insert(address.to_string(), key);
@@ -1156,9 +1262,9 @@ impl SignalStore for NvsStore {
             }
         }
         let address_bytes = address.as_bytes().to_vec();
-        let payload = self.flash.run(move |flash| {
-            flash.load_record(&flash.identities, &address_bytes, 32)
-        })?;
+        let payload = self
+            .flash
+            .run(move |flash| flash.load_record(&flash.identities, &address_bytes, 32))?;
         if let Some(ref bytes) = payload {
             if let Ok(key) = bytes.as_slice().try_into() {
                 let mut s = self.lock();
@@ -1197,7 +1303,8 @@ impl SignalStore for NvsStore {
         if let Some(bytes) = payload {
             let session_bytes = Bytes::from(bytes);
             let mut s = self.lock();
-            s.sessions.insert(address.to_string(), session_bytes.clone());
+            s.sessions
+                .insert(address.to_string(), session_bytes.clone());
             s.session_order.touched(address.to_string());
             s.enforce_sessions_cap();
             return Ok(Some(session_bytes));
@@ -1206,6 +1313,12 @@ impl SignalStore for NvsStore {
     }
 
     async fn put_session(&self, address: &str, session: &[u8]) -> Result<()> {
+        if session.len() > MAX_SIGNAL_RECORD_LEN {
+            return Err(StoreError::Validation(format!(
+                "session record is too large: {} bytes",
+                session.len()
+            )));
+        }
         let _operation = self.write_operation()?;
         let mut s = self.lock();
         ensure_insert_capacity(
@@ -1215,11 +1328,24 @@ impl SignalStore for NvsStore {
             "session",
         )?;
         let logical_key = address.as_bytes().to_vec();
-        let persisted = Bytes::copy_from_slice(session);
-        let mirrored = persisted.clone();
-        self.flash.run(move |flash| {
-            flash.put_record(&flash.sessions, &logical_key, &persisted, "session")
+        // Validate while the write operation is locked, and release the old
+        // NVS blob before allocating its replacement. The worker closures own
+        // only the key or encoded record, never another copy of the session.
+        let check_key = logical_key.clone();
+        let value_len = session.len();
+        let name = self.flash.run(move |flash| {
+            flash.check_record_slot(
+                &flash.sessions,
+                &check_key,
+                value_len,
+                "session",
+                MAX_SESSIONS,
+            )
         })?;
+        let record = Bytes::from(encode_record(&logical_key, session)?);
+        let mirrored = record.slice(RECORD_HEADER_LEN + logical_key.len()..);
+        self.flash
+            .run(move |flash| set_blob(&flash.sessions, &name, &record))?;
         s.sessions.insert(address.to_string(), mirrored);
         s.session_order.touched(address.to_string());
         s.enforce_sessions_cap();
@@ -1252,7 +1378,13 @@ impl SignalStore for NvsStore {
             let logical_key = address.as_bytes().to_vec();
             let persisted = session.clone();
             self.flash.run(move |flash| {
-                flash.put_record(&flash.sessions, &logical_key, &persisted, "session")
+                flash.put_record(
+                    &flash.sessions,
+                    &logical_key,
+                    &persisted,
+                    "session",
+                    MAX_SESSIONS,
+                )
             })?;
             let mut s = self.lock();
             s.sessions.insert(address.to_string(), session.clone());
@@ -1319,7 +1451,13 @@ impl SignalStore for NvsStore {
         let persisted = Bytes::copy_from_slice(record);
         let mirrored = persisted.clone();
         self.flash.run(move |flash| {
-            flash.put_record(&flash.prekeys, &id.to_le_bytes(), &persisted, "prekey")
+            flash.put_record(
+                &flash.prekeys,
+                &id.to_le_bytes(),
+                &persisted,
+                "prekey",
+                MAX_PREKEYS,
+            )
         })?;
         s.prekeys.insert(id, mirrored);
         Ok(())
@@ -1362,6 +1500,7 @@ impl SignalStore for NvsStore {
                 &id.to_le_bytes(),
                 &persisted,
                 "signed prekey",
+                MAX_SIGNED_PREKEYS,
             )
         })?;
         s.signed_prekeys.insert(id, record.to_vec());
@@ -1403,7 +1542,13 @@ impl SignalStore for NvsStore {
         let logical_key = address.as_bytes().to_vec();
         let persisted = record.to_vec();
         self.flash.run(move |flash| {
-            flash.put_record(&flash.sender_keys, &logical_key, &persisted, "sender key")
+            flash.put_record(
+                &flash.sender_keys,
+                &logical_key,
+                &persisted,
+                "sender key",
+                MAX_SENDER_KEYS,
+            )
         })?;
         s.sender_keys.insert(address.to_string(), record.to_vec());
         Ok(())
@@ -1462,14 +1607,18 @@ impl AppSyncStore for NvsStore {
         let logical_key = key_id.to_vec();
         let latest = key_id.to_vec();
         self.flash.run(move |flash| {
-            // Persist the latest-ID marker first: `open` verifies that the key it
-            // names is actually present (`.filter(|id| inner.sync_keys.contains_key(id))`).
-            // If power fails before `put_record` commits, the orphan marker is
-            // ignored and `open` falls back to `timestamp_latest`. If `put_record`
-            // were first, an interrupted write would leave the old marker valid,
-            // selecting an outdated sync key on reboot.
+            let (name, record) = flash.prepare_record(
+                &flash.sync_keys,
+                &logical_key,
+                &payload,
+                "sync key",
+                MAX_SYNC_KEYS,
+            )?;
+            // Validate before changing either record. The marker is committed
+            // first so a power loss before the key write leaves an orphan that
+            // open rejects, rather than a valid but stale previous marker.
             flash.save_latest_sync_key_id(&latest)?;
-            flash.put_record(&flash.sync_keys, &logical_key, &payload, "sync key")
+            set_blob(&flash.sync_keys, &name, &record)
         })?;
         s.latest_sync_key_id = Some(key_id.to_vec());
         s.sync_keys.insert(key_id.to_vec(), key);
@@ -1518,19 +1667,27 @@ impl AppSyncStore for NvsStore {
         for m in mutations {
             map.insert(m.index_mac.clone(), m.value_mac.clone());
         }
-        if !crate::runtime::HAS_PSRAM {
-            // On memory-constrained devices without PSRAM, keeping full mutation MAC histories
-            // across all snapshot collections wastes 15-20 KB of internal DRAM. Since this device
-            // only validates incoming state and does not author mutation patches, bound the cache.
-            const MAX_MUTATION_MACS: usize = 8;
-            if map.len() > MAX_MUTATION_MACS {
-                let excess = map.len() - MAX_MUTATION_MACS;
-                let keys_to_remove: Vec<_> = map.keys().take(excess).cloned().collect();
-                for k in keys_to_remove {
-                    map.remove(&k);
-                }
-            }
+        Ok(())
+    }
+
+    async fn commit_patch(
+        &self,
+        name: &str,
+        state: HashState,
+        removed_index_macs: &[Vec<u8>],
+        added: &[AppStateMutationMAC],
+    ) -> Result<()> {
+        // App-state is RAM-only. One lock is its publication boundary, and no
+        // await can expose a version with only part of its MAC changes applied.
+        let mut s = self.lock();
+        let map = s.mutation_macs.entry(name.to_string()).or_default();
+        for index in removed_index_macs {
+            map.remove(index);
         }
+        for mutation in added {
+            map.insert(mutation.index_mac.clone(), mutation.value_mac.clone());
+        }
+        s.versions.insert(name.to_string(), state);
         Ok(())
     }
 
@@ -1859,32 +2016,16 @@ impl MsgSecretStore for NvsStore {
         Ok(count)
     }
 
-    async fn get_msg_secret(
+    async fn get_stored_msg_secret(
         &self,
         chat: &str,
         sender: &str,
         msg_id: &str,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<StoredMessageSecret>> {
         let key = msg_secret_key(chat, sender, msg_id);
-        Ok(self
-            .lock()
-            .msg_secrets
-            .get(&key)
-            .map(|(secret, _, _)| secret.to_vec()))
-    }
-
-    async fn get_msg_secret_with_ts(
-        &self,
-        chat: &str,
-        sender: &str,
-        msg_id: &str,
-    ) -> Result<Option<(Vec<u8>, i64)>> {
-        let key = msg_secret_key(chat, sender, msg_id);
-        Ok(self
-            .lock()
-            .msg_secrets
-            .get(&key)
-            .map(|(secret, _, ts)| (secret.to_vec(), *ts)))
+        Ok(self.lock().msg_secrets.get(&key).map(|(secret, _, ts)| {
+            StoredMessageSecret::new(MessageSecret::from_bytes(*secret), Some(*ts))
+        }))
     }
 
     async fn delete_expired_msg_secrets(&self, cutoff_timestamp: i64) -> Result<u32> {
@@ -1894,5 +2035,188 @@ impl MsgSecretStore for NvsStore {
         s.msg_secrets
             .retain(|_, (_, expires_at, _)| *expires_at == 0 || *expires_at > cutoff_timestamp);
         Ok((before - s.msg_secrets.len()) as u32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    #[test]
+    fn session_mirror_keeps_only_the_payload_view_of_the_shared_record() {
+        let key = b"synthetic-session.1";
+        let payload = vec![7; 4096];
+        let record = Bytes::from(encode_record(key, &payload).unwrap());
+        assert_eq!(
+            decode_record(&record).unwrap(),
+            (key.as_slice(), payload.as_slice())
+        );
+        let mirror = record.slice(RECORD_HEADER_LEN + key.len()..);
+        assert_eq!(
+            mirror.as_ptr(),
+            record[RECORD_HEADER_LEN + key.len()..].as_ptr()
+        );
+        drop(record);
+        assert_eq!(mirror.as_ref(), payload);
+    }
+
+    fn ram_store() -> NvsStore {
+        let (jobs, _) = mpsc::sync_channel(1);
+        NvsStore {
+            inner: Mutex::new(StoreInner::default()),
+            flash: FlashWorker { jobs },
+            operation: Mutex::new(()),
+            accepting_writes: AtomicBool::new(true),
+        }
+    }
+
+    #[test]
+    fn patch_replaces_after_removals_and_keeps_full_mac_history() {
+        block_on(async {
+            let store = ram_store();
+            let mutations: Vec<_> = (0..16)
+                .map(|id| AppStateMutationMAC {
+                    index_mac: vec![id; 32],
+                    value_mac: vec![id + 1; 32],
+                })
+                .collect();
+            store
+                .put_mutation_macs("regular", 1, &mutations)
+                .await
+                .unwrap();
+            store
+                .put_mutation_macs("regular_low", 1, &mutations)
+                .await
+                .unwrap();
+            let replacement = AppStateMutationMAC {
+                index_mac: mutations[0].index_mac.clone(),
+                value_mac: vec![99; 32],
+            };
+            store
+                .commit_patch(
+                    "regular",
+                    HashState {
+                        version: 2,
+                        hash: [2; 128],
+                        ..Default::default()
+                    },
+                    &[
+                        mutations[0].index_mac.clone(),
+                        mutations[1].index_mac.clone(),
+                    ],
+                    std::slice::from_ref(&replacement),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .get_mutation_mac("regular", &replacement.index_mac)
+                    .await
+                    .unwrap(),
+                Some(replacement.value_mac)
+            );
+            assert!(store
+                .get_mutation_mac("regular", &mutations[1].index_mac)
+                .await
+                .unwrap()
+                .is_none());
+            for mutation in &mutations[2..] {
+                assert_eq!(
+                    store
+                        .get_mutation_mac("regular", &mutation.index_mac)
+                        .await
+                        .unwrap(),
+                    Some(mutation.value_mac.clone())
+                );
+            }
+            assert_eq!(
+                store
+                    .get_mutation_mac("regular_low", &mutations[0].index_mac)
+                    .await
+                    .unwrap(),
+                Some(mutations[0].value_mac.clone())
+            );
+            let state = store.get_version("regular").await.unwrap().unwrap();
+            assert_eq!(state.version, 2);
+            assert_eq!(state.hash, [2; 128]);
+            store
+                .commit_patch(
+                    "regular",
+                    HashState {
+                        version: 3,
+                        ..state
+                    },
+                    &[],
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store.get_version("regular").await.unwrap().unwrap().version,
+                3
+            );
+        });
+    }
+
+    #[test]
+    fn stored_secret_keeps_parent_time_and_retention_on_upsert() {
+        block_on(async {
+            let store = ram_store();
+            assert!(store
+                .get_stored_msg_secret("c", "s", "m")
+                .await
+                .unwrap()
+                .is_none());
+            let entry = |secret, expires_at, message_ts| MsgSecretEntry {
+                chat: Arc::from("c"),
+                sender: Arc::from("s"),
+                msg_id: Arc::from("m"),
+                secret: [secret; 32],
+                expires_at,
+                message_ts,
+            };
+            store.put_msg_secrets(vec![entry(1, 100, 0)]).await.unwrap();
+            assert_eq!(
+                store
+                    .get_stored_msg_secret("c", "s", "m")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .message_ts,
+                None
+            );
+            store
+                .put_msg_secrets(vec![entry(2, 200, 50), entry(3, 100, 0)])
+                .await
+                .unwrap();
+            let stored = store
+                .get_stored_msg_secret("c", "s", "m")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.message_ts, Some(50));
+            assert_eq!(stored.secret.as_bytes(), &[3; 32]);
+            assert_eq!(
+                store.get_msg_secret("c", "s", "m").await.unwrap(),
+                Some(vec![3; 32])
+            );
+            assert_eq!(store.delete_expired_msg_secrets(100).await.unwrap(), 0);
+            assert_eq!(store.delete_expired_msg_secrets(200).await.unwrap(), 1);
+            store
+                .put_msg_secrets(vec![entry(4, 0, 60), entry(5, 100, 40)])
+                .await
+                .unwrap();
+            assert_eq!(store.delete_expired_msg_secrets(i64::MAX).await.unwrap(), 0);
+            assert_eq!(
+                store
+                    .get_stored_msg_secret("c", "s", "m")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .message_ts,
+                Some(60)
+            );
+        });
     }
 }

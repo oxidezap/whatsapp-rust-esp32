@@ -40,6 +40,7 @@ log = { version = "0.4", features = ["release_max_level_info"] }
 # which needs anyhow's `std` feature. whatsapp-rust pulls anyhow with
 # default-features = false, so relying on its re-export alone would lose that.
 anyhow = "1"
+async-lock = "3"
 # `futures::executor::block_on` lives behind the `executor` feature, which
 # whatsapp-rust does not enable, so this one is also declared directly.
 futures = "0.3"
@@ -72,7 +73,7 @@ bytes = "1.12"
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "e14300d18da6b0446e77b4777027b6ebbe995c03", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7d9021505dcc64603ae38335a0dec5098848540", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing
@@ -132,6 +133,9 @@ dotenvy = "0.15"
 # Pull in espressif/mdns component (moved out of ESP-IDF since v5.0)
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/mdns", version = "1.2" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/openeth_rx_backoff"]
 
 [patch.crates-io]
 # ESP-IDF v5.5.5 (the version the ESP32-C5 build uses) backported an sdmmc_host_t

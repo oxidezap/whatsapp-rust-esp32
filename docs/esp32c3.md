@@ -192,8 +192,8 @@ The size is `record_length + 341`, taken from the header the **peer** sent:
 16,749 is 16408 + 341, not 16384 + 365. No sdkconfig value bounds it, which is
 why lowering the ceiling changed nothing.
 
-**Turning the dynamic allocator off does not fix it either**, and finding that
-out is what produced the number this port had been missing. Static record
+**Static buffers have also failed qualification.** The historical figures
+below use the older 53 KB-at-connect profile. Static record
 buffers are taken once inside the handshake, when the heap is least fragmented,
 which sounds strictly better. It is not, because of what the heap actually looks
 like by then:
@@ -213,8 +213,11 @@ task_wdt: Task watchdog got triggered ... CPU 0: emac_rx
 ```
 
 A 206 MB serial log and a ten-minute job timeout, instead of the previous
-abort at seven seconds. `CONFIG_MBEDTLS_DYNAMIC_BUFFER` is therefore back on: a
-peak that fits is worth more here than a peak that is early.
+abort at seven seconds. The newer SDK memory profile connected with roughly
+115 KB free, but another static-buffer trial still failed initial messaging
+with an allocation failure during editing. Dynamic buffers are restored; this
+choice does not establish that fragmentation or post-reboot messaging is fixed.
+The complete heap, stack and restored-session roundtrip gates remain required.
 
 ## Sizing the stacks from the measurement
 

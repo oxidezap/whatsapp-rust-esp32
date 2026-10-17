@@ -31,7 +31,7 @@
 //!
 //! - **A large stack for the executor thread**, which on a board with PSRAM
 //!   means PSRAM: [`Esp32Executor::default_thread_config`] takes 256 KB there,
-//!   and 32 KB of internal DRAM on a chip without it. Where there is PSRAM,
+//!   and 48 KB of internal DRAM on a chip without it. Where there is PSRAM,
 //!   install [`psram_alloc::PsramAllocator`] as the global allocator to keep the
 //!   Rust heap out of internal DRAM as well; where there is not, the plain
 //!   ESP-IDF allocator is the only heap there is. Both choices follow
@@ -63,6 +63,9 @@ pub mod storage;
 pub mod supervisor;
 pub mod transport;
 pub mod ws;
+
+// Keep the dashboard DTO independent of ESP-IDF for host regression tests.
+pub(crate) use whatsapp_rust::{serde, serde_json};
 
 #[cfg(feature = "admin")]
 pub mod admin;

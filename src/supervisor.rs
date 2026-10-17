@@ -17,6 +17,9 @@ use whatsapp_rust::Client;
 
 use crate::storage::{recover_poisoned, NvsStore};
 
+mod message_log;
+pub use message_log::MessageLogEntry;
+
 /// Longest message text kept per entry. The log is a dashboard preview, and the
 /// text is whatever a remote sender chose to send, so it is truncated rather
 /// than retained whole: a handful of maximum-size messages would otherwise pin
@@ -30,6 +33,7 @@ const MESSAGE_LOG_CAPACITY: usize = 16;
 /// send through it and events from a superseded instance can be ignored.
 pub struct ActiveClient {
     inner: Mutex<Option<Arc<Client>>>,
+    memory_gate: Option<crate::http_client::MemoryGate>,
 }
 
 impl Default for ActiveClient {
@@ -42,7 +46,14 @@ impl ActiveClient {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            memory_gate: (!crate::runtime::HAS_PSRAM).then(crate::http_client::MemoryGate::default),
         }
+    }
+
+    /// One reservation shared by HTTP, the demo bot and dashboard sends, kept
+    /// across client replacements until every older operation releases it.
+    pub fn memory_gate(&self) -> Option<crate::http_client::MemoryGate> {
+        self.memory_gate.clone()
     }
 
     pub fn set(&self, client: Arc<Client>) {
@@ -194,8 +205,9 @@ pub async fn run_maintenance(
                 logout_attempted = true;
             }
             MaintenanceAction::ClearSessions | MaintenanceAction::Reboot => {
-                log::info!("Maintenance: disconnecting WhatsApp client");
-                client.disconnect().await;
+                log::info!("Maintenance: shutting down WhatsApp client");
+                let report = client.shutdown().await;
+                log::info!("Maintenance: shutdown outcome: {report:?}");
             }
         }
         active_client.clear_if(client);
@@ -265,16 +277,6 @@ pub async fn run_maintenance(
         log::error!("Maintenance: could not schedule restart: {error}");
         futures::future::pending::<()>().await;
     }
-}
-
-/// One inbound message as the dashboard and `/messages` show it.
-pub struct MessageLogEntry {
-    pub id: String,
-    pub chat: String,
-    pub sender: String,
-    pub text: Option<String>,
-    pub timestamp: i64,
-    pub from_me: bool,
 }
 
 enum PairCodeState {
@@ -476,25 +478,7 @@ impl DeviceStatus {
 
     pub fn messages_json(&self) -> String {
         let s = self.lock();
-        let messages: Vec<serde_json::Value> = s
-            .messages
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "id": m.id,
-                    "chat": m.chat,
-                    "sender": m.sender,
-                    "text": m.text,
-                    "timestamp": m.timestamp,
-                    "from_me": m.from_me,
-                })
-            })
-            .collect();
-        serde_json::json!({
-            "count": messages.len(),
-            "messages": messages,
-        })
-        .to_string()
+        message_log::to_json(&s.messages)
     }
 }
 

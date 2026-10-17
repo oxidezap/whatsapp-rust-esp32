@@ -60,9 +60,12 @@ fn main() -> anyhow::Result<()> {
                 .build()
                 .await;
             match bot {
-                // Runs until logout or `Client::disconnect`; a firmware normally
+                // Runs until logout or `Client::shutdown`; a firmware normally
                 // loops here and rebuilds the bot (see `run_whatsapp` in src/main.rs).
-                Ok(bot) => bot.run().await,
+                Ok(bot) => {
+                    let reason = bot.run().await;
+                    log::info!("bot stopped: {reason:?}");
+                }
                 Err(error) => log::error!("could not build the bot: {error}"),
             }
         })

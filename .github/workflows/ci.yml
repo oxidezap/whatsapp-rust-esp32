@@ -33,6 +33,24 @@ env:
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
 
 jobs:
+  dashboard-json:
+    name: Dashboard JSON regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-06-16
+      # This DTO has no ESP-IDF dependencies. Avoid the firmware's target and
+      # build-std defaults by invoking its host harness outside the repository.
+      - name: Verify the actual message-log serializer on the host
+        working-directory: ${{ runner.temp }}
+        run: cargo test --locked --manifest-path "$GITHUB_WORKSPACE/tests/dashboard-json/Cargo.toml"
+
   dashboard:
     name: Dashboard QR browser tests
     runs-on: ubuntu-latest
@@ -40,6 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -95,6 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Host tools the ESP-IDF build needs
@@ -108,6 +128,10 @@ jobs:
       # needs is installed by ESP-IDF's own tool installer during the first build.
       - name: Espressif Rust toolchain
         uses: esp-rs/xtensa-toolchain@ec6d36527049a7f4fb2cb0c1a644668c1bb8a2a4 # v1.7
+        env:
+          # espup queries release metadata; unauthenticated shared-runner API
+          # limits otherwise fail before compilation. This token is read-only.
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           default: true
           buildtargets: esp32s3
@@ -125,7 +149,7 @@ jobs:
             ~/.cargo/git
             .embuild
             target
-          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.*', 'components_*.lock', '.cargo/config.toml', 'scripts/*.sh') }}
+          key: ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-${{ hashFiles('Cargo.lock', 'sdkconfig.*', 'components_*.lock', 'components/**', '.cargo/config.toml', 'scripts/*.sh') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.flavor }}-${{ env.ESP_RUST_VERSION }}-${{ env.ESP_IDF_VERSION }}-
 
@@ -211,7 +235,7 @@ jobs:
           echo "secret present"
 
   qemu-e2e:
-    name: Pair, persist and message on QEMU (${{ matrix.board }})
+    name: Pair, persist and message on QEMU (${{ matrix.label }})
     # Runs only when the build passed and the credentials check ran and passed;
     # inherits the fork-PR skip from `mock-server-secret`.
     needs: [build, mock-server-secret]
@@ -227,11 +251,23 @@ jobs:
       matrix:
         include:
           - board: esp32s3
+            label: esp32s3
+            sample: 1
             # The QEMU release ships one binary per architecture; `arch` names
             # both the tarball and the qemu-system-* inside it.
             arch: xtensa
           - board: esp32c3
+            label: esp32c3
             arch: riscv32
+            sample: 1
+          - board: esp32c3
+            label: esp32c3, sample 2
+            arch: riscv32
+            sample: 2
+          - board: esp32c3
+            label: esp32c3, sample 3
+            arch: riscv32
+            sample: 3
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
@@ -252,6 +288,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Resolve paths from the board table
@@ -303,7 +340,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: qemu-serial-logs-${{ matrix.board }}
+          # Preserve independent reruns of the same firmware without name collisions.
+          name: qemu-serial-logs-${{ matrix.board }}-sample-${{ matrix.sample }}-attempt-${{ github.run_attempt }}
           if-no-files-found: ignore
           path: |
             ${{ env.OUT }}/qemu-*.log

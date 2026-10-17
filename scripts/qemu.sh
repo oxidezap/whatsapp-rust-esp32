@@ -189,6 +189,7 @@ cmd_run() {
 # anywhere: the trap runs after the function that set it has returned, and
 # `set -u` would otherwise abort the trap and leave QEMU running.
 QEMU_PIDS=()
+QEMU_SERIAL_LOGS=()
 stop_all() {
     local pid
     for pid in "${QEMU_PIDS[@]:-}"; do
@@ -206,6 +207,7 @@ boot() {
     "${QEMU_CMD[@]}" > "$serial" 2>&1 < /dev/null &
     BOOT_PID=$!
     QEMU_PIDS+=("$BOOT_PID")
+    QEMU_SERIAL_LOGS+=("$serial")
 }
 
 stop() {
@@ -215,7 +217,7 @@ stop() {
 }
 
 # The signatures that mean the firmware died rather than merely fell behind.
-CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)'
+CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)|WS send error:.*32512'
 
 # crash_context LOG: print the serial around the crash signature.
 #
@@ -232,6 +234,42 @@ crash_context() {
     log "--- serial lines $from-$line, ending at the crash signature ---"
     sed -n "${from},${line}p" "$serial"
     log "--- end crash context ---"
+}
+
+# decode_crash LOG: resolve panic addresses to function names with the ELF
+# symtab (pure python3, no ESP toolchain needed) and append the report to
+# qemu-panic-decoded.log, which the CI artifact glob already uploads. Never
+# fails: a diagnostic must not break the test job it observes.
+decode_crash() {
+    local serial="$1"
+    if [[ -f "$ELF" ]] && command -v python3 >/dev/null 2>&1; then
+        python3 scripts/decode-panic.py "$ELF" "$OUT_DIR" "$serial" || true
+    fi
+}
+
+# These callbacks do not retry a failed operation. Once one fails the
+# required success marker cannot qualify this ping; retain the complete cause.
+check_message_failure() {
+    local serial="$1" line
+    line=$(grep -n -m1 -E 'Failed to send reaction:|Failed to send pong:|Failed to edit message ' "$serial" | cut -d: -f1) || true
+    [[ -n "$line" ]] || return 0
+    log "firmware reported a required messaging failure: $serial"
+    sed -n "${line},$((line + 4))p" "$serial"
+    return 1
+}
+
+check_crashes() {
+    local serial
+    for serial in "${QEMU_SERIAL_LOGS[@]:-}"; do
+        [[ -n "$serial" ]] || continue
+        if grep -q -E "$CRASH_RE" "$serial"; then
+            log "firmware crashed during messaging: $serial"
+            crash_context "$serial"
+            decode_crash "$serial"
+            return 1
+        fi
+        check_message_failure "$serial" || return 1
+    done
 }
 
 connection_context() {
@@ -255,8 +293,9 @@ wait_markers() {
                 log "QEMU exited before '$marker'"; tail -n 60 "$serial"; return 1
             fi
             if grep -q -E "$CRASH_RE" "$serial"; then
-                log "firmware crashed before '$marker'"; crash_context "$serial"; return 1
+                log "firmware crashed before '$marker'"; crash_context "$serial"; decode_crash "$serial"; return 1
             fi
+            check_message_failure "$serial" || return 1
             if (( SECONDS >= deadline )); then
                 log "timed out waiting for '$marker'"; connection_context "$serial"; tail -n 60 "$serial"; return 1
             fi
@@ -283,12 +322,14 @@ json_field() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(eval(s
 # message is addressed to the account, so the device part comes off.
 account_jid() { sed -E 's/[:.][0-9]+@/@/' <<<"$1"; }
 
-# wait_for_message PORT SUBSTRING: poll /messages on a board until an inbound
-# message contains SUBSTRING.
+# wait_for_message PORT SUBSTRING [ID]: poll for matching inbound text,
+# optionally requiring the exact sent ID to exclude replayed earlier messages.
 wait_for_message() {
-    local port="$1" needle="$2" deadline=$((SECONDS + MESSAGE_TIMEOUT)) messages
+    local port="$1" needle="$2" deadline=$((SECONDS + MESSAGE_TIMEOUT)) messages id_literal
+    id_literal="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${3:-}")"
     until messages="$(admin_get "$port" /messages)" \
-        && [[ "$(json_field "$messages" "any($needle in (m['text'] or '') for m in d['messages'])")" == True ]]; do
+        && [[ "$(json_field "$messages" "any(not m['from_me'] and $needle in (m['text'] or '') and (not $id_literal or m['id'] == $id_literal) for m in d['messages'])")" == True ]]; do
+        check_crashes || return 1
         if (( SECONDS >= deadline )); then
             log "no message containing $needle on port $port; /messages -> $messages"
             return 1
@@ -332,12 +373,21 @@ metric_floor() {
 # floor. Runs after the messaging stage so the marks cover pairing, reboot
 # and a full ping/pong round trip.
 metrics_gate() {
-    local port="$1" name="$2" metrics
+    local port="$1" name="$2" metrics device
     if ! metrics="$(admin_get "$port" /metrics)"; then
         log "GET /metrics failed on board $name: $metrics"
         return 1
     fi
     echo "$metrics" | tee "$OUT_DIR/qemu-metrics-$name.json" >&2
+    device="$(admin_get "$port" /device)" || return 1
+    if [[ "$(json_field "$device" "d.get('connected') is True")" != True ]]; then
+        log "board $name is disconnected after its encrypted roundtrip"
+        return 1
+    fi
+    if [[ "$(json_field "$metrics" "d['reset_reason'] == 'PowerOn' and d['last_panic'] is None and d['coredump'] is None")" != True ]]; then
+        log "board $name reset unexpectedly or retained a panic/coredump"
+        return 1
+    fi
     metric_floor "$metrics" stack_wa_main_min "$WA_MAIN_MIN" || return 1
     metric_floor "$metrics" stack_wa_blocking_min "$WA_BLOCKING_MIN" || return 1
     metric_floor "$metrics" stack_ws_transport_min "$WS_TRANSPORT_MIN" || return 1
@@ -412,11 +462,12 @@ cmd_test() {
         return 1
     fi
     log "board b: GET /device -> $device"
-    local to_b sent
-    if ! to_b="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"; then
+    local to_b sent pn_b sent_id
+    if ! pn_b="$(json_field "$device" "d['pn'] or ''")"; then
         log "board b: /device was not JSON: $device"
         return 1
     fi
+    to_b="$(account_jid "$pn_b")"
     if [[ -z "$to_b" ]]; then
         log "board b connected without reporting a number; /device -> $device"
         return 1
@@ -429,14 +480,59 @@ cmd_test() {
     fi
     log "POST /send -> $sent"
     [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || { log "send failed"; return 1; }
-    wait_for_message "$port_b" "'\U0001f980ping'"
-    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "Reaction sent" "Send took"
+    sent_id="$(json_field "$sent" "d['message_id']")"
+    [[ -n "$sent_id" ]] || return 1
+    wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"
+    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "Reaction sent" "Send took" "Edit sent for message"
     wait_for_message "$port_a" "'Pong!'"
+    wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot2.log" "Quoted message reference: $sent_id"
 
-    # Both boards covered pairing and a full round trip by now, so their
-    # high-water marks are the ones to gate on.
+    metrics_gate "$port_a" a-before-session-reboot || return 1
+    metrics_gate "$port_b" b-before-session-reboot || return 1
+
+    # Both Signal sessions now exist. Reboot both peers, not only the device
+    # that paired before the first message: the next exchange must decrypt
+    # persisted sessions and handle the sender counter's reserved range.
+    stop "$pid_a"
+    stop "$pid_b"
+    boot a "$port_a" "$OUT_DIR/qemu-a-boot3.log"
+    pid_a=$BOOT_PID
+    boot b "$port_b" "$OUT_DIR/qemu-b-boot2.log"
+    pid_b=$BOOT_PID
+    wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot3.log" "${BOOT_MARKERS[@]}" \
+        "WhatsApp NVS loaded: device=true" "Connected to WhatsApp!"
+    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot2.log" "${BOOT_MARKERS[@]}" \
+        "WhatsApp NVS loaded: device=true" "Connected to WhatsApp!"
+    if grep -q -F "QR CODE" "$OUT_DIR/qemu-a-boot3.log" "$OUT_DIR/qemu-b-boot2.log"; then
+        log "a peer requested QR pairing after persisting its Signal session"
+        return 1
+    fi
+    device="$(admin_get "$port_a" /device)" || return 1
+    [[ "$(json_field "$device" "d['connected'] and d['pn'] == '$pn_a'")" == True ]] || return 1
+    device="$(admin_get "$port_b" /device)" || return 1
+    [[ "$(json_field "$device" "d['connected'] and d['pn'] == '$pn_b'")" == True ]] || return 1
+    # These are fresh processes: /messages cannot satisfy the assertions with
+    # the previous ping/pong. The bot's Pong is a quoted encrypted reply.
+    log "reloaded Signal sessions: repeating encrypted ping/quoted pong"
+    sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
+        -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")" || return 1
+    log "POST /send after session reboot -> $sent"
+    [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || {
+        check_crashes || return 1
+        connection_context "$OUT_DIR/qemu-a-boot3.log"
+        return 1
+    }
+    sent_id="$(json_field "$sent" "d['message_id']")"
+    [[ -n "$sent_id" ]] || return 1
+    wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"
+    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot2.log" "Reaction sent" "Send took" "Edit sent for message"
+    wait_for_message "$port_a" "'Pong!'"
+    wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot3.log" "Quoted message reference: $sent_id"
+
+    # Gate both peaks after the reloaded-session roundtrip as well.
     metrics_gate "$port_a" a || return 1
     metrics_gate "$port_b" b || return 1
+    check_crashes || return 1
     echo >&2
     log "PASS"
 }

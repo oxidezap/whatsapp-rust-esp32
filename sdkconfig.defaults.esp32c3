@@ -16,11 +16,16 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 
 # --- Internal DRAM budget ---------------------------------------------------
 
-# The main task hosts the WhatsApp executor directly on the C3 rather than
-# spawning a separate 32 KB wa-main thread while main() parks in a join().
-# 36 KB covers the full runtime (measured peak 30.4 KB) and eliminates the
-# second stack entirely, saving 16 KB of contiguous internal DRAM for the heap.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864
+# The main task hosts the executor directly, avoiding a second task stack.
+# Triage proved the previous 36 KB stack overflows in the ServerAck window:
+# 2,356 bytes free at the last clean telemetry, then the canary fires with
+# SP outside the stack while heap walks fault on the overwritten words.
+# The bounded demo callback/admin phases left at least 18,788 B unused in
+# the 48 KiB control before reboot. Qualify 40 KiB to return 8 KiB to the
+# internal heap for TLS control writes outside foreground admission. The same
+# 2,048 B unused-stack floor and full restored-session workload still apply.
+# The reusable executor's thread default remains the conservative 48 KiB.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960
 
 # Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
 # this. Everything in src/ names its own size; this is the floor for the rest
@@ -53,35 +58,12 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 
-# mbedTLS: the single largest RAM item after the stacks. CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC
-# does not exist without PSRAM, so these buffers come out of internal DRAM, and
-# the only lever left is how large they are and when they are taken.
-#
-# DYNAMIC_BUFFER is on, and turning it OFF was tried and is what the log below
-# rules out. Under it the receive buffer is freed after each record and
-# re-allocated for the next, sized from the header just read off the wire:
-# `esp_mbedtls_add_rx_buffer` allocates `record_length + 341`. That is the peer's
-# number, not ours, which is why lowering CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN to
-# 8192 changed nothing -- the failing `alloc(16749 bytes)` is 16408 + 341, and it
-# was still exactly 16749 afterwards.
-#
-# The obvious next move was to take the buffers statically instead, once inside
-# the handshake, when the heap is least fragmented. That is worse here, and the
-# measurement says why. At the moment the WebSocket connects this chip has:
-#
-#     WS thread: internal heap 53332 free, largest block 31744
-#
-# 53 KB, not the 194 KB the boot-time line reports before the bot is built.
-# Holding ~21 KB of record buffers for the life of the session out of 53 KB left
-# the OpenCores MAC unable to allocate receive buffers -- `opencores.emac: no mem
-# for receive buffer` in a tight loop until the task watchdog fired on `emac_rx`.
-# A peak that fits is worth more here than a peak that is early.
-#
-# So the real constraint is neither knob: the firmware arrives at connect with
-# 53 KB, and roughly 60 KB of that went into its thread stacks (the 36 KB main
-# task hosting the executor, wa-blocking 14 KB, ws-transport 6 KB, wa-nvs 4 KB;
-# see docs/esp32c3.md). Those are sized from measurement, which is what
-# src/runtime.rs now logs.
+# Return record buffers between TLS operations on the no-PSRAM C3. Keeping
+# full RX/TX buffers for the entire connection competes with Signal sessions,
+# NVS serialization and the OpenETH receive buffers. Static allocation failed
+# the restored-session messaging qualification, including with the newer
+# higher-free-heap-at-connect profile; early allocation alone is not a fix.
+# Keep the full receive record limit below for peer compatibility.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must

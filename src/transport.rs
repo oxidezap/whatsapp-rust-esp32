@@ -11,6 +11,9 @@ use whatsapp_rust::async_trait;
 use whatsapp_rust::bytes::Bytes;
 use whatsapp_rust::wacore::net::{DisconnectReason, Transport, TransportEvent, TransportFactory};
 
+mod write_completion;
+use write_completion::WriteJob;
+
 /// TLS stream backed by ESP-IDF's mbedTLS.
 /// Default bound on establishing a connection (TCP connect plus TLS handshake).
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -165,16 +168,14 @@ impl Drop for EspTlsStream {
 /// Outbound frames waiting for the socket thread. Bounded on purpose: a
 /// stalled socket must surface as a send error the supervisor reconnects
 /// from, not as an ever-growing queue in internal DRAM (on the C3 that is a
-/// silent OOM). 64 entries absorb the login burst -- presence, receipts, the
-/// prekey upload, account-sync acks -- several times over, and the drain loop
-/// below empties the queue every pass, so a full queue means the socket is
-/// genuinely stuck rather than momentarily behind.
-const SEND_QUEUE_CAP: usize = 64;
+/// silent OOM). The core's ordered Noise sender waits for write completion, so
+/// without PSRAM one queued write is enough; its next batch remains upstream.
+const SEND_QUEUE_CAP: usize = if crate::runtime::HAS_PSRAM { 64 } else { 1 };
 
 /// Transport implementation: ESP-IDF TLS under the crate's own WebSocket
 /// client ([`crate::ws`]), driven on its own thread.
 pub struct Esp32Transport {
-    data_tx: std::sync::mpsc::SyncSender<Bytes>,
+    data_tx: std::sync::mpsc::SyncSender<WriteJob>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -188,18 +189,22 @@ impl Drop for Esp32Transport {
 #[async_trait]
 impl Transport for Esp32Transport {
     async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
-        // Move the Bytes through the channel (refcount bump, no copy); the
-        // socket thread masks it straight onto the wire from the slice. Never
-        // blocks: backpressure is an error, and the core treats a send error
-        // as a broken connection, which is exactly what a full queue means.
-        self.data_tx.try_send(data).map_err(|error| match error {
+        // Enqueue without blocking the executor, then await the actual write.
+        // Queue acceptance must not release the core's next Noise batch while
+        // this one still retains its shared output allocation in another task.
+        let (job, completed) = WriteJob::new(data);
+        self.data_tx.try_send(job).map_err(|error| match error {
             std::sync::mpsc::TrySendError::Full(_) => {
-                anyhow!("Transport send queue full ({SEND_QUEUE_CAP}): socket stalled")
+                anyhow!("Transport send queue full (capacity {SEND_QUEUE_CAP})")
             }
             std::sync::mpsc::TrySendError::Disconnected(_) => {
                 anyhow!("Transport channel closed")
             }
-        })
+        })?;
+        completed
+            .await
+            .map_err(|_| anyhow!("Transport stopped before write completion"))?
+            .map_err(anyhow::Error::msg)
     }
 
     async fn disconnect(&self) {
@@ -263,7 +268,23 @@ impl TransportFactory for Esp32TransportFactory {
     async fn create_transport(
         &self,
     ) -> Result<(Arc<dyn Transport>, async_channel::Receiver<TransportEvent>), anyhow::Error> {
-        let (event_tx, event_rx) = async_channel::unbounded();
+        // Inbound events carry whole frames (up to the 32 KB read cap). An
+        // unbounded channel lets the socket thread queue an entire burst
+        // ahead of the executor -- tens of KB of peak heap the C3 does not
+        // have, and exactly where its login trough bottoms out. Bound it to
+        // one where there is no PSRAM: the reader parks after every frame
+        // (TCP backpressure; the peer waits) instead of piling frames in
+        // DRAM, serializing phases that otherwise overlap at the trough.
+        // A full receive channel pauses further socket reads while the worker
+        // continues draining writes. The executor can await an actual write
+        // completion while handling an incoming event without a circular wait.
+        // PSRAM boards keep the unbounded channel and their exact current
+        // behavior.
+        let (event_tx, event_rx) = if crate::runtime::HAS_PSRAM {
+            async_channel::unbounded()
+        } else {
+            async_channel::bounded(1)
+        };
         let (data_tx, data_rx) = std::sync::mpsc::sync_channel(SEND_QUEUE_CAP);
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -281,7 +302,7 @@ impl TransportFactory for Esp32TransportFactory {
 
 fn ws_thread(
     event_tx: Sender<TransportEvent>,
-    data_rx: std::sync::mpsc::Receiver<Bytes>,
+    data_rx: std::sync::mpsc::Receiver<WriteJob>,
     shutdown: Arc<AtomicBool>,
     ws_url: &str,
     skip_tls_verify: bool,
@@ -368,25 +389,41 @@ fn ws_thread(
     log::info!("WS thread: WebSocket connected!");
     let _ = event_tx.send_blocking(TransportEvent::Connected);
 
+    let mut pending_event = None;
     loop {
         if shutdown.load(Ordering::Relaxed) {
             let _ = ws.send_close(1000);
             break;
         }
 
-        while let Ok(data) = data_rx.try_recv() {
-            log::debug!(
-                "--> WS send {} bytes{}",
-                data.len(),
-                crate::metrics::heap_note()
-            );
-            if let Err(e) = ws.send_binary(&data) {
+        while let Ok(job) = data_rx.try_recv() {
+            let failure = job.perform(|data| {
+                log::debug!(
+                    "--> WS send {} bytes{}",
+                    data.len(),
+                    crate::metrics::heap_note()
+                );
+                ws.send_binary(data)
+            });
+            if let Some(e) = failure {
                 log::error!("WS send error: {}", e);
+                drop(data_rx);
+                drop(pending_event);
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(
                     DisconnectReason::ReadError(format!("WS send error: {e}")),
                 ));
                 return;
             }
+        }
+
+        match write_completion::forward_pending(&event_tx, &mut pending_event) {
+            write_completion::ForwardProgress::Ready => {}
+            write_completion::ForwardProgress::Blocked => {
+                // Keep receive backpressure without blocking write completion.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            write_completion::ForwardProgress::Closed => break,
         }
 
         match ws.read_frame() {
@@ -399,7 +436,7 @@ fn ws_thread(
                     data.len(),
                     crate::metrics::heap_note()
                 );
-                let _ = event_tx.send_blocking(TransportEvent::DataReceived(data));
+                pending_event = Some(TransportEvent::DataReceived(data));
             }
             Ok(Some(crate::ws::Frame::Ping(payload))) => {
                 let _ = ws.send_pong(&payload);
@@ -420,6 +457,8 @@ fn ws_thread(
                         reason: String::new(),
                     },
                 };
+                drop(data_rx);
+                drop(pending_event);
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(reason));
                 return;
             }
@@ -429,6 +468,8 @@ fn ws_thread(
                 // memory is the failure mode this chip actually hits, so record
                 // what the heap looked like when it did.
                 crate::metrics::log_memory_profile("websocket read error");
+                drop(data_rx);
+                drop(pending_event);
                 let _ = event_tx.send_blocking(TransportEvent::Disconnected(
                     DisconnectReason::ReadError(format!("WS read error: {e}")),
                 ));
@@ -437,6 +478,8 @@ fn ws_thread(
         }
     }
 
+    drop(data_rx);
+    drop(pending_event);
     let _ = event_tx.send_blocking(TransportEvent::Disconnected(DisconnectReason::Unknown));
     log::info!("WS thread: exiting");
 }

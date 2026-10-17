@@ -3,13 +3,18 @@ use std::net::ToSocketAddrs;
 
 use anyhow::Result;
 use whatsapp_rust::async_trait;
-use whatsapp_rust::wacore::net::{HttpClient, HttpRequest, HttpResponse, StreamingHttpResponse};
+use whatsapp_rust::wacore::net::{
+    HttpClient, HttpRequest, HttpResponse, StreamingHttpResponse, StreamingRequestPermit,
+};
 
 use crate::transport::EspTlsStream;
 
 #[path = "http_chunked.rs"]
 mod http_chunked;
 use http_chunked::ChunkedReader;
+
+mod memory_gate;
+pub use memory_gate::{MemoryGate, MemoryPermit};
 
 /// Socket-level bound on every media/version request. Without one a peer that
 /// accepts the connection and then goes quiet holds the calling thread forever;
@@ -19,6 +24,16 @@ const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_RESPONSE_HEADER_BYTES: usize = 8 * 1024;
 /// Maximum response size for non-streaming buffered HTTP requests.
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+/// Refuse a buffered download while the internal heap is below this. A
+/// buffered fetch holds a TLS handshake transient plus the whole body in
+/// RAM at once; starting one with no headroom wedges the chip (the NIC
+/// cannot allocate receive buffers, its retry loop starves the executor,
+/// and nothing ever frees). Upstream logs the failure and omits the blob,
+/// and the sync that needed it already degrades the same way on every
+/// board (see the skipped CriticalBlock collections at login), so failing
+/// fast here degrades instead of dying. Streaming downloads are unaffected
+/// (windowed, not buffered). Sized so the login trough deterministically
+/// skips: transient needs are ~10-20 KB against a ~16 KB floor.
 
 /// Parse a URL into (host, port, path, use_tls).
 /// Supports http://, https://, ws://, wss:// schemes.
@@ -71,11 +86,20 @@ fn qemu_host(host: String) -> String {
 
 pub struct EspHttpClient {
     skip_tls_verify: bool,
+    memory_gate: Option<MemoryGate>,
 }
 
 impl EspHttpClient {
     pub fn new(skip_tls_verify: bool) -> Self {
-        Self { skip_tls_verify }
+        Self {
+            skip_tls_verify,
+            memory_gate: None,
+        }
+    }
+
+    pub fn with_memory_gate(mut self, gate: MemoryGate) -> Self {
+        self.memory_gate = Some(gate);
+        self
     }
 }
 
@@ -89,6 +113,18 @@ impl Default for EspHttpClient {
 #[async_trait]
 impl HttpClient for EspHttpClient {
     async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
+        let _admission = match &self.memory_gate {
+            Some(gate) => Some(gate.acquire().await),
+            None => None,
+        };
+        const MIN_HEAP_FOR_BUFFERED_FETCH: usize = 32 * 1024;
+        let (free, _) = crate::metrics::heap_now();
+        if free < MIN_HEAP_FOR_BUFFERED_FETCH {
+            anyhow::bail!(
+                "refusing buffered fetch of {} with only {free} heap free",
+                request.url
+            );
+        }
         let (host, port, path, use_tls) = parse_url(&request.url)?;
         // The Host header keeps the URL's own authority; only the address dialed
         // is remapped under QEMU.
@@ -120,6 +156,15 @@ impl HttpClient for EspHttpClient {
     /// of buffering a whole download, which on this chip means PSRAM, not RAM.
     fn supports_streaming(&self) -> bool {
         true
+    }
+
+    fn streaming_admission(
+        &self,
+    ) -> Option<whatsapp_rust::wacore::runtime::BoxFuture<'_, Result<StreamingRequestPermit>>> {
+        let gate = self.memory_gate.as_ref()?.clone();
+        Some(Box::pin(async move {
+            Ok(Box::new(gate.acquire().await) as StreamingRequestPermit)
+        }))
     }
 
     fn execute_streaming(&self, request: HttpRequest) -> Result<StreamingHttpResponse> {
@@ -418,7 +463,7 @@ fn do_streaming_request<S: std::io::Read + std::io::Write + Send + 'static>(
         BodyFraming::Chunked => Box::new(ChunkedReader::new(rest)),
     };
 
-    Ok(StreamingHttpResponse { status_code, body })
+    Ok(StreamingHttpResponse::new(status_code, body))
 }
 
 enum BodyFraming {
@@ -481,7 +526,7 @@ fn parse_http_response(response_buf: &[u8]) -> Result<HttpResponse> {
     if let BodyFraming::Chunked = framing {
         let mut body = Vec::new();
         ChunkedReader::new(body_slice).read_to_end(&mut body)?;
-        return Ok(HttpResponse { status_code, body });
+        return Ok(HttpResponse::new(status_code, body));
     }
     if let BodyFraming::Length(expected_len) = framing {
         let expected_usize = usize::try_from(expected_len)
@@ -492,16 +537,13 @@ fn parse_http_response(response_buf: &[u8]) -> Result<HttpResponse> {
                 body_slice.len()
             );
         }
-        return Ok(HttpResponse {
+        return Ok(HttpResponse::new(
             status_code,
-            body: body_slice[..expected_usize].to_vec(),
-        });
+            body_slice[..expected_usize].to_vec(),
+        ));
     }
 
-    Ok(HttpResponse {
-        status_code,
-        body: body_slice.to_vec(),
-    })
+    Ok(HttpResponse::new(status_code, body_slice.to_vec()))
 }
 
 #[cfg(test)]
