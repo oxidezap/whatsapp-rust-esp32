@@ -935,14 +935,14 @@ async fn handle_message(ctx: &MessageContext) {
     // group/status participant, which the hand-rolled key here used to get wrong
     // for status broadcasts) and allocates no JID strings on this path.
     info!("Sending reaction...");
-    match ctx.react(REACTION_EMOJI).await {
+    match boxed_message_phase(|| ctx.react(REACTION_EMOJI)).await {
         Ok(_) => info!("Reaction sent! Building pong reply..."),
         Err(e) => error!("Failed to send reaction: {}; building pong reply...", e),
     }
 
     let start = std::time::Instant::now();
     // Equivalent to the old build_quote_context + ExtendedTextMessage literal.
-    let message_id = match ctx.reply_quoting(PONG_TEXT).await {
+    let message_id = match boxed_message_phase(|| ctx.reply_quoting(PONG_TEXT)).await {
         // Only the ID is needed for editing; release the quoted payload now.
         Ok(r) => r.message_id,
         Err(e) => {
@@ -972,7 +972,14 @@ fn prepare_demo_edit<'a>(
     extended_text.text = Some(format!("{PONG_TEXT}\n`{duration}`"));
     let mut edit = wa::Message::default();
     edit.extended_text_message = MessageField::some(extended_text);
-    ctx.edit_message(message_id, edit)
+    boxed_message_phase(|| ctx.edit_message(message_id, edit))
+}
+
+// Construct each send phase outside the handler's coroutine. The outer task
+// and every boxed inner phase independently obey the same target-size limit;
+// phases run sequentially, preserving reaction/reply/edit ordering.
+fn boxed_message_phase<F: std::future::Future>(build: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(bounded_message_future(build()))
 }
 
 // Enforce the contiguous allocation budget on the actual target future, not
@@ -981,7 +988,7 @@ fn bounded_message_future<F: std::future::Future>(future: F) -> F {
     const {
         assert!(
             std::mem::size_of::<F>() <= 1024,
-            "message handler future exceeds 1 KiB"
+            "message future exceeds 1 KiB"
         );
     }
     future
