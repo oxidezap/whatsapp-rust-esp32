@@ -294,12 +294,13 @@ json_field() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(eval(s
 # message is addressed to the account, so the device part comes off.
 account_jid() { sed -E 's/[:.][0-9]+@/@/' <<<"$1"; }
 
-# wait_for_message PORT SUBSTRING: poll /messages on a board until an inbound
-# message contains SUBSTRING.
+# wait_for_message PORT SUBSTRING [ID]: poll for matching inbound text,
+# optionally requiring the exact sent ID to exclude replayed earlier messages.
 wait_for_message() {
-    local port="$1" needle="$2" deadline=$((SECONDS + MESSAGE_TIMEOUT)) messages
+    local port="$1" needle="$2" deadline=$((SECONDS + MESSAGE_TIMEOUT)) messages id_literal
+    id_literal="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${3:-}")"
     until messages="$(admin_get "$port" /messages)" \
-        && [[ "$(json_field "$messages" "any($needle in (m['text'] or '') for m in d['messages'])")" == True ]]; do
+        && [[ "$(json_field "$messages" "any($needle in (m['text'] or '') and (not $id_literal or m['id'] == $id_literal) for m in d['messages'])")" == True ]]; do
         if (( SECONDS >= deadline )); then
             log "no message containing $needle on port $port; /messages -> $messages"
             return 1
@@ -423,7 +424,7 @@ cmd_test() {
         return 1
     fi
     log "board b: GET /device -> $device"
-    local to_b sent pn_b
+    local to_b sent pn_b sent_id
     if ! pn_b="$(json_field "$device" "d['pn'] or ''")"; then
         log "board b: /device was not JSON: $device"
         return 1
@@ -441,7 +442,9 @@ cmd_test() {
     fi
     log "POST /send -> $sent"
     [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || { log "send failed"; return 1; }
-    wait_for_message "$port_b" "'\U0001f980ping'"
+    sent_id="$(json_field "$sent" "d['message_id']")"
+    [[ -n "$sent_id" ]] || return 1
+    wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"
     wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "Reaction sent" "Send took"
     wait_for_message "$port_a" "'Pong!'"
 
@@ -475,7 +478,9 @@ cmd_test() {
     sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
         -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")" || return 1
     [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || return 1
-    wait_for_message "$port_b" "'\U0001f980ping'"
+    sent_id="$(json_field "$sent" "d['message_id']")"
+    [[ -n "$sent_id" ]] || return 1
+    wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"
     wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot2.log" "Reaction sent" "Send took"
     wait_for_message "$port_a" "'Pong!'"
 
