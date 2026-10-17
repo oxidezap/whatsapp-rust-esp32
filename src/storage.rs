@@ -768,8 +768,13 @@ fn read_blob(namespace: &EspCustomNvs, name: &str, max_len: usize) -> Result<Opt
         )));
     }
     let mut data = Vec::new();
-    data.try_reserve_exact(len)
-        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    data.try_reserve_exact(len).map_err(|_| {
+        log::error!(
+            "NVS read_blob allocation refused: {len} bytes{}",
+            crate::metrics::heap_note()
+        );
+        StoreError::Io(std::io::ErrorKind::OutOfMemory.into())
+    })?;
     data.resize(len, 0);
     let actual_len = namespace
         .get_blob(name, &mut data)
@@ -793,9 +798,13 @@ fn encode_record(logical_key: &[u8], value: &[u8]) -> Result<Vec<u8>> {
         .and_then(|len| len.checked_add(value.len()))
         .ok_or_else(|| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
     let mut record = Vec::new();
-    record
-        .try_reserve_exact(len)
-        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    record.try_reserve_exact(len).map_err(|_| {
+        log::error!(
+            "NVS encode_record allocation refused: {len} bytes{}",
+            crate::metrics::heap_note()
+        );
+        StoreError::Io(std::io::ErrorKind::OutOfMemory.into())
+    })?;
     record.extend_from_slice(RECORD_MAGIC);
     record.extend_from_slice(&key_len.to_le_bytes());
     record.extend_from_slice(logical_key);
