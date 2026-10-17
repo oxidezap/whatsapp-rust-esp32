@@ -58,14 +58,12 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 
-# Return record buffers between TLS operations on the no-PSRAM C3. Keeping
-# full RX/TX buffers for the entire connection competes with Signal sessions,
-# NVS serialization and the OpenETH receive buffers. Static allocation failed
-# the restored-session messaging qualification, including with the newer
-# higher-free-heap-at-connect profile; early allocation alone is not a fix.
-# Keep the full receive record limit below for peer compatibility.
-CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
-CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+# Isolated combined trial: allocate record buffers when the TLS connection
+# is created, rather than reallocating them during Signal/NVS work. Keep
+# the full peer receive capacity. Earlier static-only profiles failed; the
+# reduced callback/record-retention profile still requires full qualification.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=n
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=n
 # Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must
 # be able to receive it, but nothing this firmware sends comes close, so the
 # outgoing buffer does not have to match. The incoming side stays at the full
