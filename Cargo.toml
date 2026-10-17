@@ -72,7 +72,7 @@ bytes = "1.12"
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f47c529ce84eaf62a6636f28d339c3fcb175f4e1", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "3244be404c3b0596e3fc438e3590875422d1893b", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing

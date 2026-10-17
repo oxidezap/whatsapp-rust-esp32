@@ -20,8 +20,12 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 # Triage proved the previous 36 KB stack overflows in the ServerAck window:
 # 2,356 bytes free at the last clean telemetry, then the canary fires with
 # SP outside the stack while heap walks fault on the overwritten words.
-# 48 KB restores margin; keep aligned with default_thread_config.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
+# Isolated qualification trial after callback-frame reductions: the 48 KiB
+# control used at most 31,612 B before reboot. Try 40 KiB to return 8 KiB to
+# internal heap, preserving the 2,048 B minimum-free-stack assertion and all
+# messaging/reboot checks. This is not qualified until the full trial passes;
+# the generic library thread default remains the conservative 48 KiB.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960
 
 # Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
 # this. Everything in src/ names its own size; this is the floor for the rest
@@ -71,7 +75,8 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # the extension and neither peer here does.
 CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
-CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+# ESP-IDF fragments larger outgoing writes at this limit; retain full RX.
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
 
 # Trim ciphersuites and features the WhatsApp gateway and the mock server never
 # negotiate. Each one is code in flash and, for the key exchanges, peak RAM
