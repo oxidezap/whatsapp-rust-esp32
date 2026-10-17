@@ -757,7 +757,7 @@ async fn run_whatsapp_inner(
             let ds = event_status.clone();
             let scanned = scanned.clone();
             let active_client = event_active_client.clone();
-            async move {
+            bounded_message_future(async move {
                 // A superseded instance can still drain a few events while the
                 // new one starts; they must not touch the shared status.
                 if !active_client.is_current(&client) {
@@ -838,16 +838,7 @@ async fn run_whatsapp_inner(
                                 from_me: inbound.info.source.is_from_me,
                             });
                             if text == Some(PING_TRIGGER) {
-                                let ctx = Box::new(MessageContext::from_inbound(
-                                    inbound,
-                                    Arc::clone(&client),
-                                ));
-                                let fut: std::pin::Pin<
-                                    Box<dyn std::future::Future<Output = ()> + Send>,
-                                > = Box::pin(bounded_message_future(async move {
-                                    handle_message(&ctx).await;
-                                }));
-                                fut.await;
+                                prepare_message_task(inbound, Arc::clone(&client)).await;
                             }
                         }
                     }
@@ -872,7 +863,7 @@ async fn run_whatsapp_inner(
                         crate::metrics::log_memory_profile("event");
                     }
                 }
-            }
+            })
         })
         .build()
         .await?;
@@ -928,6 +919,18 @@ async fn auto_scan_qr(code: &str) {
         ),
         Err(e) => error!("auto-pair: scan-qr POST failed: {e}"),
     }
+}
+
+// Build/own the context before creating a suspended callback task. The event
+// callback retains only this task pointer while processing one inbound at a time.
+fn prepare_message_task(
+    inbound: &whatsapp_rust::wacore::types::events::InboundMessage,
+    client: Arc<whatsapp_rust::Client>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    let ctx = Box::new(MessageContext::from_inbound(inbound, client));
+    Box::pin(bounded_message_future(async move {
+        handle_message(&ctx).await;
+    }))
 }
 
 async fn handle_message(ctx: &MessageContext) {
