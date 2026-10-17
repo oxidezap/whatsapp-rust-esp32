@@ -471,22 +471,27 @@ impl FlashNamespaces {
             .map_err(|error| StoreError::Serialization(Box::new(error)))
     }
 
-    fn prepare_record(
+    fn check_record_slot(
         &self,
         namespace: &EspCustomNvs,
         logical_key: &[u8],
-        value: &[u8],
+        value_len: usize,
         label: &str,
         max_entries: usize,
-    ) -> Result<(String, Vec<u8>)> {
-        if value.len() > MAX_SIGNAL_RECORD_LEN {
+    ) -> Result<String> {
+        if value_len > MAX_SIGNAL_RECORD_LEN {
             return Err(StoreError::Validation(format!(
                 "{label} record is too large: {} bytes",
-                value.len()
+                value_len
+            )));
+        }
+        if logical_key.len() > MAX_LOGICAL_KEY_LEN {
+            return Err(StoreError::Validation(format!(
+                "logical storage key is too long: {} bytes",
+                logical_key.len()
             )));
         }
         let name = record_name(logical_key);
-        let record = encode_record(logical_key, value)?;
         let existing = read_blob(
             namespace,
             &name,
@@ -504,7 +509,38 @@ impl FlashNamespaces {
             // budget, otherwise a C3 can write a store it cannot reopen.
             ensure_insert_capacity(false, record_names(namespace)?.len(), max_entries, label)?;
         }
-        Ok((name, record))
+        Ok(name)
+    }
+
+    fn prepare_record(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        value: &[u8],
+        label: &str,
+        max_entries: usize,
+    ) -> Result<(String, Vec<u8>)> {
+        // Drop the previous record before allocating its replacement.
+        let name =
+            self.check_record_slot(namespace, logical_key, value.len(), label, max_entries)?;
+        Ok((name, encode_record(logical_key, value)?))
+    }
+
+    fn put_encoded_record(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        record: &[u8],
+        label: &str,
+        max_entries: usize,
+    ) -> Result<()> {
+        let (encoded_key, value) = decode_record(record)?;
+        if encoded_key != logical_key {
+            return Err(StoreError::Validation("encoded record key mismatch".into()));
+        }
+        let name =
+            self.check_record_slot(namespace, logical_key, value.len(), label, max_entries)?;
+        set_blob(namespace, &name, record)
     }
 
     fn put_record(
@@ -731,7 +767,10 @@ fn read_blob(namespace: &EspCustomNvs, name: &str, max_len: usize) -> Result<Opt
             "NVS record '{name}' is too large: {len} bytes"
         )));
     }
-    let mut data = vec![0; len];
+    let mut data = Vec::new();
+    data.try_reserve_exact(len)
+        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    data.resize(len, 0);
     let actual_len = namespace
         .get_blob(name, &mut data)
         .map_err(nvs_error)?
@@ -749,7 +788,14 @@ fn encode_record(logical_key: &[u8], value: &[u8]) -> Result<Vec<u8>> {
         )));
     }
     let key_len = logical_key.len() as u16;
-    let mut record = Vec::with_capacity(RECORD_HEADER_LEN + logical_key.len() + value.len());
+    let len = RECORD_HEADER_LEN
+        .checked_add(logical_key.len())
+        .and_then(|len| len.checked_add(value.len()))
+        .ok_or_else(|| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    let mut record = Vec::new();
+    record
+        .try_reserve_exact(len)
+        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
     record.extend_from_slice(RECORD_MAGIC);
     record.extend_from_slice(&key_len.to_le_bytes());
     record.extend_from_slice(logical_key);
@@ -1266,6 +1312,12 @@ impl SignalStore for NvsStore {
     }
 
     async fn put_session(&self, address: &str, session: &[u8]) -> Result<()> {
+        if session.len() > MAX_SIGNAL_RECORD_LEN {
+            return Err(StoreError::Validation(format!(
+                "session record is too large: {} bytes",
+                session.len()
+            )));
+        }
         let _operation = self.write_operation()?;
         let mut s = self.lock();
         ensure_insert_capacity(
@@ -1275,13 +1327,15 @@ impl SignalStore for NvsStore {
             "session",
         )?;
         let logical_key = address.as_bytes().to_vec();
-        let persisted = Bytes::copy_from_slice(session);
-        let mirrored = persisted.clone();
+        // NVS needs a contiguous header+payload. Share that allocation with
+        // the RAM mirror instead of copying a session and then framing it.
+        let record = Bytes::from(encode_record(&logical_key, session)?);
+        let mirrored = record.slice(RECORD_HEADER_LEN + logical_key.len()..);
         self.flash.run(move |flash| {
-            flash.put_record(
+            flash.put_encoded_record(
                 &flash.sessions,
                 &logical_key,
-                &persisted,
+                &record,
                 "session",
                 MAX_SESSIONS,
             )
@@ -1982,6 +2036,24 @@ impl MsgSecretStore for NvsStore {
 mod tests {
     use super::*;
     use futures::executor::block_on;
+
+    #[test]
+    fn session_mirror_keeps_only_the_payload_view_of_the_shared_record() {
+        let key = b"synthetic-session.1";
+        let payload = vec![7; 4096];
+        let record = Bytes::from(encode_record(key, &payload).unwrap());
+        assert_eq!(
+            decode_record(&record).unwrap(),
+            (key.as_slice(), payload.as_slice())
+        );
+        let mirror = record.slice(RECORD_HEADER_LEN + key.len()..);
+        assert_eq!(
+            mirror.as_ptr(),
+            record[RECORD_HEADER_LEN + key.len()..].as_ptr()
+        );
+        drop(record);
+        assert_eq!(mirror.as_ref(), payload);
+    }
 
     fn ram_store() -> NvsStore {
         let (jobs, _) = mpsc::sync_channel(1);
