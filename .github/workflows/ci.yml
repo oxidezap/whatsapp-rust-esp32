@@ -13,7 +13,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, agent/c3-bounded-flush]
   pull_request:
 
 # Nothing here writes to the repository; the token only needs to read it.

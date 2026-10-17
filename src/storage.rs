@@ -1184,6 +1184,14 @@ pub struct StoreStats {
 
 #[async_trait]
 impl SignalStore for NvsStore {
+    fn session_flush_batch_limit(&self) -> usize {
+        if crate::runtime::HAS_PSRAM {
+            usize::MAX
+        } else {
+            1
+        }
+    }
+
     async fn put_identity(&self, address: &str, key: [u8; 32]) -> Result<()> {
         let _operation = self.write_operation()?;
         let mut s = self.lock();
