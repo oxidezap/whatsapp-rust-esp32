@@ -496,6 +496,25 @@ impl FlashNamespaces {
         label: &str,
         max_entries: usize,
     ) -> Result<String> {
+        self.check_record_slot_with_scratch(
+            namespace,
+            logical_key,
+            value_len,
+            label,
+            max_entries,
+            None,
+        )
+    }
+
+    fn check_record_slot_with_scratch(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        value_len: usize,
+        label: &str,
+        max_entries: usize,
+        scratch: Option<&mut Vec<u8>>,
+    ) -> Result<String> {
         if value_len > MAX_SIGNAL_RECORD_LEN {
             return Err(StoreError::Validation(format!(
                 "{label} record is too large: {} bytes",
@@ -509,21 +528,53 @@ impl FlashNamespaces {
             )));
         }
         let name = record_name(logical_key);
-        let existing = read_blob(
-            namespace,
-            &name,
-            RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN,
-        )?;
-        if let Some(existing) = existing.as_deref() {
-            let (stored_key, _) = decode_record(existing)?;
-            if stored_key != logical_key {
-                return Err(StoreError::Validation(format!(
-                    "{label} NVS key collision at '{name}'"
-                )));
+        let check_existing = |record: Option<&[u8]>| -> Result<bool> {
+            if let Some(record) = record {
+                let (stored_key, _) = decode_record(record)?;
+                if stored_key != logical_key {
+                    return Err(StoreError::Validation(format!(
+                        "{label} NVS key collision at '{name}'"
+                    )));
+                }
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        };
+        let max_len = RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + MAX_SIGNAL_RECORD_LEN;
+        let exists = if let Some(scratch) = scratch {
+            if let Some(length) = namespace.blob_len(&name).map_err(nvs_error)? {
+                if length > max_len {
+                    return Err(StoreError::Validation(format!(
+                        "NVS record '{name}' is too large: {length} bytes"
+                    )));
+                }
+                if length > scratch.capacity() - scratch.len() {
+                    // Large records retain the old separate-read fallback,
+                    // rather than demanding one allocation for both records.
+                    let existing = read_blob(namespace, &name, max_len)?;
+                    check_existing(existing.as_deref())?
+                } else {
+                    record_buffer::with_suffix(scratch, length, |buffer| {
+                        let record = namespace
+                            .get_blob(&name, buffer)
+                            .map_err(nvs_error)?
+                            .ok_or_else(|| {
+                                StoreError::Validation(format!("NVS record '{name}' disappeared"))
+                            })?;
+                        check_existing(Some(record))
+                    })
+                    .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))??
+                }
+            } else {
+                false
             }
         } else {
-            // RAM mirrors can evict records. The durable namespace owns the
-            // budget, otherwise a C3 can write a store it cannot reopen.
+            let existing = read_blob(namespace, &name, max_len)?;
+            check_existing(existing.as_deref())?
+        };
+        if !exists {
+            // RAM mirrors can evict records. Durable names still own the limit.
             ensure_insert_capacity(false, record_names(namespace)?.len(), max_entries, label)?;
         }
         Ok(name)
@@ -571,6 +622,34 @@ impl FlashNamespaces {
         let (name, record) =
             self.prepare_record(namespace, logical_key, value, label, max_entries)?;
         set_blob(namespace, &name, &record)
+    }
+
+    /// Validate the previous durable key in spare capacity, then frame/write
+    /// the replacement in the same owned allocation. No collision check is skipped.
+    fn put_record_reusing(
+        &self,
+        namespace: &EspCustomNvs,
+        logical_key: &[u8],
+        value: &mut Vec<u8>,
+        label: &str,
+        max_entries: usize,
+    ) -> Result<()> {
+        let name = self.check_record_slot_with_scratch(
+            namespace,
+            logical_key,
+            value.len(),
+            label,
+            max_entries,
+            Some(value),
+        )?;
+        let mut header = [0; RECORD_HEADER_LEN];
+        header[..RECORD_MAGIC.len()].copy_from_slice(RECORD_MAGIC);
+        header[RECORD_MAGIC.len()..].copy_from_slice(&(logical_key.len() as u16).to_le_bytes());
+        let prefix = record_buffer::prepend_parts(value, &header, logical_key)
+            .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+        let result = set_blob(namespace, &name, value);
+        record_buffer::remove_prefix_in_place(value, prefix);
+        result
     }
 
     fn delete_record(
@@ -1220,6 +1299,60 @@ impl SignalStore for NvsStore {
             usize::MAX
         } else {
             1
+        }
+    }
+
+    async fn put_session_reclaim(&self, address: Arc<str>, session: Bytes) -> (Result<()>, Bytes) {
+        if crate::runtime::HAS_PSRAM {
+            let sessions = [(address, session)];
+            let result = self.put_sessions_batch(&sessions).await;
+            let [(_, session)] = sessions;
+            return (result, session);
+        }
+        let mut buffer = match session.try_into_mut() {
+            Ok(bytes) => Vec::from(bytes),
+            Err(session) => {
+                // An external alias keeps its immutable bytes and the usual path.
+                let sessions = [(address, session)];
+                let result = self.put_sessions_batch(&sessions).await;
+                let [(_, session)] = sessions;
+                return (result, session);
+            }
+        };
+        let _operation = match self.write_operation() {
+            Ok(operation) => operation,
+            Err(error) => return (Err(error), Bytes::from(buffer)),
+        };
+        let capacity = {
+            let s = self.lock();
+            ensure_insert_capacity(
+                s.sessions.contains_key(address.as_ref()),
+                s.sessions.len(),
+                MAX_SESSIONS,
+                "session",
+            )
+        };
+        if let Err(error) = capacity {
+            return (Err(error), Bytes::from(buffer));
+        }
+        match self.flash.run(move |flash| {
+            let result = flash.put_record_reusing(
+                &flash.sessions,
+                address.as_bytes(),
+                &mut buffer,
+                "session",
+                MAX_SESSIONS,
+            );
+            Ok((result, buffer))
+        }) {
+            Ok((result, buffer)) => {
+                if result.is_ok() {
+                    // No encoded RAM mirror on this target; flash committed first.
+                    self.lock().enforce_sessions_cap();
+                }
+                (result, Bytes::from(buffer))
+            }
+            Err(error) => (Err(error), Bytes::new()),
         }
     }
 
