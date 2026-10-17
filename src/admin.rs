@@ -3,6 +3,7 @@ use embedded_svc::http::Headers;
 use esp_idf_svc::http::server::{Configuration, EspHttpServer, Request};
 use esp_idf_svc::io::{Read, Write};
 use log::{info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use whatsapp_rust::pair_code::PairCodeOptions;
@@ -589,12 +590,18 @@ pub fn start_admin_server(
                 let text = text.to_string();
                 let memory_gate = active_client.memory_gate();
                 let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                let abandoned = Arc::new(AtomicBool::new(false));
+                let task_abandoned = abandoned.clone();
                 let task_active_client = active_client.clone();
                 let task = Box::pin(bounded_admin_future(async move {
                     let _admission = match memory_gate {
                         Some(gate) => Some(gate.acquire().await),
                         None => None,
                     };
+                    if task_abandoned.load(Ordering::Acquire) {
+                        warn!("Admin: send abandoned after HTTP timeout");
+                        return;
+                    }
                     info!("Admin: executor starting send_message to {jid}");
                     let result = if task_active_client.is_current(&client) {
                         Box::pin(bounded_admin_future(prepare_text_send(&client, jid, text)))
@@ -638,6 +645,7 @@ pub fn start_admin_server(
                         json_response_status(req, 502, &error_body(&error))
                     }
                     Err(_) => {
+                        abandoned.store(true, Ordering::Release);
                         warn!("Admin: send_message timed out waiting for executor");
                         json_response_status(
                             req,

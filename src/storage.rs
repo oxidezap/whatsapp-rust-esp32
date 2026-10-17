@@ -511,7 +511,7 @@ impl FlashNamespaces {
         } else {
             // RAM mirrors can evict records. The durable namespace owns the
             // budget, otherwise a C3 can write a store it cannot reopen.
-            ensure_insert_capacity(false, record_names(namespace)?.len(), max_entries, label)?;
+            ensure_insert_capacity(false, record_count(namespace)?, max_entries, label)?;
         }
         Ok(name)
     }
@@ -528,23 +528,6 @@ impl FlashNamespaces {
         let name =
             self.check_record_slot(namespace, logical_key, value.len(), label, max_entries)?;
         Ok((name, encode_record(logical_key, value)?))
-    }
-
-    fn put_encoded_record(
-        &self,
-        namespace: &EspCustomNvs,
-        logical_key: &[u8],
-        record: &[u8],
-        label: &str,
-        max_entries: usize,
-    ) -> Result<()> {
-        let (encoded_key, value) = decode_record(record)?;
-        if encoded_key != logical_key {
-            return Err(StoreError::Validation("encoded record key mismatch".into()));
-        }
-        let name =
-            self.check_record_slot(namespace, logical_key, value.len(), label, max_entries)?;
-        set_blob(namespace, &name, record)
     }
 
     fn put_record(
@@ -728,6 +711,15 @@ fn erase_namespace(namespace: &EspCustomNvs, label: &str) -> Result<()> {
         "failed to erase NVS {label} namespace after 3 attempts: {}",
         last_error.unwrap_or_else(|| "unknown error".to_string())
     ))))
+}
+
+fn record_count(namespace: &EspCustomNvs) -> Result<usize> {
+    let mut iterator = namespace.keys(Some(NvsDataType::Blob)).map_err(nvs_error)?;
+    let mut count = 0;
+    while iterator.next_key().is_some() {
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn record_names(namespace: &EspCustomNvs) -> Result<Vec<String>> {
@@ -1034,10 +1026,17 @@ impl NvsStore {
                     None
                 }
             };
-            if let Some(id) = recorded.as_ref() {
-                if let Some(key) = flash.load_sync_key(id)? {
-                    inner.sync_keys.insert(id.clone(), key);
-                    inner.sync_key_order.touched(id.clone());
+            if let Some(id) = recorded
+                .as_ref()
+                .filter(|id| !inner.sync_keys.contains_key(*id))
+            {
+                match flash.load_sync_key(id) {
+                    Ok(Some(key)) => {
+                        inner.sync_keys.insert(id.clone(), key);
+                        inner.sync_key_order.touched(id.clone());
+                    }
+                    Ok(None) => {}
+                    Err(error) => log::warn!("Ignoring unreadable latest sync key: {error}"),
                 }
             }
             inner.latest_sync_key_id = recorded
@@ -1091,13 +1090,11 @@ impl NvsStore {
         } else {
             let sessions = self
                 .flash
-                .run(|flash| record_names(&flash.sessions))
-                .map(|names| names.len())
+                .run(|flash| record_count(&flash.sessions))
                 .unwrap_or(s.sessions.len());
             let identities = self
                 .flash
-                .run(|flash| record_names(&flash.identities))
-                .map(|names| names.len())
+                .run(|flash| record_count(&flash.identities))
                 .unwrap_or(s.identities.len());
             (sessions, identities)
         };
@@ -1128,7 +1125,7 @@ impl NvsStore {
         let _operation = self.operation.lock().unwrap_or_else(recover_poisoned);
         let mut s = self.lock();
         let count = self.flash.run(|flash| {
-            let count = record_names(&flash.sessions)?.len();
+            let count = record_count(&flash.sessions)?;
             erase_namespace(&flash.sessions, "session")?;
             Ok(count)
         })?;
@@ -1331,19 +1328,24 @@ impl SignalStore for NvsStore {
             "session",
         )?;
         let logical_key = address.as_bytes().to_vec();
-        // NVS needs a contiguous header+payload. Share that allocation with
-        // the RAM mirror instead of copying a session and then framing it.
-        let record = Bytes::from(encode_record(&logical_key, session)?);
-        let mirrored = record.slice(RECORD_HEADER_LEN + logical_key.len()..);
-        self.flash.run(move |flash| {
-            flash.put_encoded_record(
+        // Validate while the write operation is locked, and release the old
+        // NVS blob before allocating its replacement. The worker closures own
+        // only the key or encoded record, never another copy of the session.
+        let check_key = logical_key.clone();
+        let value_len = session.len();
+        let name = self.flash.run(move |flash| {
+            flash.check_record_slot(
                 &flash.sessions,
-                &logical_key,
-                &record,
+                &check_key,
+                value_len,
                 "session",
                 MAX_SESSIONS,
             )
         })?;
+        let record = Bytes::from(encode_record(&logical_key, session)?);
+        let mirrored = record.slice(RECORD_HEADER_LEN + logical_key.len()..);
+        self.flash
+            .run(move |flash| set_blob(&flash.sessions, &name, &record))?;
         s.sessions.insert(address.to_string(), mirrored);
         s.session_order.touched(address.to_string());
         s.enforce_sessions_cap();
