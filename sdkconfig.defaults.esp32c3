@@ -54,17 +54,14 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 
-# Reserve the full TLS record buffers at handshake, before small long-lived
-# Signal/NVS allocations fragment internal DRAM. The current SDK connects with
-# roughly 115 KiB free; the earlier static-buffer failure documented in
-# docs/esp32c3.md used a 53 KiB-at-connect profile.
-#
-# The dynamic-buffer follow-up could reconnect with about 70 KiB free but only
-# a 5 KiB largest block, then failed TLS writes and a 5,115 B session encoding.
-# Reserving records early targets that fragmentation; it does not increase the
-# heap, relax stack floors or reduce the configured TLS record limits below.
-CONFIG_MBEDTLS_DYNAMIC_BUFFER=n
-CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=n
+# Return record buffers between TLS operations on the no-PSRAM C3. Keeping
+# full RX/TX buffers for the entire connection competes with Signal sessions,
+# NVS serialization and the OpenETH receive buffers. Static allocation failed
+# the restored-session messaging qualification, including with the newer
+# higher-free-heap-at-connect profile; early allocation alone is not a fix.
+# Keep the full receive record limit below for peer compatibility.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # Asymmetric record buffers: a TLS peer may send up to a 16 KB record and we must
 # be able to receive it, but nothing this firmware sends comes close, so the
 # outgoing buffer does not have to match. The incoming side stays at the full

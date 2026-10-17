@@ -461,8 +461,9 @@ cmd_test() {
     sent_id="$(json_field "$sent" "d['message_id']")"
     [[ -n "$sent_id" ]] || return 1
     wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"
-    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "Reaction sent" "Send took"
+    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot1.log" "Reaction sent" "Send took" "Edit sent for message"
     wait_for_message "$port_a" "'Pong!'"
+    wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot2.log" "Quoted message reference: $sent_id"
 
     metrics_gate "$port_a" a-before-session-reboot || return 1
     metrics_gate "$port_b" b-before-session-reboot || return 1
@@ -497,8 +498,9 @@ cmd_test() {
     sent_id="$(json_field "$sent" "d['message_id']")"
     [[ -n "$sent_id" ]] || return 1
     wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"
-    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot2.log" "Reaction sent" "Send took"
+    wait_markers "$pid_b" "$OUT_DIR/qemu-b-boot2.log" "Reaction sent" "Send took" "Edit sent for message"
     wait_for_message "$port_a" "'Pong!'"
+    wait_markers "$pid_a" "$OUT_DIR/qemu-a-boot3.log" "Quoted message reference: $sent_id"
 
     # Gate both peaks after the reloaded-session roundtrip as well.
     metrics_gate "$port_a" a || return 1

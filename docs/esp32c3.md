@@ -192,8 +192,8 @@ The size is `record_length + 341`, taken from the header the **peer** sent:
 16,749 is 16408 + 341, not 16384 + 365. No sdkconfig value bounds it, which is
 why lowering the ceiling changed nothing.
 
-**An earlier static-buffer trial exhausted the heap.** The figures below
-come from the older 53 KB-at-connect profile. Static record
+**Static buffers have also failed qualification.** The historical figures
+below use the older 53 KB-at-connect profile. Static record
 buffers are taken once inside the handshake, when the heap is least fragmented,
 which sounds strictly better. It is not, because of what the heap actually looks
 like by then:
@@ -213,16 +213,11 @@ task_wdt: Task watchdog got triggered ... CPU 0: emac_rx
 ```
 
 A 206 MB serial log and a ten-minute job timeout, instead of the previous
-abort at seven seconds. That trial kept `CONFIG_MBEDTLS_DYNAMIC_BUFFER` on.
-
-The newer SDK memory changes increased observed free heap at WebSocket connect
-to roughly 115 KB. Dynamic-buffer runs still fragmented the heap after restored
-sessions resumed: one reconnect had about 70 KB free but only a 5 KB largest
-block, followed by TLS write allocation failures. The current C3 configuration
-retests static record buffers under this newer profile, reserving them at
-handshake. It keeps the 16 KB receive and 4 KB send limits, the same heap and
-stack gates. The extended post-session-reboot QEMU run must qualify this
-configuration; the older static trial does not establish its current result.
+abort at seven seconds. The newer SDK memory profile connected with roughly
+115 KB free, but another static-buffer trial still failed initial messaging
+with an allocation failure during editing. Dynamic buffers are restored; this
+choice does not establish that fragmentation or post-reboot messaging is fixed.
+The complete heap, stack and restored-session roundtrip gates remain required.
 
 ## Sizing the stacks from the measurement
 

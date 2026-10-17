@@ -822,6 +822,13 @@ async fn run_whatsapp_inner(
                                 inbound.info.source.sender,
                                 text.unwrap_or("<no text>")
                             );
+                            if let Some(quoted_id) = inbound
+                                .message
+                                .context_info()
+                                .and_then(|context| context.stanza_id.as_deref())
+                            {
+                                info!("Quoted message reference: {}", quoted_id);
+                            }
                             ds.record_message(MessageLogEntry {
                                 id: inbound.info.id.to_string(),
                                 chat: inbound.info.source.chat.to_string(),
@@ -831,13 +838,15 @@ async fn run_whatsapp_inner(
                                 from_me: inbound.info.source.is_from_me,
                             });
                             if text == Some(PING_TRIGGER) {
-                                let ctx =
-                                    MessageContext::from_inbound(inbound, Arc::clone(&client));
+                                let ctx = Box::new(MessageContext::from_inbound(
+                                    inbound,
+                                    Arc::clone(&client),
+                                ));
                                 let fut: std::pin::Pin<
                                     Box<dyn std::future::Future<Output = ()> + Send>,
-                                > = Box::pin(async move {
+                                > = Box::pin(bounded_message_future(async move {
                                     handle_message(&ctx).await;
-                                });
+                                }));
                                 fut.await;
                             }
                         }
@@ -926,15 +935,16 @@ async fn handle_message(ctx: &MessageContext) {
     // group/status participant, which the hand-rolled key here used to get wrong
     // for status broadcasts) and allocates no JID strings on this path.
     info!("Sending reaction...");
-    if let Err(e) = ctx.react(REACTION_EMOJI).await {
-        error!("Failed to send reaction: {}", e);
+    match ctx.react(REACTION_EMOJI).await {
+        Ok(_) => info!("Reaction sent! Building pong reply..."),
+        Err(e) => error!("Failed to send reaction: {}; building pong reply...", e),
     }
-    info!("Reaction sent! Building pong reply...");
 
     let start = std::time::Instant::now();
     // Equivalent to the old build_quote_context + ExtendedTextMessage literal.
-    let sent = match ctx.reply_quoting(PONG_TEXT).await {
-        Ok(r) => r,
+    let message_id = match ctx.reply_quoting(PONG_TEXT).await {
+        // Only the ID is needed for editing; release the quoted payload now.
+        Ok(r) => r.message_id,
         Err(e) => {
             error!("Failed to send pong: {}", e);
             return;
@@ -942,18 +952,37 @@ async fn handle_message(ctx: &MessageContext) {
     };
 
     let duration = format!("{:.2?}", start.elapsed());
-    info!(
-        "Send took {}. Editing message {}...",
-        duration, sent.message_id
-    );
+    info!("Send took {}. Editing message {}...", duration, message_id);
 
-    // buffa (the prost replacement in 0.7.0) wraps sub-messages in
-    // `MessageField<T>` instead of `Option<Box<T>>`.
+    match prepare_demo_edit(ctx, message_id.clone(), &duration).await {
+        Ok(_) => info!("Edit sent for message {}", message_id),
+        Err(e) => error!("Failed to edit message {}: {}", message_id, e),
+    }
+}
+
+// Build the protobuf before creating the suspended send future. The handler
+// retains only the shared request and the ID needed for error reporting.
+fn prepare_demo_edit<'a>(
+    ctx: &'a MessageContext,
+    message_id: whatsapp_rust::MessageId,
+    duration: &str,
+) -> impl std::future::Future<Output = Result<whatsapp_rust::SendResult, whatsapp_rust::SendError>> + 'a
+{
     let mut extended_text = wa::message::ExtendedTextMessage::default();
     extended_text.text = Some(format!("{PONG_TEXT}\n`{duration}`"));
     let mut edit = wa::Message::default();
     edit.extended_text_message = MessageField::some(extended_text);
-    if let Err(e) = ctx.edit_message(sent.message_id.clone(), edit).await {
-        error!("Failed to edit message {}: {}", sent.message_id, e);
+    ctx.edit_message(message_id, edit)
+}
+
+// Enforce the contiguous allocation budget on the actual target future, not
+// just a host stand-in. Keep the per-inbound handlers sequential.
+fn bounded_message_future<F: std::future::Future>(future: F) -> F {
+    const {
+        assert!(
+            std::mem::size_of::<F>() <= 1024,
+            "message handler future exceeds 1 KiB"
+        );
     }
+    future
 }
