@@ -40,6 +40,7 @@ log = { version = "0.4", features = ["release_max_level_info"] }
 # which needs anyhow's `std` feature. whatsapp-rust pulls anyhow with
 # default-features = false, so relying on its re-export alone would lose that.
 anyhow = "1"
+async-lock = "3"
 # `futures::executor::block_on` lives behind the `executor` feature, which
 # whatsapp-rust does not enable, so this one is also declared directly.
 futures = "0.3"
@@ -72,7 +73,7 @@ bytes = "1.12"
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f47c529ce84eaf62a6636f28d339c3fcb175f4e1", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "7c691e9acdbaf026a4feff61b2514a96f1c1490c", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing

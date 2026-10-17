@@ -217,7 +217,7 @@ stop() {
 }
 
 # The signatures that mean the firmware died rather than merely fell behind.
-CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)'
+CRASH_RE='RUST PANIC|Guru Meditation|abort\(\) was called|rst:0x[0-9a-f]+ \((TG[01]WDT|RTCWDT|PANIC)|WS send error:.*32512'
 
 # crash_context LOG: print the serial around the crash signature.
 #
@@ -247,6 +247,17 @@ decode_crash() {
     fi
 }
 
+# These callbacks do not retry a failed operation. Once one fails the
+# required success marker cannot qualify this ping; retain the complete cause.
+check_message_failure() {
+    local serial="$1" line
+    line=$(grep -n -m1 -E 'Failed to send reaction:|Failed to send pong:|Failed to edit message ' "$serial" | cut -d: -f1) || true
+    [[ -n "$line" ]] || return 0
+    log "firmware reported a required messaging failure: $serial"
+    sed -n "${line},$((line + 4))p" "$serial"
+    return 1
+}
+
 check_crashes() {
     local serial
     for serial in "${QEMU_SERIAL_LOGS[@]:-}"; do
@@ -257,6 +268,7 @@ check_crashes() {
             decode_crash "$serial"
             return 1
         fi
+        check_message_failure "$serial" || return 1
     done
 }
 
@@ -283,6 +295,7 @@ wait_markers() {
             if grep -q -E "$CRASH_RE" "$serial"; then
                 log "firmware crashed before '$marker'"; crash_context "$serial"; decode_crash "$serial"; return 1
             fi
+            check_message_failure "$serial" || return 1
             if (( SECONDS >= deadline )); then
                 log "timed out waiting for '$marker'"; connection_context "$serial"; tail -n 60 "$serial"; return 1
             fi
@@ -315,7 +328,7 @@ wait_for_message() {
     local port="$1" needle="$2" deadline=$((SECONDS + MESSAGE_TIMEOUT)) messages id_literal
     id_literal="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${3:-}")"
     until messages="$(admin_get "$port" /messages)" \
-        && [[ "$(json_field "$messages" "any($needle in (m['text'] or '') and (not $id_literal or m['id'] == $id_literal) for m in d['messages'])")" == True ]]; do
+        && [[ "$(json_field "$messages" "any(not m['from_me'] and $needle in (m['text'] or '') and (not $id_literal or m['id'] == $id_literal) for m in d['messages'])")" == True ]]; do
         check_crashes || return 1
         if (( SECONDS >= deadline )); then
             log "no message containing $needle on port $port; /messages -> $messages"
@@ -360,12 +373,21 @@ metric_floor() {
 # floor. Runs after the messaging stage so the marks cover pairing, reboot
 # and a full ping/pong round trip.
 metrics_gate() {
-    local port="$1" name="$2" metrics
+    local port="$1" name="$2" metrics device
     if ! metrics="$(admin_get "$port" /metrics)"; then
         log "GET /metrics failed on board $name: $metrics"
         return 1
     fi
     echo "$metrics" | tee "$OUT_DIR/qemu-metrics-$name.json" >&2
+    device="$(admin_get "$port" /device)" || return 1
+    if [[ "$(json_field "$device" "d.get('connected') is True")" != True ]]; then
+        log "board $name is disconnected after its encrypted roundtrip"
+        return 1
+    fi
+    if [[ "$(json_field "$metrics" "d['reset_reason'] == 'PowerOn' and d['last_panic'] is None and d['coredump'] is None")" != True ]]; then
+        log "board $name reset unexpectedly or retained a panic/coredump"
+        return 1
+    fi
     metric_floor "$metrics" stack_wa_main_min "$WA_MAIN_MIN" || return 1
     metric_floor "$metrics" stack_wa_blocking_min "$WA_BLOCKING_MIN" || return 1
     metric_floor "$metrics" stack_ws_transport_min "$WS_TRANSPORT_MIN" || return 1
@@ -494,7 +516,12 @@ cmd_test() {
     log "reloaded Signal sessions: repeating encrypted ping/quoted pong"
     sent="$(admin_curl --max-time 60 -H 'Content-Type: application/json' \
         -d "{\"to\":\"$to_b\",\"text\":\"\\ud83e\\udd80ping\"}" "http://127.0.0.1:$port_a/send")" || return 1
-    [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || return 1
+    log "POST /send after session reboot -> $sent"
+    [[ "$(json_field "$sent" "d.get('result') == 'sent'")" == True ]] || {
+        check_crashes || return 1
+        connection_context "$OUT_DIR/qemu-a-boot3.log"
+        return 1
+    }
     sent_id="$(json_field "$sent" "d['message_id']")"
     [[ -n "$sent_id" ]] || return 1
     wait_for_message "$port_b" "'\U0001f980ping'" "$sent_id"

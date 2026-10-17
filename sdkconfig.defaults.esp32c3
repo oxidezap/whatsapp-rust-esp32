@@ -20,8 +20,12 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 # Triage proved the previous 36 KB stack overflows in the ServerAck window:
 # 2,356 bytes free at the last clean telemetry, then the canary fires with
 # SP outside the stack while heap walks fault on the overwritten words.
-# 48 KB restores margin; keep aligned with default_thread_config.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
+# The bounded demo callback/admin phases left at least 18,788 B unused in
+# the 48 KiB control before reboot. Qualify 40 KiB to return 8 KiB to the
+# internal heap for TLS control writes outside foreground admission. The same
+# 2,048 B unused-stack floor and full restored-session workload still apply.
+# The reusable executor's thread default remains the conservative 48 KiB.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960
 
 # Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
 # this. Everything in src/ names its own size; this is the floor for the rest

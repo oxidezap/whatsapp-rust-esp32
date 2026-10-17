@@ -40,6 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -57,6 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -112,6 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Host tools the ESP-IDF build needs
@@ -232,7 +235,7 @@ jobs:
           echo "secret present"
 
   qemu-e2e:
-    name: Pair, persist and message on QEMU (${{ matrix.board }})
+    name: Pair, persist and message on QEMU (${{ matrix.label }})
     # Runs only when the build passed and the credentials check ran and passed;
     # inherits the fork-PR skip from `mock-server-secret`.
     needs: [build, mock-server-secret]
@@ -248,11 +251,23 @@ jobs:
       matrix:
         include:
           - board: esp32s3
+            label: esp32s3
+            sample: 1
             # The QEMU release ships one binary per architecture; `arch` names
             # both the tarball and the qemu-system-* inside it.
             arch: xtensa
           - board: esp32c3
+            label: esp32c3
             arch: riscv32
+            sample: 1
+          - board: esp32c3
+            label: esp32c3, sample 2
+            arch: riscv32
+            sample: 2
+          - board: esp32c3
+            label: esp32c3, sample 3
+            arch: riscv32
+            sample: 3
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
@@ -273,6 +288,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Resolve paths from the board table
@@ -325,7 +341,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           # Preserve independent reruns of the same firmware without name collisions.
-          name: qemu-serial-logs-${{ matrix.board }}-attempt-${{ github.run_attempt }}
+          name: qemu-serial-logs-${{ matrix.board }}-sample-${{ matrix.sample }}-attempt-${{ github.run_attempt }}
           if-no-files-found: ignore
           path: |
             ${{ env.OUT }}/qemu-*.log

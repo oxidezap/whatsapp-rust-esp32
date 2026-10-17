@@ -293,7 +293,8 @@ impl Esp32Executor {
     ///
     /// The demo hosts the executor on the ESP-IDF main task without PSRAM.
     /// Its `CONFIG_ESP_MAIN_TASK_STACK_SIZE` in `sdkconfig.defaults.esp32c3`
-    /// matches this budget; library consumers that spawn a thread get it here.
+    /// has a separate budget for its bounded callbacks. Library consumers that
+    /// spawn a thread retain this conservative default.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-main"),
