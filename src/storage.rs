@@ -13,9 +13,10 @@
 //! `wa-nvs` thread with an internal-RAM stack, because the flash cache is off
 //! while flash is being written and a PSRAM stack would fault.
 //!
-//! Reads are served from the in-RAM mirror that is filled once at boot; a
-//! write updates flash first and the mirror only once flash has committed, so
-//! RAM never claims more than flash holds.
+//! Other records use bounded in-RAM mirrors. Without PSRAM, encoded Signal
+//! sessions reload from NVS: the SDK already caches decoded hot sessions.
+//! Writes publish mirror data only after flash commits; evicting a mirror
+//! entry never removes the durable record.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +35,8 @@ use whatsapp_rust::wacore::appstate::processor::AppStateMutationMAC;
 use whatsapp_rust::wacore::store::error::{Result, StoreError};
 use whatsapp_rust::wacore::store::traits::*;
 use whatsapp_rust::wacore::store::Device;
+
+mod record_buffer;
 
 const RECORD_MAGIC: &[u8; 3] = b"WA1";
 const RECORD_HEADER_LEN: usize = 5;
@@ -148,7 +151,8 @@ type MsgSecretKey = (Arc<str>, Arc<str>, Arc<str>);
 type MsgSecretValue = (MessageSecretBytes, i64, i64);
 
 /// Use order for a RAM-capped mirror map. Without PSRAM the mirror holds at
-/// most 8 entries as a cache over flash (a miss reloads from NVS), and
+/// most 8 identities/keys as a cache over flash. Encoded sessions have no
+/// mirror without PSRAM; the SDK caches decoded sessions. Other mirrors
 /// eviction must drop the least-recently-used entry: dropping an arbitrary
 /// `HashMap` key can discard the just-written hot session the encrypt path is
 /// about to read, paying a flash read immediately. Both writes and read hits
@@ -198,12 +202,14 @@ impl StoreInner {
         }
     }
     fn enforce_sessions_cap(&mut self) {
-        if crate::runtime::HAS_PSRAM {
-            return;
-        }
-        for key in self.session_order.overflow(self.sessions.len(), 8) {
-            self.sessions.remove(&key);
-            self.session_order.removed(&key);
+        if !crate::runtime::HAS_PSRAM {
+            // The SDK caches decoded hot sessions. Keeping their encoded
+            // records here duplicates scarce internal RAM and fragments the
+            // heap needed for NVS reads during a restored-session flush.
+            // This evicts only the read-through mirror; flash remains complete
+            // and get_session reloads and validates a cache miss as before.
+            self.sessions.clear();
+            self.session_order.clear();
         }
     }
     fn enforce_sync_keys_cap(&mut self) {
@@ -377,7 +383,12 @@ impl FlashNamespaces {
                     value.len()
                 )));
             }
-            records.push((logical_key.to_vec(), value.to_vec()));
+            let payload_start = record.len() - value.len();
+            let logical_key = logical_key.to_vec();
+            records.push((
+                logical_key,
+                record_buffer::remove_prefix(record, payload_start),
+            ));
         }
         Ok(records)
     }
@@ -429,7 +440,12 @@ impl FlashNamespaces {
                 ))
                 .into());
             }
-            visit(logical_key.to_vec(), value.to_vec())?;
+            let payload_start = record.len() - value.len();
+            let logical_key = logical_key.to_vec();
+            visit(
+                logical_key,
+                record_buffer::remove_prefix(record, payload_start),
+            )?;
         }
         Ok(())
     }
@@ -459,7 +475,8 @@ impl FlashNamespaces {
                 value.len()
             )));
         }
-        Ok(Some(value.to_vec()))
+        let payload_start = record.len() - value.len();
+        Ok(Some(record_buffer::remove_prefix(record, payload_start)))
     }
 
     fn load_sync_key(&self, key_id: &[u8]) -> Result<Option<AppStateSyncKey>> {
@@ -768,8 +785,13 @@ fn read_blob(namespace: &EspCustomNvs, name: &str, max_len: usize) -> Result<Opt
         )));
     }
     let mut data = Vec::new();
-    data.try_reserve_exact(len)
-        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    data.try_reserve_exact(len).map_err(|_| {
+        log::error!(
+            "NVS read_blob allocation refused: {len} bytes{}",
+            crate::metrics::heap_note()
+        );
+        StoreError::Io(std::io::ErrorKind::OutOfMemory.into())
+    })?;
     data.resize(len, 0);
     let actual_len = namespace
         .get_blob(name, &mut data)
@@ -793,9 +815,13 @@ fn encode_record(logical_key: &[u8], value: &[u8]) -> Result<Vec<u8>> {
         .and_then(|len| len.checked_add(value.len()))
         .ok_or_else(|| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
     let mut record = Vec::new();
-    record
-        .try_reserve_exact(len)
-        .map_err(|_| StoreError::Io(std::io::ErrorKind::OutOfMemory.into()))?;
+    record.try_reserve_exact(len).map_err(|_| {
+        log::error!(
+            "NVS encode_record allocation refused: {len} bytes{}",
+            crate::metrics::heap_note()
+        );
+        StoreError::Io(std::io::ErrorKind::OutOfMemory.into())
+    })?;
     record.extend_from_slice(RECORD_MAGIC);
     record.extend_from_slice(&key_len.to_le_bytes());
     record.extend_from_slice(logical_key);
