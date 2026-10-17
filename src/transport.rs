@@ -275,9 +275,9 @@ impl TransportFactory for Esp32TransportFactory {
         // one where there is no PSRAM: the reader parks after every frame
         // (TCP backpressure; the peer waits) instead of piling frames in
         // DRAM, serializing phases that otherwise overlap at the trough.
-        // Blocking here cannot deadlock: the executor drains this channel
-        // without ever waiting on the socket thread, and the 64-deep
-        // outbound queue absorbs several messages of replies per park.
+        // A full receive channel pauses further socket reads while the worker
+        // continues draining writes. The executor can await an actual write
+        // completion while handling an incoming event without a circular wait.
         // PSRAM boards keep the unbounded channel and their exact current
         // behavior.
         let (event_tx, event_rx) = if crate::runtime::HAS_PSRAM {
