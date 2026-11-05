@@ -772,6 +772,12 @@ async fn run_whatsapp_inner(
 
     let builder = if !whatsapp_esp32::runtime::HAS_PSRAM {
         let mut config = whatsapp_rust::CacheConfig::default();
+        // Bound idle coordination metadata on internal RAM. These are soft
+        // caps: the SDK retains locks/lanes held by live tasks, preserving
+        // serialization even when a concurrent burst exceeds the budget.
+        config.session_locks_capacity = 16;
+        config.chat_lanes_capacity = 16;
+        config.group_distribution_locks_capacity = 8;
         config.app_state_downloads = whatsapp_rust::AppStateDownloadConfig::new(
             8192,
             std::num::NonZeroUsize::new(1).expect("one is nonzero"),

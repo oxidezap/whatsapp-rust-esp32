@@ -35,8 +35,8 @@ C3 differs from the others in the deepest possible way.
 
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
-| `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 36 KB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864`; measured peak 30.4 KB. `default_thread_config`'s 32 KB no-PSRAM arm is what library consumers get. |
-| `wa-blocking` worker stack | 32 KB | 14 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,404 B. |
+| `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 40 KiB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960`; preserve the 2,048-byte E2E floor. Library consumers retain the conservative 48 KiB thread default. |
+| `wa-blocking` worker stack | 32 KB | 16 KiB | The current SDK left only 152 bytes unused on the old 14 KiB stack during sync/messaging. Preserve the 512-byte E2E floor. |
 | `ws-transport` stack | 16 KB | 6 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
 | `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
 | WebSocket frame / message cap | 16 MiB / 64 MiB | 32 KB / 32 KB | Above the largest legitimate message (28,204 B). Refused from the frame header, before any allocation. See below. |
@@ -51,11 +51,19 @@ message the server actually sends, and the session count is what the dashboard
 and the QEMU suite actually use.
 
 Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack grows from
-32 KB to 36 KB (it hosts the executor directly on the C3 instead of spawning a
-separate `wa-main` thread; measured peak 30.4 KB), the default pthread stack
+32 KB to 40 KiB (it hosts the executor directly on the C3 instead of spawning a
+separate `wa-main` thread), the default pthread stack
 drops from 32 KB to 8 KB, the Wi-Fi buffer counts from 10/32/32 to 4/8/8, and
-mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KB in, 4 KB
+mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KiB in, 1 KiB
 out) since it can no longer allocate from external memory.
+
+The no-PSRAM client also caps idle session locks and chat lanes at 16 entries,
+and group-distribution locks at eight. The SDK's guarded eviction retains locks
+and lanes held by live tasks, even above these soft caps, so serialization stays
+intact during a burst. This bounds coordination metadata without discarding
+persisted Signal sessions. TLS output uses the smaller local record size while
+WebSocket writes remain fragmented; the peer may still send a full 16 KiB record.
+
 
 `wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
 disables the cache, so a stack in PSRAM would fault mid-write -- which makes it
@@ -460,8 +468,8 @@ in exactly that block, that is the lever the measurement points at.
 That pass landed as the `now` column above, and a third pass followed: the
 executor moved onto the 36 KB IDF main task (no `wa-main` thread on the C3),
 `wa-blocking` to 14 KB, `ws-transport` to 6 KB, `wa-nvs` to 4 KB, admin
-sessions to 2. The `by_ram` table at the top of this document is that final
-state; the `now` columns in the round tables above are history.
+sessions to 2. Those figures describe that earlier pass. The current budgets
+are in the `by_ram` table above; the round tables are historical measurements.
 
 If it turns out not to be enough, the next move is upstream rather than another
 resize here: decoding the props response without materialising a second
