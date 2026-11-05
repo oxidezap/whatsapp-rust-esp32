@@ -33,7 +33,7 @@ build-std-features = ["compiler-builtins-mem"]
 [env]
 # Shared ESP-IDF version for every supported board.
 MCU = "esp32s3"
-ESP_IDF_VERSION = "v5.5.5"
+ESP_IDF_VERSION = "v6.1"
 # The sdkconfig layering scripts/boards.sh does for the other boards, spelled out
 # for the one board a bare `cargo build` targets. `sdkconfig.psram` is separate
 # from `sdkconfig.defaults` because the ESP32-C3 has no PSRAM and most of those

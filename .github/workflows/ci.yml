@@ -25,9 +25,9 @@ env:
   # Pinned Xtensa Rust release (esp-rs/rust-build). Bump deliberately: it moves the
   # rustc the `esp` channel resolves to, and with it every size and timing number.
   # The same toolchain carries the RISC-V targets, so the ESP32-C5 uses it too.
-  ESP_RUST_VERSION: "1.98.0.0"
+  ESP_RUST_VERSION: "1.99.0.0"
   # Unified ESP-IDF version across all boards.
-  ESP_IDF_VERSION: "v5.5.5"
+  ESP_IDF_VERSION: "v6.1"
   # Espressif QEMU release used by qemu-e2e, from the dl.espressif.com mirror of the
   # GitHub asset so the job does not depend on api.github.com.
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
@@ -44,7 +44,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: nightly-2026-06-16
+          toolchain: 1.99.1
       # This DTO has no ESP-IDF dependencies. Avoid the firmware's target and
       # build-std defaults by invoking its host harness outside the repository.
       - name: Verify the actual message-log serializer on the host
@@ -62,7 +62,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
           cache-dependency-path: scripts/dashboard/package-lock.json
       - run: npm ci --ignore-scripts --prefix scripts/dashboard
@@ -95,7 +95,7 @@ jobs:
             board: esp32s3
             build: cargo build --release --features mock-server
           - flavor: esp32c5
-            # The RISC-V board: ESP-IDF v5.5.5, selected by the script.
+            # The RISC-V board: ESP-IDF v6.1, selected by the script.
             board: esp32c5
             build: scripts/build.sh --board esp32c5 --release --features mock-server
           - flavor: esp32c3
@@ -155,7 +155,7 @@ jobs:
 
       - name: Clean stale ESP-IDF tools from cache
         run: |
-          # Purge older v5.4 tools if restored from legacy cache so esp-idf-sys installs v5.5.5 tools cleanly
+          # Purge older v5.4 tools if restored from legacy cache so esp-idf-sys installs v6.1 tools cleanly
           rm -rf .embuild/espressif/esp-idf/v5.4 .embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119 .embuild/espressif/tools/esp-clang/esp-18*
 
       # The board table owns the target triple and the qemu target dir, so this
@@ -198,7 +198,7 @@ jobs:
         env:
           BOARD: ${{ matrix.board }}
         run: |
-          python3 -m venv .venv && .venv/bin/pip install -q esptool
+          python3 -m venv .venv && .venv/bin/pip install -q esptool==5.6.0
           .venv/bin/esptool --chip "$BOARD" elf2image --flash_size 16MB \
             -o "$OUT/whatsapp-esp32.bin" "$OUT/whatsapp-esp32"
           scripts/check-app-size.sh "$OUT/whatsapp-esp32.bin" partitions.csv
@@ -271,7 +271,7 @@ jobs:
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
-        image: ghcr.io/whiskeysockets-devtools/bartender@sha256:9f3a49dd9f944414fbda50571bba5f66f2ab6fdc48001e6803d4c09a1042c78e
+        image: ghcr.io/whiskeysockets-devtools/bartender@sha256:56cbabbc2bba22a3306bfdf7bf02f0fbd6041483a7cac8b0c6217ac4cfa58f75
         credentials:
           username: ${{ github.actor }}
           password: ${{ secrets.BARTENDER_GHCR_TOKEN }}
@@ -317,7 +317,7 @@ jobs:
           # scripts/boards.sh reads QEMU_XTENSA for the S3 and QEMU_RISCV32 for
           # the C3; only the one for this chip is set.
           echo "QEMU_${arch^^}=$HOME/qemu/qemu/bin/qemu-system-${arch}" >> "$GITHUB_ENV"
-          python3 -m venv .venv && .venv/bin/pip install -q esptool esp-idf-nvs-partition-gen
+          python3 -m venv .venv && .venv/bin/pip install -q esptool==5.6.0 esp-idf-nvs-partition-gen==0.3.0
           echo "ESPTOOL=$PWD/.venv/bin/esptool" >> "$GITHUB_ENV"
           echo "NVS_PYTHON=$PWD/.venv/bin/python" >> "$GITHUB_ENV"
 

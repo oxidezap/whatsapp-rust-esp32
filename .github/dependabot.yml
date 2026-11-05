@@ -63,3 +63,23 @@ updates:
       actions:
         patterns:
           - "*"
+
+  - package-ecosystem: cargo
+    directory: /tests/dashboard-json
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      host-tests:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /scripts/dashboard
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      dashboard:
+        patterns:
+          - "*"

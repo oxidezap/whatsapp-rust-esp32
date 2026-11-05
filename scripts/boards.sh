@@ -48,7 +48,7 @@ board_select() {
 BOARD_NAMES=(esp32s3 esp32c5 esp32c3)
 
 # The ESP-IDF version every board is built against.
-BOARD_ESP_IDF_VERSION="v5.5.5"
+BOARD_ESP_IDF_VERSION="v6.1"
 
 # The SDKCONFIG_DEFAULTS list for the selected board, plus any extra overlays
 # passed as arguments (scripts/qemu.sh adds sdkconfig.qemu).

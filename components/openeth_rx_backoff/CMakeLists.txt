@@ -4,7 +4,7 @@ if(CMAKE_BUILD_EARLY_EXPANSION OR NOT CONFIG_ETH_USE_OPENETH)
     return()
 endif()
 
-# ESP-IDF 5.5.5 retries malloc without blocking in the high-priority OpenETH
+# ESP-IDF 6.1 retries malloc without blocking in the high-priority OpenETH
 # receive task. On C3 a transient low-heap condition then starves the tasks
 # that could finish their work and free buffers. Patch a build-local copy;
 # never mutate the SDK checkout or alter the hardware WiFi drivers.

@@ -2,9 +2,9 @@
 name = "whatsapp-esp32"
 version = "0.1.0"
 edition = "2021"
-# Tracks whatsapp-rust 0.7.0's declared MSRV (its workspace pins 1.94 and the
+# Tracks whatsapp-rust 0.7.0's declared MSRV (its workspace pins 1.95 and the
 # crates are edition 2024). The Xtensa `esp` toolchain must be at least this new.
-rust-version = "1.94"
+rust-version = "1.95"
 authors = ["João Lucas <jlucaso@hotmail.com>"]
 license = "MIT"
 description = "A full, end-to-end-encrypted WhatsApp client running on ESP32-S3, ESP32-C5 and ESP32-C3 microcontrollers, built on whatsapp-rust."
@@ -25,7 +25,7 @@ path = "src/main.rs"
 # `critical-section`: edge-executor 0.5 guards its run-queue with embassy-sync's
 # CriticalSectionRawMutex, which links against a `critical-section` provider.
 # esp-idf-hal's is an ESP-IDF spinlock, correct across both cores and ISRs.
-esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
+esp-idf-svc = { version = "0.53", features = ["binstart", "critical-section"] }
 # `Headers` for the admin server's POST handlers (Content-Length / Content-Type);
 # the `Request` type esp-idf-svc re-exports implements it but does not re-export it.
 embedded-svc = { version = "0.29", default-features = false, optional = true }
@@ -73,7 +73,7 @@ bytes = "1.12"
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7d9021505dcc64603ae38335a0dec5098848540", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "70c0d712ff07bab7914e17625af4e9e141c9c14c", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing
@@ -132,15 +132,9 @@ dotenvy = "0.15"
 
 # Pull in espressif/mdns component (moved out of ESP-IDF since v5.0)
 [[package.metadata.esp-idf-sys.extra_components]]
-remote_component = { name = "espressif/mdns", version = "1.2" }
+remote_component = { name = "espressif/mdns", version = "1.15.1" }
 
 [[package.metadata.esp-idf-sys.extra_components]]
 component_dirs = ["components/openeth_rx_backoff"]
-
-[patch.crates-io]
-# ESP-IDF v5.5.5 (the version the ESP32-C5 build uses) backported an sdmmc_host_t
-# field after esp-idf-hal 0.46.2 shipped; this revision adds it behind a version
-# cfg, so the v5.4 ESP32-S3 build compiles the same source it did before.
-esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", rev = "c2dac82f5243b0b7036c392f8218e6a2b4f7e375" }
 
 [workspace]
