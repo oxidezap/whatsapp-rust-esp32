@@ -1,0 +1,695 @@
+{
+  "measurement_date": "2026-11-05",
+  "base_commit": "1214e67",
+  "protocol_revision": "f7d9021505dcc64603ae38335a0dec5098848540",
+  "command": "scripts/build.sh --board esp32c3 --release",
+  "features": "default admin enabled; production TLS and Noise verification; no mock-server",
+  "sdk": "ESP-IDF v5.5.5",
+  "toolchain": "esp 1.98.0.0; rustc 1.98.0-nightly fedb58bc9",
+  "environment_note": "The component registry download host was blocked. Both baseline and experiments use the official espressif/esp-protocols mdns-v1.2.5 tag, commit f8a776d8a50247dbd237aa27de17e56e3f5464af, as a local component. The registry package hash was not compared. This environment-only manifest change is excluded from the PR.",
+  "symbols": {
+    "elf_sha256": "c10aef938c6bed8cb932cf2dc6eac7120a237a7f96f070c620f1bbc5e11f6d37",
+    "named_initialized_symbol_bytes": 3376663,
+    "attribution": "First Rust path component; LTO attribution is approximate. Includes initialized data, excludes BSS and debug sections. Anonymous literals and alignment are not fully attributed.",
+    "symbols_by_owner": {
+      "whatsapp_rust": 770172,
+      "C/assembly/unnamed": 749833,
+      "waproto": 426726,
+      "core": 374700,
+      "wacore": 213738,
+      "whatsapp_esp32": 142152,
+      "wacore_binary": 83294,
+      "alloc": 75238,
+      "std": 74330,
+      "wacore_libsignal": 68834,
+      "curve25519_dalek": 58220,
+      "hashbrown": 46476,
+      "serde_json": 36878,
+      "buffa": 30050,
+      "once_cell": 21874,
+      "esp_idf_svc": 20310,
+      "zlib_rs": 20204,
+      "anyhow": 17962,
+      "nvs": 12738,
+      "rustc_demangle": 10514,
+      "async_channel": 10022,
+      "futures_util": 9536,
+      "aes": 8704,
+      "wacore_appstate": 8394,
+      "wacore_noise": 6920,
+      "async_lock": 6260,
+      "smallvec": 5212,
+      "compact_str": 4972,
+      "bytes": 4934,
+      "fluent_uri": 3704,
+      "sha2": 3644,
+      "sha1": 3496,
+      "futures_channel": 2992,
+      "flate2": 2862,
+      "zmij": 2796,
+      "hmac": 2588,
+      "foldhash": 2492,
+      "base64": 2308,
+      "polyval": 2154,
+      "scopeguard": 2118,
+      "portable_atomic": 1928,
+      "event_listener": 1926,
+      "parse": 1916,
+      "digest": 1814,
+      "rand": 1528,
+      "chacha20": 1436,
+      "chrono": 1420,
+      "itoa": 1356,
+      "cipher": 1266,
+      "concurrent_queue": 866,
+      "async_task": 862,
+      "__cxxabiv1": 676,
+      "ghash": 662,
+      "hkdf": 626,
+      "hybrid_array": 624,
+      "ctr": 608,
+      "smoothutf8": 594,
+      "esp_idf_hal": 584,
+      "cbc": 444,
+      "event_listener_strategy": 404,
+      "embedded_svc": 376,
+      "block_buffer": 352,
+      "serde_core": 328,
+      "heapless": 274,
+      "futures_core": 250,
+      "atomic_waker": 238,
+      "__rustc": 210,
+      "trim_matches": 208,
+      "log": 206,
+      "esp_idf_sys": 204,
+      "edge_executor": 204,
+      "getrandom": 182,
+      "rfind": 164,
+      "x25519_dalek": 150,
+      "split_once": 124,
+      "find": 122,
+      "futures_executor": 116,
+      "futures_task": 108,
+      "sort_unstable_by": 102,
+      "uncased": 94,
+      "to_vec_in": 90,
+      "subtle": 88,
+      "starts_with": 76,
+      "hex": 72,
+      "crypto_common": 70,
+      "rsplit_once": 62,
+      "parking": 52,
+      "serde_big_array": 50,
+      "strip_suffix": 46,
+      "ends_with": 40,
+      "partition_point": 40,
+      "zeroize": 36,
+      "sort_by": 28,
+      "contains": 6,
+      "cmov": 4
+    },
+    "protobuf_name_mentions_bytes": 550614,
+    "protobuf_drop_glue_bytes": 56408,
+    "protobuf_clone_bytes": 41412,
+    "largest_symbols": [
+      {
+        "bytes": 67660,
+        "address": "0x420a472a",
+        "kind": "t",
+        "name": "<waproto::whatsapp::Message as buffa::message::Message>::merge_field::<&[u8]>"
+      },
+      {
+        "bytes": 35346,
+        "address": "0x420e83be",
+        "kind": "t",
+        "name": "<waproto::whatsapp::SyncActionValue as buffa::message::Message>::merge_field::<&[u8]>"
+      },
+      {
+        "bytes": 32654,
+        "address": "0x420d0ff2",
+        "kind": "t",
+        "name": "<waproto::whatsapp::Message as buffa::message::Message>::write_to::<alloc::vec::Vec<u8>>"
+      },
+      {
+        "bytes": 31564,
+        "address": "0x420f2d7a",
+        "kind": "t",
+        "name": "<waproto::whatsapp::Message as buffa::message::Message>::compute_size"
+      },
+      {
+        "bytes": 30720,
+        "address": "0x3c340724",
+        "kind": "r",
+        "name": "curve25519_dalek::backend::serial::u32::constants::ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN"
+      },
+      {
+        "bytes": 26208,
+        "address": "0x42225846",
+        "kind": "t",
+        "name": "<whatsapp_rust::handlers::notification::NotificationHandler>::handle_scoped::{closure#0}"
+      },
+      {
+        "bytes": 26156,
+        "address": "0x421d78ea",
+        "kind": "t",
+        "name": "<whatsapp_rust::client::Client>::handle_decrypted_plaintext_retained::{closure#0}"
+      },
+      {
+        "bytes": 24972,
+        "address": "0x421b898a",
+        "kind": "t",
+        "name": "<core::pin::Pin<alloc::boxed::Box<<whatsapp_rust::client::Client>::send_message_impl_inner::{closure#0}>> as core::future::future::Future>::poll"
+      },
+      {
+        "bytes": 23838,
+        "address": "0x420c3bc2",
+        "kind": "t",
+        "name": "<waproto::whatsapp::BotMetadata as buffa::message::Message>::merge_field::<&[u8]>"
+      },
+      {
+        "bytes": 23284,
+        "address": "0x42135926",
+        "kind": "t",
+        "name": "<whatsapp_esp32::storage::NvsStore>::open"
+      },
+      {
+        "bytes": 20108,
+        "address": "0x4210ad6e",
+        "kind": "t",
+        "name": "<waproto::whatsapp::Message as core::clone::Clone>::clone"
+      },
+      {
+        "bytes": 18516,
+        "address": "0x4225164c",
+        "kind": "t",
+        "name": "<whatsapp_rust::client::Client>::process_classified_message::{closure#0}"
+      },
+      {
+        "bytes": 16834,
+        "address": "0x4224c856",
+        "kind": "t",
+        "name": "whatsapp_rust::handlers::message::process_queued::{closure#0}"
+      },
+      {
+        "bytes": 16672,
+        "address": "0x420157da",
+        "kind": "t",
+        "name": "whatsapp_esp32::main"
+      },
+      {
+        "bytes": 16384,
+        "address": "0x3c3743ec",
+        "kind": "r",
+        "name": "wacore_binary::token::TOK_KEYS"
+      },
+      {
+        "bytes": 15898,
+        "address": "0x42215c34",
+        "kind": "t",
+        "name": "<whatsapp_rust::client::Client>::handle_retry_receipt::{closure#0}"
+      },
+      {
+        "bytes": 15202,
+        "address": "0x4200ae7e",
+        "kind": "t",
+        "name": "whatsapp_esp32::handle_message::{closure#0}"
+      },
+      {
+        "bytes": 14666,
+        "address": "0x421caeae",
+        "kind": "t",
+        "name": "wacore::history_sync::process_history_sync_streaming::<wacore::history_sync::VisitingRecordSink<&mut whatsapp_rust::history_sync::HistorySecretSeedCollector>>"
+      },
+      {
+        "bytes": 14122,
+        "address": "0x4225f154",
+        "kind": "t",
+        "name": "<whatsapp_rust::client::Client>::connect_graph::{closure#0}"
+      },
+      {
+        "bytes": 12474,
+        "address": "0x420e44ec",
+        "kind": "t",
+        "name": "<waproto::whatsapp::WebMessageInfo as buffa::message::Message>::merge_field::<&[u8]>"
+      },
+      {
+        "bytes": 12298,
+        "address": "0x421fd08c",
+        "kind": "t",
+        "name": "<whatsapp_rust::client::Client>::process_sync_task::{closure#0}"
+      },
+      {
+        "bytes": 12202,
+        "address": "0x420bb1ae",
+        "kind": "t",
+        "name": "<waproto::whatsapp::ContextInfo as buffa::message::Message>::merge_field::<&[u8]>"
+      },
+      {
+        "bytes": 12132,
+        "address": "0x4222ebf2",
+        "kind": "t",
+        "name": "<core::pin::Pin<alloc::boxed::Box<whatsapp_rust::handlers::notification::groups::handle_group_notification::{closure#0}>> as core::future::future::Future>::poll"
+      },
+      {
+        "bytes": 11912,
+        "address": "0x4221dece",
+        "kind": "t",
+        "name": "<whatsapp_rust::client::Client>::assemble"
+      },
+      {
+        "bytes": 11846,
+        "address": "0x421a80c4",
+        "kind": "t",
+        "name": "wacore::send::group::prepare_group_stanza::{closure#0}"
+      }
+    ],
+    "image_bytes": 3819600,
+    "image_sha256": "ad3319c979e0dd6c6d04c24c5f8a777302f1b10433e79f972e15dc799e23c831"
+  },
+  "archives": {
+    "(exe)": {
+      ".dram0.bss": 5536,
+      ".dram0.data": 1589,
+      ".flash.rodata": 484845,
+      ".flash.text": 2970602,
+      ".rtc_noinit": 272,
+      "flash_total": 3457308,
+      "ram_st_total": 7397
+    },
+    "libnet80211.a": {
+      ".dram0.bss": 7571,
+      ".dram0.data": 931,
+      ".flash.rodata": 10861,
+      ".flash.rodata_noload": 11608,
+      ".flash.text": 98222,
+      ".iram0.text": 4394,
+      "flash_total": 114408,
+      "ram_st_total": 12896
+    },
+    "libmbedcrypto.a": {
+      ".dram0.bss": 264,
+      ".dram0.data": 92,
+      ".flash.init_array": 4,
+      ".flash.rodata": 7096,
+      ".flash.text": 78770,
+      ".iram0.text": 82,
+      "flash_total": 86044,
+      "ram_st_total": 438
+    },
+    "libpp.a": {
+      ".dram0.bss": 1262,
+      ".dram0.data": 2644,
+      ".flash.rodata": 3792,
+      ".flash.rodata_noload": 257,
+      ".flash.text": 44800,
+      ".iram0.text": 16448,
+      "flash_total": 67684,
+      "ram_st_total": 20354
+    },
+    "liblwip.a": {
+      ".dram0.bss": 2202,
+      ".dram0.data": 8,
+      ".flash.rodata": 254,
+      ".flash.text": 65136,
+      "flash_total": 65398,
+      "ram_st_total": 2210
+    },
+    "libmbedtls.a": {
+      ".dram0.bss": 212,
+      ".flash.rodata": 20144,
+      ".flash.text": 29546,
+      "flash_total": 49690,
+      "ram_st_total": 212
+    },
+    "libwpa_supplicant.a": {
+      ".dram0.bss": 1243,
+      ".dram0.data": 8,
+      ".flash.rodata": 1545,
+      ".flash.text": 45204,
+      "flash_total": 46757,
+      "ram_st_total": 1251
+    },
+    "libphy.a": {
+      ".dram0.bss": 87,
+      ".dram0.data": 1315,
+      ".flash.text": 31174,
+      ".iram0.text": 4464,
+      "flash_total": 36953,
+      "ram_st_total": 5866
+    },
+    "libc_nano.a": {
+      ".dram0.bss": 320,
+      ".dram0.data": 264,
+      ".flash.rodata": 1749,
+      ".flash.text": 25794,
+      "flash_total": 27807,
+      "ram_st_total": 584
+    },
+    "libmdns.a": {
+      ".dram0.bss": 1910,
+      ".dram0.data": 48,
+      ".flash.rodata": 0,
+      ".flash.text": 26884,
+      "flash_total": 26932,
+      "ram_st_total": 1958
+    },
+    "libesp_hw_support.a": {
+      ".dram0.bss": 148,
+      ".dram0.data": 1314,
+      ".flash.init_array": 16,
+      ".flash.rodata": 312,
+      ".flash.text": 15842,
+      ".iram0.text": 5588,
+      "flash_total": 23072,
+      "ram_st_total": 7050
+    },
+    "libnvs_flash.a": {
+      ".dram0.bss": 24,
+      ".flash.rodata": 136,
+      ".flash.text": 15058,
+      "flash_total": 15194,
+      "ram_st_total": 24
+    },
+    "libspi_flash.a": {
+      ".dram0.bss": 10,
+      ".dram0.data": 1647,
+      ".flash.rodata": 816,
+      ".flash.text": 1234,
+      ".iram0.text": 9038,
+      "flash_total": 12735,
+      "ram_st_total": 10695
+    },
+    "libfreertos.a": {
+      ".dram0.bss": 2804,
+      ".dram0.data": 96,
+      ".flash.rodata": 44,
+      ".flash.text": 994,
+      ".iram0.text": 11070,
+      "flash_total": 12204,
+      "ram_st_total": 13970
+    },
+    "libesp_http_server.a": {
+      ".flash.rodata": 429,
+      ".flash.text": 11666,
+      "flash_total": 12095,
+      "ram_st_total": 0
+    },
+    "libhttp_parser.a": {
+      ".flash.rodata": 676,
+      ".flash.text": 10776,
+      "flash_total": 11452,
+      "ram_st_total": 0
+    },
+    "libhal.a": {
+      ".dram0.bss": 4,
+      ".dram0.data": 12,
+      ".flash.rodata": 32,
+      ".flash.text": 4790,
+      ".iram0.text": 6586,
+      "flash_total": 11420,
+      "ram_st_total": 6602
+    },
+    "libesp_system.a": {
+      ".dram0.bss": 139,
+      ".dram0.data": 49,
+      ".flash.init_array": 60,
+      ".flash.rodata": 389,
+      ".flash.text": 9248,
+      ".iram0.text": 1186,
+      "flash_total": 10932,
+      "ram_st_total": 1374
+    },
+    "libheap.a": {
+      ".dram0.bss": 8,
+      ".dram0.data": 5,
+      ".flash.init_array": 40,
+      ".flash.rodata": 335,
+      ".flash.text": 2944,
+      ".iram0.text": 6000,
+      "flash_total": 9324,
+      "ram_st_total": 6013
+    },
+    "libespcoredump.a": {
+      ".dram0.bss": 268,
+      ".dram0.data": 148,
+      ".flash.init_array": 8,
+      ".flash.rodata": 515,
+      ".flash.text": 8262,
+      "flash_total": 8933,
+      "ram_st_total": 416
+    },
+    "libvfs.a": {
+      ".dram0.bss": 52,
+      ".dram0.data": 196,
+      ".flash.init_array": 8,
+      ".flash.rodata": 120,
+      ".flash.text": 8464,
+      "flash_total": 8788,
+      "ram_st_total": 248
+    },
+    "libmbedx509.a": {
+      ".flash.rodata": 45,
+      ".flash.text": 7622,
+      "flash_total": 7667,
+      "ram_st_total": 0
+    },
+    "libesp_driver_uart.a": {
+      ".dram0.bss": 24,
+      ".dram0.data": 184,
+      ".flash.init_array": 8,
+      ".flash.rodata": 414,
+      ".flash.text": 6526,
+      "flash_total": 7132,
+      "ram_st_total": 208
+    },
+    "libesp_netif.a": {
+      ".dram0.bss": 29,
+      ".dram0.data": 4,
+      ".flash.rodata": 80,
+      ".flash.text": 6076,
+      "flash_total": 6160,
+      "ram_st_total": 33
+    },
+    "libesp-tls.a": {
+      ".dram0.bss": 4,
+      ".flash.rodata": 0,
+      ".flash.text": 6112,
+      "flash_total": 6112,
+      "ram_st_total": 4
+    },
+    "libnewlib.a": {
+      ".dram0.bss": 200,
+      ".dram0.data": 184,
+      ".flash.init_array": 16,
+      ".flash.rodata": 0,
+      ".flash.text": 2608,
+      ".iram0.text": 2780,
+      "flash_total": 5588,
+      "ram_st_total": 3164
+    },
+    "libesp_wifi.a": {
+      ".dram0.bss": 43,
+      ".dram0.data": 480,
+      ".flash.init_array": 4,
+      ".flash.rodata": 756,
+      ".flash.text": 3302,
+      ".iram0.text": 168,
+      "flash_total": 4710,
+      "ram_st_total": 691
+    },
+    "libesp_event.a": {
+      ".dram0.bss": 4,
+      ".flash.rodata": 20,
+      ".flash.text": 4044,
+      "flash_total": 4064,
+      "ram_st_total": 4
+    },
+    "libpthread.a": {
+      ".dram0.bss": 16,
+      ".flash.rodata": 40,
+      ".flash.text": 3566,
+      "flash_total": 3606,
+      "ram_st_total": 16
+    },
+    "libesp_mm.a": {
+      ".dram0.bss": 48,
+      ".dram0.data": 28,
+      ".flash.rodata": 73,
+      ".flash.text": 2298,
+      ".iram0.text": 662,
+      "flash_total": 3061,
+      "ram_st_total": 738
+    },
+    "libesp_phy.a": {
+      ".dram0.bss": 43,
+      ".dram0.data": 9,
+      ".flash.rodata": 218,
+      ".flash.text": 2574,
+      ".iram0.text": 204,
+      "flash_total": 3005,
+      "ram_st_total": 256
+    },
+    "libesp_timer.a": {
+      ".dram0.bss": 36,
+      ".dram0.data": 16,
+      ".flash.init_array": 16,
+      ".flash.rodata": 0,
+      ".flash.text": 1558,
+      ".iram0.text": 1044,
+      "flash_total": 2634,
+      "ram_st_total": 1096
+    },
+    "libesp_driver_usb_serial_jtag.a": {
+      ".dram0.bss": 17,
+      ".dram0.data": 48,
+      ".flash.init_array": 16,
+      ".flash.rodata": 108,
+      ".flash.text": 2018,
+      ".iram0.text": 94,
+      "flash_total": 2284,
+      "ram_st_total": 159
+    },
+    "libstdc++.a": {
+      ".dram0.bss": 25,
+      ".dram0.data": 8,
+      ".flash.init_array": 12,
+      ".flash.rodata": 347,
+      ".flash.text": 1738,
+      "flash_total": 2105,
+      "ram_st_total": 33
+    },
+    "libesp_partition.a": {
+      ".dram0.bss": 8,
+      ".flash.rodata": 0,
+      ".flash.text": 1728,
+      "flash_total": 1728,
+      "ram_st_total": 8
+    },
+    "libefuse.a": {
+      ".dram0.bss": 4,
+      ".dram0.data": 76,
+      ".flash.init_array": 24,
+      ".flash.rodata": 136,
+      ".flash.text": 1470,
+      "flash_total": 1706,
+      "ram_st_total": 80
+    },
+    "liblog.a": {
+      ".dram0.bss": 276,
+      ".dram0.data": 8,
+      ".flash.rodata": 0,
+      ".flash.text": 1114,
+      ".iram0.text": 414,
+      "flash_total": 1536,
+      "ram_st_total": 698
+    },
+    "libesp_driver_gpio.a": {
+      ".flash.rodata": 177,
+      ".flash.text": 1218,
+      "flash_total": 1395,
+      "ram_st_total": 0
+    },
+    "libesp_security.a": {
+      ".dram0.bss": 16,
+      ".flash.init_array": 8,
+      ".flash.text": 1000,
+      "flash_total": 1008,
+      "ram_st_total": 16
+    },
+    "libesp_ringbuf.a": {
+      ".iram0.text": 950,
+      "flash_total": 950,
+      "ram_st_total": 950
+    },
+    "libriscv.a": {
+      ".dram0.bss": 256,
+      ".flash.text": 134,
+      ".iram0.text": 816,
+      "flash_total": 950,
+      "ram_st_total": 1072
+    },
+    "libesp_app_format.a": {
+      ".dram0.bss": 10,
+      ".flash.appdesc": 256,
+      ".flash.init_array": 8,
+      ".flash.rodata": 0,
+      ".flash.text": 498,
+      "flash_total": 762,
+      "ram_st_total": 10
+    },
+    "libbootloader_support.a": {
+      ".flash.text": 36,
+      ".iram0.text": 658,
+      "flash_total": 694,
+      "ram_st_total": 658
+    },
+    "libesp_vfs_console.a": {
+      ".dram0.bss": 16,
+      ".flash.init_array": 8,
+      ".flash.rodata": 172,
+      ".flash.text": 462,
+      "flash_total": 642,
+      "ram_st_total": 16
+    },
+    "libsoc.a": {
+      ".flash.rodata": 464,
+      "flash_total": 464,
+      "ram_st_total": 0
+    },
+    "libcore.a": {
+      ".dram0.bss": 9,
+      ".flash.rodata": 43,
+      ".flash.text": 314,
+      "flash_total": 357,
+      "ram_st_total": 9
+    },
+    "libesp_coex.a": {
+      ".flash.text": 114,
+      ".iram0.text": 60,
+      "flash_total": 174,
+      "ram_st_total": 60
+    },
+    "libapp_update.a": {
+      ".dram0.bss": 4,
+      ".flash.text": 138,
+      "flash_total": 138,
+      "ram_st_total": 4
+    },
+    "libcxx.a": {
+      ".flash.text": 100,
+      "flash_total": 100,
+      "ram_st_total": 0
+    },
+    "libmesh.a": {
+      ".dram0.bss": 4,
+      ".flash.text": 60,
+      "flash_total": 60,
+      "ram_st_total": 4
+    },
+    "libesp_common.a": {
+      ".flash.rodata": 14,
+      ".flash.text": 10,
+      "flash_total": 24,
+      "ram_st_total": 0
+    },
+    "libesp_eth.a": {
+      ".flash.rodata": 4,
+      "flash_total": 4,
+      "ram_st_total": 0
+    },
+    "libespnow.a": {
+      ".dram0.data": 3,
+      "flash_total": 3,
+      "ram_st_total": 3
+    },
+    "libnvs_sec_provider.a": {
+      ".flash.text": 2,
+      "flash_total": 2,
+      "ram_st_total": 0
+    }
+  },
+  "experiment": "Combined: std/core/alloc optimize_for_size; C3 sha2_backend_soft=compact; C3 target-feature=+relax,+save-restore. ESP-IDF C/C++ save/restore is not yet enabled in this measurement.",
+  "baseline_image_bytes": 4188368,
+  "image_bytes_saved": 368768,
+  "runtime_qualification": "Pending. This measurement establishes size only."
+}

@@ -31,8 +31,9 @@ build-std = ["std", "panic_abort"]
 # captures the message and location through the hook in src/crash.rs and the
 # ESP-IDF core dump instead. See docs/app-image-size.md.
 #
-# `compiler-builtins-mem` is carried over from the default set; it is the one
-# entry there this build actually wants.
+# `compiler-builtins-mem` is carried over from the default set.
+# `optimize_for_size` selects smaller std/core/alloc formatting and sorting
+# implementations; opt-level="z" alone does not select those source branches.
 build-std-features = ["compiler-builtins-mem", "optimize_for_size"]
 
 [env]

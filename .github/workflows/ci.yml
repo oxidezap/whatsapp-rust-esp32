@@ -34,7 +34,7 @@ env:
 
 jobs:
   flash-layout:
-    name: Physical flash layout regression tests
+    name: Flash layout and compact crypto checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,6 +42,14 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: python3 scripts/test-flash-layout.py
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-06-16
+      - name: Compact SHA-256 and SHA-512 known vectors
+        working-directory: ${{ runner.temp }}
+        env:
+          RUSTFLAGS: '--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"'
+        run: cargo test --locked --release --manifest-path "$GITHUB_WORKSPACE/tests/compact-sha/Cargo.toml"
 
   dashboard-json:
     name: Dashboard JSON regression tests

@@ -1,8 +1,9 @@
 # Fitting the complete C3 firmware into 4 MiB flash
 
 This is an active investigation. The measured production baseline is **4,188,368
-bytes**. The branch does not yet claim support for a physical 4 MiB C3. Compact
-builds and QEMU qualification are still in progress.
+bytes**. The first combined compact build measures **3,819,600 bytes**, saving
+**368,768 bytes / 8.8%**. Runtime qualification is still in progress; the branch
+does not yet claim support for a physical 4 MiB C3.
 
 ## Physical budget
 
@@ -65,6 +66,28 @@ Across named symbols mentioning `waproto`, destructors account for 73,240 bytes
 and clones for 46,162 bytes. Two distinct `Message` destructor implementations
 remain, at 6,412 and 6,218 bytes. These figures overlap the owner table.
 
+## First compact result
+
+| Measurement | App bytes | Change |
+| --- | ---: | ---: |
+| Production baseline | 4,188,368 | |
+| Compact std + SHA-2 + RISC-V relaxation/save-restore | 3,819,600 | -368,768 / -8.8% |
+
+The combined experiment keeps the complete schema, production verification,
+admin, panic hook and core dump. These are combined measurements; individual
+flag savings have not been isolated. See the [compact result and hashes](measurements/c3-flash-compact-rust.json).
+
+Named SHA-2 symbols shrink from 64,736 to 3,644 bytes. `core` drops from 471,832
+to 374,700, `waproto` from 480,488 to 426,726, and `whatsapp_rust` from 831,360
+to 770,172. These attribution deltas describe linked symbols, not independent
+feature ablations.
+
+The 3,819,600-byte image fits an app slot of `0x3b0000`, leaving 192 KiB for the
+store and 64 KiB for the core dump, with 47,024 bytes of app margin. A 256 KiB
+store requires the app to fit `0x3a0000`, another 18,512 bytes smaller. ESP-IDF's
+documented `CONFIG_COMPILER_SAVE_RESTORE_LIBCALLS` option is now being measured
+for the C/C++ side before choosing the final layout.
+
 ## Changes being measured
 
 The current compiler configuration is experimental until both the production
@@ -121,6 +144,9 @@ References checked on 2026-11-05:
 
 ```sh
 python3 scripts/test-flash-layout.py
+# Run from outside the firmware tree to avoid its target/build-std defaults:
+# RUSTFLAGS='--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"' \
+#   cargo test --locked --release --manifest-path /path/to/repo/tests/compact-sha/Cargo.toml
 python3 scripts/check-flash-layout.py app.bin partitions.csv 16MB
 scripts/profile-app.py path/to/whatsapp-esp32 \
   --nm path/to/riscv32-esp-elf-nm --image app.bin > symbols.json
@@ -133,7 +159,8 @@ filesystem size or stripping debug symbols is not a flashed-image measurement.
 - [x] Measure the current production baseline and retain provenance.
 - [x] Add the physical-flash regression gate and its four host tests.
 - [x] Verify compact SHA-256/SHA-512 against known vectors on the host.
-- [ ] Finish the compact production build and record the actual image delta.
+- [x] Finish the first compact production build and record the actual image delta.
+- [ ] Measure ESP-IDF C/C++ save/restore and select the final configuration.
 - [ ] Choose a 4 MiB layout with explicit app margin and storage capacity.
 - [ ] Boot an actual 4 MiB QEMU image, pair, reboot with the store intact, and
   exchange messages, reactions, edits and quoted replies between two boards.

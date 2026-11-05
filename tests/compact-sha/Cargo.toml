@@ -1,0 +1,8 @@
+[package]
+name = "sha-compact-check"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+sha2 = { version = "=0.11.0", default-features = false }
+
+[workspace]
