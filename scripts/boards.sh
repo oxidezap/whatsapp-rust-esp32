@@ -35,7 +35,9 @@ board_select() {
             # No -m: the C3 has no PSRAM, and its machine has no such knob. The
             # ~400 KB of on-chip SRAM is the whole memory system.
             BOARD_QEMU_BIN="${QEMU_RISCV32:-qemu-system-riscv32}"
-            BOARD_QEMU_MACHINE_ARGS=(-M esp32c3)
+            # Drive peripheral timers from guest instructions so the interrupt
+            # watchdog measures emulated C3 execution rather than host delays.
+            BOARD_QEMU_MACHINE_ARGS=(-M esp32c3 -icount shift=3,align=off,sleep=on)
             ;;
         *)
             echo "unknown board '$BOARD_NAME' (${BOARD_NAMES[*]})" >&2

@@ -337,7 +337,9 @@ server are remapped there too, and the dashboard forwards to
 `http://localhost:8081` (`b` gets 8082). `sdkconfig.qemu` enables the OpenCores
 driver, switches the PSRAM probe to quad mode, and moves AES and SHA to
 software because the emulated AES block never finishes a DMA transfer. Heap
-routing and stacks stay as on hardware.
+routing and stacks stay as on hardware. The C3 uses QEMU instruction counting
+for its guest clock so host scheduling delays do not trip the guest interrupt
+watchdog; the test script keeps its wall-clock deadlines.
 
 `QEMU_GDB=1 scripts/qemu.sh run` halts the CPUs with a gdb stub on port 1234.
 Attach `xtensa-esp32s3-elf-gdb` for a backtrace of every FreeRTOS task, which
@@ -507,8 +509,9 @@ xtensa-esp32s3-elf-addr2line -fCe target/xtensa-esp32s3-espidf/debug/whatsapp-es
   are set, then rebuild and reflash.
 - `AtomicU64` link errors from a dependency: Xtensa has no 64-bit atomics.
   Dependencies must use `portable_atomic`; this project pins it with `fallback`.
-- ESP-IDF build fails on new host toolchains: v6.1 wants cmake < 4 and
-  Python <= 3.12 (or 3.14 under the venv esp-idf-sys provisions).
+- ESP-IDF build fails on new host toolchains: use the tools selected by
+  ESP-IDF v6.1 in `.embuild/espressif` (including CMake 4.0.3). Local builds
+  were checked with Python 3.12 and the virtual environment from `esp-idf-sys`.
 - `Failed to open WhatsApp NVS ... rebooting to retry` in a loop: the
   `wa_store` partition is unreadable, usually a partition table from before it
   existed. The firmware never erases it on its own, since that would silently
