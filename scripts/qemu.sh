@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build, image, and run the firmware inside Espressif's QEMU.
 #
-#   scripts/qemu.sh build          # cargo build --release --features qemu, with sdkconfig.qemu layered in
+#   scripts/qemu.sh build [CARGO_ARGS...] # cargo build --release --features qemu, with sdkconfig.qemu layered in
 #   scripts/qemu.sh image [NAME]   # board-sized flash image (4 MiB C3, 16 MiB S3)
 #   scripts/qemu.sh run [NAME]     # boot that image; serial on stdout, Ctrl-A X to quit
 #   scripts/qemu.sh test           # pair a, reboot it with NVS intact, message b, gate stack floors
+#   scripts/qemu.sh capacity [N]   # accumulate N peers, reboot, restore the first session
 #   scripts/qemu.sh all            # build + image + test (what CI runs)
 #
 # BOARD picks the emulated chip: esp32s3 (default) or esp32c3. Espressif's QEMU
@@ -99,7 +100,7 @@ cmd_build() {
     ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
     CARGO_WORKSPACE_DIR="$PWD" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
+        cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu "$@"
     test -f "$ELF"
 }
 
@@ -538,11 +539,73 @@ cmd_test() {
     log "PASS"
 }
 
+# Keep only two emulators live while the main device accumulates distinct peers.
+cmd_capacity() {
+    trap stop_all EXIT
+    local count="${1:-4}"
+    [[ "$count" =~ ^[0-9]+$ ]] && (( count >= 2 && count <= 16 )) \
+        || { log 'capacity peer count must be between 2 and 16'; return 2; }
+    local pa pb pid_a pid_b device target sent sent_id body i serial
+    local -a peers=()
+    pa="$(board_port a)"; pb="$(board_port b)"
+    cmd_image a
+    serial="$OUT_DIR/qemu-capacity-a-boot1.log"
+    boot a "$pa" "$serial"; pid_a=$BOOT_PID
+    wait_markers "$pid_a" "$serial" "${BOOT_MARKERS[@]}" "QR CODE" "Connected to WhatsApp!"
+    for ((i=1; i<=count; i++)); do
+        cmd_image b
+        serial="$OUT_DIR/qemu-capacity-peer-$i.log"
+        boot b "$pb" "$serial"; pid_b=$BOOT_PID
+        wait_markers "$pid_b" "$serial" "${BOOT_MARKERS[@]}" "QR CODE" "Connected to WhatsApp!"
+        device="$(admin_get "$pb" /device)"
+        target="$(account_jid "$(json_field "$device" "d['pn'] or ''")")"
+        [[ -n "$target" ]] || { log 'peer connected without a JID'; return 1; }
+        local known
+        for known in "${peers[@]}"; do
+            [[ "$known" != "$target" ]] || { log 'mock returned a duplicate peer identity'; return 1; }
+        done
+        peers+=("$target")
+        body="$(python3 -c 'import json,sys; print(json.dumps({"to":sys.argv[1],"text":"capacity-peer-"+sys.argv[2]}))' "$target" "$i")"
+        sent="$(admin_curl --max-time "$MESSAGE_TIMEOUT" -H 'Content-Type: application/json' -d "$body" "http://127.0.0.1:$pa/send")"
+        sent_id="$(json_field "$sent" "d.get('message_id', '')")"
+        [[ -n "$sent_id" ]] || { log "capacity send failed: $sent"; return 1; }
+        wait_for_message "$pb" "'capacity-peer-$i'" "$sent_id"
+        metrics_gate "$pa" "capacity-a-$i"
+        metrics_gate "$pb" "capacity-peer-$i"
+        stop "$pid_b"
+        cp "$(flash_image b)" "$OUT_DIR/capacity-peer-$i.bin"
+        log "capacity: delivered to $i distinct peers"
+    done
+    stop "$pid_a"
+    serial="$OUT_DIR/qemu-capacity-a-restored.log"
+    boot a "$pa" "$serial"; pid_a=$BOOT_PID
+    wait_markers "$pid_a" "$serial" "${BOOT_MARKERS[@]}" "WhatsApp NVS loaded: device=true" "Connected to WhatsApp!"
+    if grep -q -F 'QR CODE' "$serial"; then log 'main device lost its stored identity'; return 1; fi
+    cp "$OUT_DIR/capacity-peer-1.bin" "$(flash_image b)"
+    serial="$OUT_DIR/qemu-capacity-peer-1-restored.log"
+    boot b "$pb" "$serial"; pid_b=$BOOT_PID
+    wait_markers "$pid_b" "$serial" "${BOOT_MARKERS[@]}" "WhatsApp NVS loaded: device=true" "Connected to WhatsApp!"
+    if grep -q -F 'QR CODE' "$serial"; then log 'first peer lost its stored identity'; return 1; fi
+    body="$(python3 -c 'import json,sys; print(json.dumps({"to":sys.argv[1],"text":"\U0001f980ping"}))' "${peers[0]}")"
+    sent="$(admin_curl --max-time "$MESSAGE_TIMEOUT" -H 'Content-Type: application/json' -d "$body" "http://127.0.0.1:$pa/send")"
+    sent_id="$(json_field "$sent" "d.get('message_id', '')")"
+    [[ -n "$sent_id" ]] || { log "restored capacity send failed: $sent"; return 1; }
+    wait_for_message "$pb" "'\U0001f980ping'" "$sent_id"
+    wait_markers "$pid_b" "$serial" 'Reaction sent' 'Send took' 'Edit sent for message'
+    wait_for_message "$pa" "'Pong!'"
+    wait_markers "$pid_a" "$OUT_DIR/qemu-capacity-a-restored.log" "Quoted message reference: $sent_id"
+    metrics_gate "$pa" capacity-a-restored
+    metrics_gate "$pb" capacity-peer-restored
+    check_crashes
+    log "PASS: $count distinct peers and restored first-peer session"
+}
+
 case "${1:-}" in
-    build) cmd_build ;;
+    build) shift; cmd_build "$@" ;;
     image) cmd_image "${2:-a}" ;;
     run) cmd_run "${2:-a}" ;;
     test) cmd_test ;;
+    capacity) cmd_capacity "${2:-4}" ;;
     all) cmd_build; cmd_test ;;
     *) sed -n '2,25p' "$0"; exit 2 ;;
 esac

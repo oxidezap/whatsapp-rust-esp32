@@ -1,5 +1,9 @@
 # Where the app image goes
 
+This report describes an earlier build. For the current baseline, 4 MiB C3
+partition table and measured runtime qualification, see
+[the C3 flash report](c3-4mb-flash.md).
+
 The firmware is large enough that flash size, not RAM, is what rules boards out:
 `partitions.csv` gives the app a 0x4C0000 (4,980,736 byte) factory partition, and
 with that layout no 4 MB board can hold it. This is a measurement of what is

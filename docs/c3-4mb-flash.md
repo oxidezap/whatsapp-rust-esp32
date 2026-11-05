@@ -1,9 +1,20 @@
 # Fitting the complete C3 firmware into 4 MiB flash
 
-This is an active investigation. The measured production baseline is **4,188,368
-bytes**. The first combined compact build measures **3,819,600 bytes**, saving
-**368,768 bytes / 8.8%**. Runtime qualification is still in progress; the branch
-does not yet claim support for a physical 4 MiB C3.
+The qualified precomputed-curve production image is **3,792,880 bytes**, down
+**395,488 bytes / 9.4%** from the 4,188,368-byte baseline. It fits the C3's
+`0x3a0000` app slot with **8,208 bytes** left. The complete layout ends at
+4 MiB and retains a **256 KiB WhatsApp store** and **64 KiB core dump**.
+The two-device QEMU pairing, messaging and restored-session suite passed.
+Physical C3 and production gateway qualification remain pending.
+
+A companion [upstream draft](https://github.com/oxidezap/whatsapp-rust/pull/1861)
+makes Dalek's basepoint table optional. The experimental compact-curve image
+measures **3,753,776 bytes**, saving **434,592 bytes / 10.4%** overall and leaving
+47,312 bytes of app margin. Two ordinary QEMU runs hit an interrupt watchdog
+during initial pairing. All 252 Signal and 50 Noise tests pass in each backend configuration. Later
+QEMU runs passed both the full two-device suite and a four-distinct-peer
+workload, including the oldest session after reboot. The earlier watchdog
+failures remain unexplained, so compact crypto is an explicit opt-in. The watchdog guards remain enabled.
 
 ## Physical budget
 
@@ -15,8 +26,10 @@ does not make the board usable.
 The existing table ends at `0x5e0000`, beyond a 4 MiB device, even if the app
 itself were smaller. This branch adds a full-layout check to CI and QEMU image
 generation, including partition alignment, overlap, physical flash bounds and
-application fit. The existing board layouts remain selected until a smaller
-image and a populated-store workload have been qualified.
+application fit. The C3 selects `partitions.esp32c3.csv`; S3 and C5 retain their
+existing table.
+The smaller store is an explicit capacity tradeoff, not a 1 MiB store compressed
+into 256 KiB. There is no OTA slot.
 
 ## Measured production baseline
 
@@ -82,16 +95,10 @@ to 374,700, `waproto` from 480,488 to 426,726, and `whatsapp_rust` from 831,360
 to 770,172. These attribution deltas describe linked symbols, not independent
 feature ablations.
 
-The 3,819,600-byte image fits an app slot of `0x3b0000`, leaving 192 KiB for the
-store and 64 KiB for the core dump, with 47,024 bytes of app margin. A 256 KiB
-store requires the app to fit `0x3a0000`, another 18,512 bytes smaller. ESP-IDF's
-documented `CONFIG_COMPILER_SAVE_RESTORE_LIBCALLS` option is now being measured
-for the C/C++ side before choosing the final layout.
-
 ## Changes being measured
 
-The current compiler configuration is experimental until both the production
-image and the QEMU workload complete:
+The selected compiler configuration passed the production size gate and the
+full two-device QEMU workload with the precomputed curve backend:
 
 - Build `std`, `core` and `alloc` with `optimize_for_size`. `opt-level = "z"`
   alone does not select their smaller formatting and sorting implementations.
@@ -114,18 +121,20 @@ removal, the common CA bundle, fat LTO, abort-on-panic, pinned upstream codecs
 or generated pinned clones. The panic hook and flash core dump stay enabled.
 The older [image-size report](app-image-size.md) describes a historical build.
 
-## Second-stage configuration under qualification
+## Selected configuration and rejected trials
 
 The C/C++ helper build completed at **3,801,616 bytes**, another **17,984 bytes**
 smaller. Its ELF/map match and archive accounting are recorded in
 [the C/C++ measurement](measurements/c3-flash-compact-c.json).
 
 An additional IR/machine outlining trial produced 3,795,472 bytes, only 6 KiB
-smaller. Those extra compiler switches are not selected. The next target is
-`-Zshare-generics=y`, already used by the upstream workspace's host build but
-not inherited by this ESP32 consumer. Its C3 saving is being measured.
+smaller. Those extra compiler switches are not selected. Shared generics and
+Cargo path trimming together bring the selected image to **3,792,880 bytes**,
+another **8,736 bytes** smaller than the C/C++ helper build. The large generic
+sharing savings reported for upstream host builds did not transfer to this C3
+build. See the [validated ELF/map measurement](measurements/c3-flash-shared-trimmed.json).
 
-The branch now qualifies a 4 MiB C3 layout with a 256 KiB store and the existing
+The branch selects a 4 MiB C3 layout with a 256 KiB store and the existing
 64 KiB core dump. The app slot is `0x3a0000`. Generated board and QEMU SDK configs
 both select 4 MiB flash and a 44 KiB main stack. The latter addresses a real CI
 failure: samples [2](https://github.com/oxidezap/whatsapp-rust-esp32/actions/runs/42115681394/job/127581804693)
@@ -137,7 +146,7 @@ Release builds also use Cargo path trimming. The C/C++ measurement still has
 369 unique absolute Rust source paths occupying 35,516 bytes. Trimming removes
 build-machine prefixes while retaining package-relative file/line locations;
 the standalone host test verifies that those coordinates remain available.
-The complete firmware saving and runtime stack/heap margins are pending.
+The host location test passes; the measured image delta above includes trimming.
 
 The C3 CI build now measures the production firmware without `mock-server`.
 The separate QEMU build exercises the mock path. Both run the physical-flash
@@ -152,10 +161,46 @@ builder now uses the pinned upstream `WA_WEB_VERSION` through the supported
 `with_version` override. This is compiled only with `mock-server`; production
 version discovery is unchanged.
 
-The earlier interrupted C/C++ build has now been measured. The new shared-generic,
-trimmed-path 4 MiB board and QEMU builds are running. Physical 4 MiB support is
-not yet qualified; passing app fit and the complete restored-session workload
-remain required.
+The precomputed-backend suite used actual 4,194,304-byte flash images. It paired
+two independent devices, exchanged messages, reactions, edits and quoted
+replies, rebooted both with their stores intact, then repeated the exchange
+without a new QR code. Stack minima were **4,864 bytes main**, **736 bytes
+blocking**, at least **1,440 bytes NVS** and **2,576 bytes transport**. The guards
+remain 2,048 bytes main and 512 bytes for the other threads. Final minimum
+internal free heap was 35,892 bytes for A and 37,536 bytes for B; final largest
+free blocks were 29,696 and 31,744 bytes. No panic or core dump was reported.
+
+The final 256 KiB store images had 33 and 37 completely empty pages out of 64.
+Raw NVS bitmaps contained 963 and 1,005 written entry slots, plus garbage and
+unused slots. Entry slots include blob chunks and do not equal contacts or
+messages. IDF's NVS parser found no corrupt/invalid entries. This proves the
+bounded two-device workload only, not arbitrary group or contact capacity.
+
+The compact backend also completed `scripts/qemu.sh capacity 4`. A paired main
+device sent encrypted messages to four fresh peer identities, then both the main
+device and the first peer rebooted. They restored their old identities without
+a QR and exchanged a new message, reaction, edit and quoted reply using the
+oldest Signal session. All stack/crash gates passed. Final main-device minimum
+internal free heap was 52,908 bytes; consult the [raw metrics](measurements/c3-4mb-runtime.json)
+for the exact per-phase values. This is a four-peer persistence check, not a
+maximum-capacity or endurance claim.
+
+The default features retain `precomputed-crypto`. The smaller candidate can be
+built explicitly with:
+
+```sh
+scripts/build.sh --board esp32c3 --release --no-default-features --features admin
+BOARD=esp32c3 scripts/qemu.sh build --no-default-features --features admin
+BOARD=esp32c3 scripts/qemu.sh test
+BOARD=esp32c3 scripts/qemu.sh capacity 4
+```
+
+CI builds both production profiles, boots the experimental compact backend
+separately, and runs the four-peer workload on the default C3 profile. The
+precomputed configuration at `0e26579` passed all board/QEMU builds and three
+independent C3 runtime samples in [run 42126703762](https://github.com/oxidezap/whatsapp-rust-esp32/actions/runs/42126703762).
+The dashboard job timed out during its cold browser/dependency setup; the
+job budget is raised from 10 to 20 minutes. Dashboard JSON checks passed.
 
 The profiler's optional map check has been exercised against the captured
 baseline ELF/map and a deliberately mismatched compact-ELF/baseline-map pair.
@@ -170,7 +215,7 @@ retained.
 | SHA-2 compact backend | First measure the existing implementation switch. It avoids a crypto dependency migration. Check image size, stack floor and messaging latency. |
 | `micropb` 0.7.0 | Worth a prototype with the full schema. It supports alloc or bounded containers, callbacks, cached nested lengths and separate encode/decode runtime features. It does not support closed enums, which prevents treating it as a drop-in replacement. No flash saving has been measured. |
 | `prost` | A comparison candidate using the same schema and target. A migration must account for `MessageField`, views, size caching, pinned entry points, enum behavior and persistence. Its use of generic buffer traits does not by itself eliminate duplicate instantiations. No flash saving has been measured. |
-| Dalek without precomputed tables | The linked table is 30,720 bytes, not the README's general ~400 KB estimate. Both the direct Dalek edge and `x25519-dalek` enable defaults upstream. Cargo features are additive, so a root dependency cannot switch them off. An upstream feature split must preserve alloc/zeroize and qualify slower basepoint multiplication, pairing, prekey generation and watchdog behavior. |
+| Dalek without precomputed tables | Implemented in upstream draft #1861. The table disappears from the target ELF. Combined target delta is 39,104 bytes; fallback code and a larger worker stack affect that comparison. Both native configurations pass 302 tests, plus focused Clippy. Complete compact QEMU two-device and four-peer persistence runs pass, but two initial watchdog failures remain open. Keep this backend opt-in. |
 | Replace mbedTLS with rustls | Not justified by this profile. A second TLS stack may duplicate platform crypto and certificate parsing. Measure feature trimming first and preserve server authentication. |
 
 The largest structural protobuf opportunities are shared field codec helpers,
@@ -196,7 +241,7 @@ python3 scripts/test-flash-layout.py
 # Run from outside the firmware tree to avoid its target/build-std defaults:
 # RUSTFLAGS='--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"' \
 #   cargo test --locked --release --manifest-path /path/to/repo/tests/compact-sha/Cargo.toml
-python3 scripts/check-flash-layout.py app.bin partitions.csv 16MB
+python3 scripts/check-flash-layout.py app.bin partitions.esp32c3.csv 4MB
 scripts/profile-app.py path/to/whatsapp-esp32 \
   --nm path/to/riscv32-esp-elf-nm --image app.bin --map app.map > symbols.json
 ```
@@ -208,15 +253,16 @@ ELF and image hashes. Do not sum discarded map input sections. ELF
 filesystem size or stripping debug symbols is not a flashed-image measurement.
 
 - [x] Measure the current production baseline and retain provenance.
-- [x] Add the physical-flash regression gate and its four host tests.
+- [x] Add the physical-flash regression gate and its five host tests.
 - [x] Verify compact SHA-256/SHA-512 against known vectors on the host.
 - [x] Finish the first compact production build and record the actual image delta.
 - [x] Measure ESP-IDF C/C++ save/restore.
-- [ ] Finish shared-generic/path-trim measurements and select the final configuration.
-- [ ] Choose a 4 MiB layout with explicit app margin and storage capacity.
-- [ ] Boot an actual 4 MiB QEMU image, pair, reboot with the store intact, and
+- [x] Finish shared-generic/path-trim measurements.
+- [x] Choose a 4 MiB layout with explicit app margin and storage capacity.
+- [x] Boot an actual 4 MiB QEMU image, pair, reboot with the store intact, and
   exchange messages, reactions, edits and quoted replies between two boards.
-- [ ] Check stack/heap floors and restored-session behavior.
+- [x] Check stack/heap floors and restored-session behavior.
+- [ ] Resolve compact-backend interrupt watchdog failures before promoting it.
 - [ ] Smoke-test production TLS and the selected layout on a physical C3.
 
 The store's 2048-entry constants are logical limits, not measured NVS capacity.

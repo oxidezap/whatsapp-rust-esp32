@@ -11,7 +11,10 @@ I (954) heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
 I (954) heap_init: At 3FCDC710 len 00002950 (10 KiB): Retention RAM
 ```
 
-This is what the port had to change, and what it did not.
+The current branch selects a 4 MiB flash layout with a 256 KiB store and
+64 KiB core dump. See the [flash qualification report](c3-4mb-flash.md) for
+current production sizes, QEMU results and remaining hardware checks.
+The older memory samples below describe the original port.
 
 ## The one switch everything hangs off
 
@@ -35,7 +38,7 @@ C3 differs from the others in the deepest possible way.
 
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
-| `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 36 KB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864`; measured peak 30.4 KB. `default_thread_config`'s 32 KB no-PSRAM arm is what library consumers get. |
+| `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 44 KiB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=45056`; raised after a CI message workload left only 768 B on 40 KiB. Library consumers get a 48 KiB default thread stack. |
 | `wa-blocking` worker stack | 32 KB | 14 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,404 B. |
 | `ws-transport` stack | 16 KB | 6 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
 | `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |

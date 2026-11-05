@@ -72,7 +72,8 @@ jobs:
   dashboard:
     name: Dashboard QR browser tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # A cold Chromium dependency install consumed over nine minutes in run 42126703762.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,6 +122,13 @@ jobs:
             # ESP-IDF allocator, both selected by CONFIG_SPIRAM being absent.
             board: esp32c3
             build: scripts/build.sh --board esp32c3 --release
+          - flavor: esp32c3-compact-crypto
+            board: esp32c3
+            build: scripts/build.sh --board esp32c3 --release --no-default-features --features admin
+          - flavor: qemu-esp32c3-compact-crypto
+            board: esp32c3
+            build: scripts/qemu.sh build --no-default-features --features admin
+            qemu: true
           - flavor: qemu-esp32s3
             board: esp32s3
             build: scripts/qemu.sh build
@@ -289,6 +297,11 @@ jobs:
             label: esp32c3, sample 3
             arch: riscv32
             sample: 3
+          - board: esp32c3
+            label: esp32c3, experimental compact crypto
+            arch: riscv32
+            sample: compact-crypto
+            artifact: qemu-esp32c3-compact-crypto
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
@@ -322,7 +335,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: firmware-qemu-${{ matrix.board }}
+          name: firmware-${{ matrix.artifact || format('qemu-{0}', matrix.board) }}
           path: ${{ env.OUT }}
 
       - name: Espressif QEMU, esptool and the NVS partition generator
@@ -356,6 +369,12 @@ jobs:
         env:
           BOARD: ${{ matrix.board }}
         run: scripts/qemu.sh test
+
+      - name: Accumulate four peers and restore the oldest session
+        if: matrix.board == 'esp32c3' && matrix.sample == 1
+        env:
+          BOARD: ${{ matrix.board }}
+        run: scripts/qemu.sh capacity 4
 
       - name: Upload serial logs
         if: always()
