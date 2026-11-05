@@ -183,8 +183,10 @@ flags on them that `whatsapp-rust` does not enable. Needs Rust 1.95 or newer.
 
 ## Prerequisites
 
-- `cargo install espup --version 0.19.0 --locked && espup install --toolchain-version 1.99.0.0` (`rust-toolchain.toml` selects the `esp` channel).
-  The Xtensa 1.99.0.0 release is a prerelease, as was the previous 1.98.0.0 pin.
+- `cargo install espup --version 0.19.0 --locked && espup install --toolchain-version 1.98.1.0` (`rust-toolchain.toml` selects the `esp` channel).
+  The Xtensa 1.98.1.0 release is a prerelease, as was the previous 1.98.0.0 pin.
+  The newer 1.99.0.0 release fails while building `std` for ESP-IDF because
+  `libc::AT_FDCWD` is missing, before compiling any firmware code.
 - `cargo install ldproxy --version 0.3.5 --locked` and
   `cargo install espflash --version 4.7.0 --locked`.
 - ESP-IDF v6.1, fetched and built by `esp-idf-sys` on the first build into

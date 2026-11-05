@@ -82,13 +82,14 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # (LoadProhibited, etc.) to the coredump partition; read at boot via
 # esp_core_dump_get_summary. NOT capturing DRAM keeps the dump small (<64 KB).
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
-CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
-CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+# ESP-IDF 6 selects ELF and SHA-256; the old CRC32 choice was removed.
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=32
 
 # Binary size reduction
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-CONFIG_NEWLIB_NANO_FORMAT=y
+# Keep the newlib ABI expected by Rust libc instead of IDF 6's picolibc default.
+CONFIG_LIBC_NEWLIB=y
+CONFIG_LIBC_NEWLIB_NANO_FORMAT=y
 CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
