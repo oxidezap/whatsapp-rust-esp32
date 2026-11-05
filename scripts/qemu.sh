@@ -17,7 +17,7 @@
 # Requirements beyond the normal build (see README "Test without hardware"):
 #   - Espressif's QEMU fork: qemu-system-xtensa for the S3 (QEMU_XTENSA env var,
 #     or on PATH), qemu-system-riscv32 for the C3 (QEMU_RISCV32)
-#   - esptool (pip install esptool) for elf2image / merge_bin
+#   - esptool (pip install esptool) for elf2image / merge-bin
 #   - esp-idf-nvs-partition-gen (pip) for the provisioning NVS image; the ESP-IDF
 #     python env under .embuild already has it and is used when present
 #   - the mock server reachable from the host on port 8080 for `test`
@@ -128,17 +128,17 @@ cmd_image() {
     # the ELF; the app image is derived from the ELF here. Offsets are the ESP32-S3
     # defaults (bootloader 0x0, partition table 0x8000, nvs 0x9000 and factory app
     # 0x10000 as in partitions.csv). QEMU requires the image to be exactly one of
-    # the sizes the emulated flash supports, hence --fill-flash-size. The
+    # the sizes the emulated flash supports, hence --pad-to-size. The
     # `wa_store` partition starts erased and is written by the firmware itself:
     # QEMU writes the emulated flash back to this file, which is what lets the
     # persistence test reboot the same image.
     local app="$OUT_DIR/whatsapp-esp32.bin" image nvs
     image="$(flash_image "$name")"
     log "elf2image -> $app"
-    "$ESPTOOL" --chip "$BOARD" elf2image --flash_size "$FLASH_SIZE" -o "$app" "$ELF"
+    "$ESPTOOL" --chip "$BOARD" elf2image --flash-size "$FLASH_SIZE" -o "$app" "$ELF"
     nvs="$(nvs_image "$name")"
-    log "merge_bin -> $image"
-    "$ESPTOOL" --chip "$BOARD" merge_bin --fill-flash-size "$FLASH_SIZE" -o "$image" \
+    log "merge-bin -> $image"
+    "$ESPTOOL" --chip "$BOARD" merge-bin --pad-to-size "$FLASH_SIZE" -o "$image" \
         0x0 "$OUT_DIR/bootloader.bin" \
         0x8000 "$OUT_DIR/partition-table.bin" \
         0x9000 "$nvs" \

@@ -199,7 +199,7 @@ jobs:
           BOARD: ${{ matrix.board }}
         run: |
           python3 -m venv .venv && .venv/bin/pip install -q esptool==5.6.0
-          .venv/bin/esptool --chip "$BOARD" elf2image --flash_size 16MB \
+          .venv/bin/esptool --chip "$BOARD" elf2image --flash-size 16MB \
             -o "$OUT/whatsapp-esp32.bin" "$OUT/whatsapp-esp32"
           scripts/check-app-size.sh "$OUT/whatsapp-esp32.bin" partitions.csv
 
