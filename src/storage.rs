@@ -445,7 +445,7 @@ impl FlashNamespaces {
         max_value_len: usize,
     ) -> Result<Option<Vec<u8>>> {
         let name = record_name(logical_key);
-        let Some(record) = read_blob(
+        let Some(mut record) = read_blob(
             namespace,
             &name,
             RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + max_value_len,
@@ -463,7 +463,14 @@ impl FlashNamespaces {
                 value.len()
             )));
         }
-        Ok(Some(value.to_vec()))
+        // Reuse the owned NVS buffer. A second payload allocation can fail
+        // while the SDK is serializing another session during a reply/edit.
+        let payload_len = value.len();
+        let payload_start = record.len() - payload_len;
+        record.copy_within(payload_start.., 0);
+        record.truncate(payload_len);
+        record.shrink_to_fit();
+        Ok(Some(record))
     }
 
     fn load_sync_key(&self, key_id: &[u8]) -> Result<Option<AppStateSyncKey>> {

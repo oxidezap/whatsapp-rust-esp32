@@ -64,6 +64,11 @@ intact during a burst. This bounds coordination metadata without discarding
 persisted Signal sessions. TLS output uses the smaller local record size while
 WebSocket writes remain fragmented; the peer may still send a full 16 KiB record.
 
+On unicore RV32IMC, Rust allocations prefer the byte-accessible RTC FAST heap
+before falling back to the default heap. FreeRTOS stacks and DMA keep their
+explicit memory capabilities. NVS reads validate the existing record envelope,
+then compact the payload inside that same allocation instead of allocating a
+second payload buffer; the stored format is unchanged.
 
 `wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
 disables the cache, so a stack in PSRAM would fault mid-write -- which makes it

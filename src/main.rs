@@ -36,15 +36,9 @@ use whatsapp_esp32::{
     crash, metrics, Esp32Executor, Esp32Runtime, Esp32TransportFactory, EspHttpClient, NvsStore,
 };
 
-// The whole Rust heap goes to PSRAM; internal DRAM is left to FreeRTOS, DMA
-// and mbedTLS. The library only defines the allocator, the firmware installs it.
-//
-// Only where the build has PSRAM. On the ESP32-C3 there is one heap and it is
-// internal DRAM, so `PsramAllocator` would ask `heap_caps_aligned_alloc` for
-// SPIRAM, get a null, and retry against the default heap on every single
-// allocation. Leaving it out means the plain ESP-IDF allocator, which is what
-// that fallback path reaches anyway.
-#[cfg(esp_idf_spiram)]
+// Keep Rust allocations in the preferred byte-accessible arena: PSRAM where
+// present, RTC FAST heap on unicore RV32IMC, otherwise the default ESP-IDF heap.
+// FreeRTOS stacks and DMA allocations retain their explicit capability flags.
 #[global_allocator]
 static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
     whatsapp_esp32::psram_alloc::PsramAllocator;

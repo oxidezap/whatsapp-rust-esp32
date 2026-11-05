@@ -103,7 +103,7 @@ linker_messages = "allow"
 # live. The build script only *declares* it on a board that has PSRAM, so on the
 # ESP32-C3 -- the build where its absence is the entire point -- rustc would
 # otherwise report it as an unexpected cfg name.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_spiram)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_spiram)', 'cfg(esp_idf_freertos_unicore)'] }
 
 [features]
 # The dashboard only. `mock-server` is deliberately not a default: a consumer
