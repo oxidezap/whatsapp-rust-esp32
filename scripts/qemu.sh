@@ -86,7 +86,7 @@ cmd_build() {
     # ESP-IDF install dir) would land under target/, silently building a default
     # sdkconfig with no PSRAM and no Ethernet, and cloning a second multi-GB
     # ESP-IDF under target/.embuild. So everything is passed absolute, and the
-    # repo's own .embuild is shared; only the qemu flavor's ESP-IDF *build* lands
+    # repo's own .embuild/espressif is shared; only the qemu flavor's ESP-IDF *build* lands
     # under $TARGET_DIR. (partitions.csv is the one path that has to stay
     # relative; sdkconfig.qemu carries the deeper one.) ESP-IDF pulls in each
     # `<file>.<mcu>` right after the file that brought it in, so the chip
@@ -96,7 +96,7 @@ cmd_build() {
     ESP_IDF_VERSION="$BOARD_ESP_IDF_VERSION" \
     MCU="$BOARD" \
     ESP_IDF_SDKCONFIG_DEFAULTS="$(board_sdkconfig_defaults sdkconfig.qemu)" \
-    ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
+    ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild/espressif" \
     CARGO_WORKSPACE_DIR="$PWD" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
         cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
