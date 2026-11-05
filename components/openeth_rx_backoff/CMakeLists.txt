@@ -10,6 +10,15 @@ endif()
 # never mutate the SDK checkout or alter the hardware WiFi drivers.
 idf_component_get_property(eth_lib esp_eth COMPONENT_LIB)
 idf_component_get_property(eth_dir esp_eth COMPONENT_DIR)
+
+# IDF 6 moved DP83848 out of the SDK. esp-idf-svc's OpenETH constructor still
+# needs its factory, but the managed driver's target list excludes emulated
+# S3/C3. Compile the unmodified official 1.1.0 driver only for OpenETH.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
+    target_sources(${eth_lib} PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/vendor/dp83848/esp_eth_phy_dp83848.c")
+endif()
+
 set(original "${eth_dir}/src/openeth/esp_eth_mac_openeth.c")
 file(SHA256 "${original}" source_hash)
 if(NOT source_hash STREQUAL "b0526b76120abffe37ee8bd87b9e204880da18a5c02383e5d39b8e001bbcbb7d")
