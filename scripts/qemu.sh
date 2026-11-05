@@ -274,7 +274,7 @@ check_crashes() {
 
 connection_context() {
     local serial="$1" line from
-    line=$(grep -n -m1 -E 'failed:|Failed to connect:|TLS connect failed:' "$serial" | cut -d: -f1) || true
+    line=$(grep -n -m1 -E 'failed:|Failed to connect:|TLS connect failed:|WS send error:|Dynamic Impl:.*failed|memory allocation of' "$serial" | cut -d: -f1) || true
     [[ -n "$line" ]] || return 0
     from=$(( line > 10 ? line - 10 : 1 ))
     log "--- first connection failure, serial lines $from-$((line + 5)) ---"
@@ -394,8 +394,30 @@ metrics_gate() {
     metric_floor "$metrics" stack_wa_nvs_min "$WA_NVS_MIN" || return 1
 }
 
+# Preserve failures and publish serial context even when a synchronous admin
+# request times out before the next crash/connection check can run.
+cmd_test_exit() {
+    local status=$? pid serial
+    stop_all || true
+    for pid in "${QEMU_PIDS[@]:-}"; do
+        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+    done
+    if (( status != 0 )); then
+        for serial in "${QEMU_SERIAL_LOGS[@]:-}"; do
+            [[ -f "$serial" ]] || continue
+            log "--- failure context: $serial ---"
+            if grep -q -E "$CRASH_RE" "$serial"; then
+                crash_context "$serial" || true
+            fi
+            connection_context "$serial" || true
+            tail -n 80 "$serial" >&2 || true
+        done
+    fi
+    return "$status"
+}
+
 cmd_test() {
-    trap stop_all EXIT
+    trap cmd_test_exit EXIT
     local port_a port_b
     port_a="$(board_port a)"
     port_b="$(board_port b)"

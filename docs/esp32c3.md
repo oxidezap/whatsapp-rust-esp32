@@ -16,11 +16,12 @@ This is what the port had to change, and what it did not.
 ## The one switch everything hangs off
 
 `CONFIG_SPIRAM` in the sdkconfig. esp-idf-sys turns it into the `esp_idf_spiram`
-cfg, and the firmware reads it in exactly three places:
+cfg, and the firmware uses it to select heap, stack and buffer budgets:
 
 | Where | With PSRAM | Without |
 | --- | --- | --- |
-| `src/main.rs`, `examples/minimal.rs` | install `PsramAllocator` | plain ESP-IDF allocator |
+| `src/main.rs` | install `PsramAllocator` | install the capability-aware allocator, preferring RTC heap on unicore RV32IMC |
+| `examples/minimal.rs` | opt into `PsramAllocator` | use the default ESP-IDF allocator |
 | `runtime::stack_caps` | `MallocCap::Spiram` | `MallocCap::Internal` |
 | `runtime::by_ram(a, b)` | `a` | `b` |
 
@@ -54,7 +55,7 @@ Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack grows from
 32 KB to 40 KiB (it hosts the executor directly on the C3 instead of spawning a
 separate `wa-main` thread), the default pthread stack
 drops from 32 KB to 8 KB, the Wi-Fi buffer counts from 10/32/32 to 4/8/8, and
-mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KiB in, 1 KiB
+mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KiB in, 512 B
 out) since it can no longer allocate from external memory.
 
 The no-PSRAM client also caps idle session locks and chat lanes at 16 entries,
