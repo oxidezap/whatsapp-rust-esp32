@@ -764,7 +764,11 @@ async fn run_whatsapp_inner(
         .skip_history_sync();
 
     #[cfg(feature = "mock-server")]
-    let builder = builder.with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
+    let builder = builder
+        // The local mock uses the pinned protocol fixture. Avoid an unrelated
+        // live version fetch so QEMU qualification needs only the mock server.
+        .with_version(whatsapp_rust::wacore::version::WA_WEB_VERSION)
+        .with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
 
     let builder = if !whatsapp_esp32::runtime::HAS_PSRAM {
         let mut config = whatsapp_rust::CacheConfig::default();

@@ -108,3 +108,7 @@ CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=16
 # UART, which makes it look like a hang at `entry 0x...` rather than a console
 # that went somewhere else. A board that is wired to the USB endpoint wants
 # CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y here, and cannot then be run under QEMU.
+
+# Share C/C++ register save/restore sequences, matching the Rust C3 backend.
+# ESP-IDF's documented size tradeoff: smaller prologues, extra helper calls.
+CONFIG_COMPILER_SAVE_RESTORE_LIBCALLS=y

@@ -114,6 +114,25 @@ removal, the common CA bundle, fat LTO, abort-on-panic, pinned upstream codecs
 or generated pinned clones. The panic hook and flash core dump stay enabled.
 The older [image-size report](app-image-size.md) describes a historical build.
 
+## Runtime status and test setup
+
+The first compact QEMU image booted, brought up Ethernet, loaded NVS and entered
+the client run loop. Pairing then stopped at app-version discovery because the
+emulator could not resolve `web.whatsapp.com` in this environment. The mock
+builder now uses the pinned upstream `WA_WEB_VERSION` through the supported
+`with_version` override. This is compiled only with `mock-server`; production
+version discovery is unchanged.
+
+The follow-up C/C++ helper and mock-fixture builds were interrupted. No additional
+C/C++ saving, successful pairing, restored-session test or physical 4 MiB support
+is claimed. The existing 16 MiB board layout remains selected in this draft.
+
+The profiler's optional map check has been exercised against the captured
+baseline ELF/map and a deliberately mismatched compact-ELF/baseline-map pair.
+It accepts the former and rejects the latter. The stale compact archive copy
+was removed; the compact ELF, image hashes and linked-symbol measurements are
+retained.
+
 ## Dependency replacements and upstream work
 
 | Candidate | Assessment |
@@ -149,11 +168,13 @@ python3 scripts/test-flash-layout.py
 #   cargo test --locked --release --manifest-path /path/to/repo/tests/compact-sha/Cargo.toml
 python3 scripts/check-flash-layout.py app.bin partitions.csv 16MB
 scripts/profile-app.py path/to/whatsapp-esp32 \
-  --nm path/to/riscv32-esp-elf-nm --image app.bin > symbols.json
+  --nm path/to/riscv32-esp-elf-nm --image app.bin --map app.map > symbols.json
 ```
 
 Use `esp_idf_size --archives` and `--files` on the resolved linker map for C
-archive/object attribution. Do not sum discarded map input sections. ELF
+archive/object attribution. The profiler checks the map's `.flash.text` address
+and size against the ELF and rejects a mismatch; its hash is recorded with the
+ELF and image hashes. Do not sum discarded map input sections. ELF
 filesystem size or stripping debug symbols is not a flashed-image measurement.
 
 - [x] Measure the current production baseline and retain provenance.

@@ -9,6 +9,98 @@
   "environment_note": "The component registry download host was blocked. Both baseline and experiments use the official espressif/esp-protocols mdns-v1.2.5 tag, commit f8a776d8a50247dbd237aa27de17e56e3f5464af, as a local component. The registry package hash was not compared. This environment-only manifest change is excluded from the PR.",
   "symbols": {
     "elf_sha256": "c10aef938c6bed8cb932cf2dc6eac7120a237a7f96f070c620f1bbc5e11f6d37",
+    "allocated_elf_sections": [
+      {
+        "name": ".rtc_noinit",
+        "address": 1342177280,
+        "bytes": 272,
+        "file_backed": false
+      },
+      {
+        "name": ".rtc.force_slow",
+        "address": 1342177552,
+        "bytes": 32,
+        "file_backed": true
+      },
+      {
+        "name": ".rtc_reserved",
+        "address": 1342185448,
+        "bytes": 24,
+        "file_backed": false
+      },
+      {
+        "name": ".iram0.text",
+        "address": 1077411840,
+        "bytes": 72802,
+        "file_backed": true
+      },
+      {
+        "name": ".iram0.text_end",
+        "address": 1077484642,
+        "bytes": 414,
+        "file_backed": false
+      },
+      {
+        "name": ".dram0.dummy",
+        "address": 1070071808,
+        "bytes": 73216,
+        "file_backed": false
+      },
+      {
+        "name": ".dram0.data",
+        "address": 1070145024,
+        "bytes": 11496,
+        "file_backed": true
+      },
+      {
+        "name": ".noinit",
+        "address": 1070156520,
+        "bytes": 0,
+        "file_backed": false
+      },
+      {
+        "name": ".dram0.bss",
+        "address": 1070156544,
+        "bytes": 25328,
+        "file_backed": false
+      },
+      {
+        "name": ".flash.text",
+        "address": 1107296288,
+        "bytes": 3195614,
+        "file_backed": true
+      },
+      {
+        "name": ".flash_rodata_dummy",
+        "address": 1006632992,
+        "bytes": 3211264,
+        "file_backed": false
+      },
+      {
+        "name": ".flash.appdesc",
+        "address": 1009844256,
+        "bytes": 256,
+        "file_backed": true
+      },
+      {
+        "name": ".flash.rodata",
+        "address": 1009844512,
+        "bytes": 539028,
+        "file_backed": true
+      },
+      {
+        "name": ".flash.init_array",
+        "address": 1010383540,
+        "bytes": 256,
+        "file_backed": true
+      },
+      {
+        "name": ".flash.rodata_noload",
+        "address": 1010383796,
+        "bytes": 12333,
+        "file_backed": false
+      }
+    ],
     "named_initialized_symbol_bytes": 3376663,
     "attribution": "First Rust path component; LTO attribution is approximate. Includes initialized data, excludes BSS and debug sections. Anonymous literals and alignment are not fully attributed.",
     "symbols_by_owner": {
