@@ -42,9 +42,11 @@ has no PSRAM, so its ~400 KB of on-chip SRAM is the whole memory system
 `CONFIG_SPIRAM`. Nothing in `src/` checks which chip it is. The full story is in
 [docs/esp32c3.md](docs/esp32c3.md).
 
-Flash is the hard floor. The app is ~4.2 MB and `partitions.csv` reserves 1 MB
-for the store, so a board needs at least 8 MB and the table assumes 16 MB. The
-common 4 MB C3 devkits do not fit. For what else could run this and on which
+This branch is qualifying common 4 MiB C3 devkits. The C3 has a separate
+`partitions.esp32c3.csv`; PSRAM boards retain the larger `partitions.csv` layout.
+The latest completed production measurement is 3,801,616 bytes. Further code
+sharing and path trimming are being measured against the 4 MiB layout, with
+runtime qualification still pending. See [the flash investigation](docs/c3-4mb-flash.md). For what else could run this and on which
 emulator, see [docs/board-support-map.md](docs/board-support-map.md).
 
 ## How it works

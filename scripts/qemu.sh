@@ -2,7 +2,7 @@
 # Build, image, and run the firmware inside Espressif's QEMU.
 #
 #   scripts/qemu.sh build          # cargo build --release --features qemu, with sdkconfig.qemu layered in
-#   scripts/qemu.sh image [NAME]   # 16 MB flash image for board NAME (default "a")
+#   scripts/qemu.sh image [NAME]   # board-sized flash image (4 MiB C3, 16 MiB S3)
 #   scripts/qemu.sh run [NAME]     # boot that image; serial on stdout, Ctrl-A X to quit
 #   scripts/qemu.sh test           # pair a, reboot it with NVS intact, message b, gate stack floors
 #   scripts/qemu.sh all            # build + image + test (what CI runs)

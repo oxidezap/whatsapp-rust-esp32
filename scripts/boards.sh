@@ -34,6 +34,8 @@ board_select() {
             # rv32imc, not the C5's rv32imac: the C3 has no hardware atomics.
             BOARD_TARGET=riscv32imc-esp-espidf
             BOARD_HAS_PSRAM=0
+            BOARD_FLASH_SIZE=4MB
+            BOARD_PARTITION_TABLE=partitions.esp32c3.csv
             # No -m: the C3 has no PSRAM, and its machine has no such knob. The
             # ~400 KB of on-chip SRAM is the whole memory system.
             BOARD_QEMU_BIN="${QEMU_RISCV32:-qemu-system-riscv32}"

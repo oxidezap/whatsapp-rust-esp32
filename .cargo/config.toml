@@ -16,6 +16,8 @@ linker = "ldproxy"
 # Keep the complete protocol; reduce the instruction sequences emitted for C3.
 rustflags = [
     "--cfg", 'sha2_backend_soft="compact"',
+    # Reuse upstream generic instantiations instead of per-crate copies.
+    "-Z", "share-generics=y",
     "-C", "target-feature=+relax,+save-restore",
 ]
 

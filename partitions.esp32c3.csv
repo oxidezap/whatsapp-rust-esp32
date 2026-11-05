@@ -1,0 +1,8 @@
+# ESP32-C3, 4 MiB flash, single factory app, no OTA.
+# The app starts on a 64 KiB boundary. Keep crash capture and a bounded store.
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xF000,   0x1000,
+factory,    app,  factory, 0x10000,  0x3A0000,
+coredump,   data, coredump, 0x3B0000, 0x10000,
+wa_store,   data, nvs,     0x3C0000, 0x40000,

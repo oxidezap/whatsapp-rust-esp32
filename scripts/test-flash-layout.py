@@ -22,6 +22,10 @@ class LayoutTests(unittest.TestCase):
             csv.write_text(table)
             layout.check(image, csv, 4 * 1024**2)
 
+    def test_shipped_c3_layout_fits_physical_flash(self):
+        table = Path(__file__).resolve().parent.parent / 'partitions.esp32c3.csv'
+        self.check_table(table.read_text(), size=1)
+
     def test_store_beyond_flash_even_when_app_fits(self):
         with self.assertRaisesRegex(ValueError, 'exceeds .* flash'):
             self.check_table('factory,app,factory,0x10000,3M\nstore,data,nvs,,1M\n')

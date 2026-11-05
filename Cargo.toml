@@ -1,3 +1,5 @@
+cargo-features = ["trim-paths"]
+
 [package]
 name = "whatsapp-esp32"
 version = "0.1.0"
@@ -88,6 +90,8 @@ strip = false
 panic = "abort"
 
 [profile.release]
+# Keep package-relative panic locations while removing build-machine prefixes.
+trim-paths = "all"
 opt-level = "z"
 lto = "fat"
 codegen-units = 1

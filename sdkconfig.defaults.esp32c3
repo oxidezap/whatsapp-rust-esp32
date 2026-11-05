@@ -16,16 +16,11 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 
 # --- Internal DRAM budget ---------------------------------------------------
 
-# The main task hosts the executor directly, avoiding a second task stack.
-# Triage proved the previous 36 KB stack overflows in the ServerAck window:
-# 2,356 bytes free at the last clean telemetry, then the canary fires with
-# SP outside the stack while heap walks fault on the overwritten words.
-# The bounded demo callback/admin phases left at least 18,788 B unused in
-# the 48 KiB control before reboot. Qualify 40 KiB to return 8 KiB to the
-# internal heap for TLS control writes outside foreground admission. The same
-# 2,048 B unused-stack floor and full restored-session workload still apply.
-# The reusable executor's thread default remains the conservative 48 KiB.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960
+# The executor runs on the main task. The 40 KiB build completed messaging
+# but left only 768 B unused in two CI samples, below the 2048 B guard.
+# Reserve another 4 KiB and qualify the complete restored-session workload;
+# the smaller flash store also reduces NVS's internal-RAM page cache.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=45056
 
 # Any std::thread spawned without an explicit ThreadSpawnConfiguration takes
 # this. Everything in src/ names its own size; this is the floor for the rest
@@ -112,3 +107,8 @@ CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=16
 # Share C/C++ register save/restore sequences, matching the Rust C3 backend.
 # ESP-IDF's documented size tradeoff: smaller prologues, extra helper calls.
 CONFIG_COMPILER_SAVE_RESTORE_LIBCALLS=y
+
+# Common C3 devkits have 4 MiB flash. Keep a separate layout from PSRAM boards.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=n
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../partitions.esp32c3.csv"

@@ -120,7 +120,7 @@ jobs:
             # The chip with no PSRAM: internal-DRAM task stacks and the plain
             # ESP-IDF allocator, both selected by CONFIG_SPIRAM being absent.
             board: esp32c3
-            build: scripts/build.sh --board esp32c3 --release --features mock-server
+            build: scripts/build.sh --board esp32c3 --release
           - flavor: qemu-esp32s3
             board: esp32s3
             build: scripts/qemu.sh build

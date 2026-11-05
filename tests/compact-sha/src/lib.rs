@@ -4,6 +4,18 @@ mod tests {
     fn hex(bytes: impl AsRef<[u8]>) -> String {
         bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
+    #[track_caller]
+    fn caller_location() -> &'static std::panic::Location<'static> {
+        std::panic::Location::caller()
+    }
+    #[test]
+    fn trimmed_locations_keep_filename_and_line() {
+        let expected_line = line!() + 1;
+        let location = caller_location();
+        assert_eq!(location.line(), expected_line);
+        assert!(location.file().ends_with("src/lib.rs"));
+        assert!(!std::path::Path::new(location.file()).is_absolute());
+    }
     #[test]
     fn fips_abc() {
         assert_eq!(hex(Sha256::digest(b"abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");

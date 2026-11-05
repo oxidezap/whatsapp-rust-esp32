@@ -1,0 +1,2 @@
+# The QEMU target directory is one level deeper than the board build.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../../partitions.esp32c3.csv"

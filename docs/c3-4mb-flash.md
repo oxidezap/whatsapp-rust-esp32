@@ -114,6 +114,35 @@ removal, the common CA bundle, fat LTO, abort-on-panic, pinned upstream codecs
 or generated pinned clones. The panic hook and flash core dump stay enabled.
 The older [image-size report](app-image-size.md) describes a historical build.
 
+## Second-stage configuration under qualification
+
+The C/C++ helper build completed at **3,801,616 bytes**, another **17,984 bytes**
+smaller. Its ELF/map match and archive accounting are recorded in
+[the C/C++ measurement](measurements/c3-flash-compact-c.json).
+
+An additional IR/machine outlining trial produced 3,795,472 bytes, only 6 KiB
+smaller. Those extra compiler switches are not selected. The next target is
+`-Zshare-generics=y`, already used by the upstream workspace's host build but
+not inherited by this ESP32 consumer. Its C3 saving is being measured.
+
+The branch now qualifies a 4 MiB C3 layout with a 256 KiB store and the existing
+64 KiB core dump. The app slot is `0x3a0000`. Generated board and QEMU SDK configs
+both select 4 MiB flash and a 44 KiB main stack. The latter addresses a real CI
+failure: samples [2](https://github.com/oxidezap/whatsapp-rust-esp32/actions/runs/42115681394/job/127581804693)
+and [3](https://github.com/oxidezap/whatsapp-rust-esp32/actions/runs/42115681394/job/127581804544)
+completed pairing and the first message exchange but reported only 768 bytes
+of main-stack headroom. The 2048-byte guard is unchanged.
+
+Release builds also use Cargo path trimming. The C/C++ measurement still has
+369 unique absolute Rust source paths occupying 35,516 bytes. Trimming removes
+build-machine prefixes while retaining package-relative file/line locations;
+the standalone host test verifies that those coordinates remain available.
+The complete firmware saving and runtime stack/heap margins are pending.
+
+The C3 CI build now measures the production firmware without `mock-server`.
+The separate QEMU build exercises the mock path. Both run the physical-flash
+size gate against the C3-specific table.
+
 ## Runtime status and test setup
 
 The first compact QEMU image booted, brought up Ethernet, loaded NVS and entered
@@ -123,9 +152,10 @@ builder now uses the pinned upstream `WA_WEB_VERSION` through the supported
 `with_version` override. This is compiled only with `mock-server`; production
 version discovery is unchanged.
 
-The follow-up C/C++ helper and mock-fixture builds were interrupted. No additional
-C/C++ saving, successful pairing, restored-session test or physical 4 MiB support
-is claimed. The existing 16 MiB board layout remains selected in this draft.
+The earlier interrupted C/C++ build has now been measured. The new shared-generic,
+trimmed-path 4 MiB board and QEMU builds are running. Physical 4 MiB support is
+not yet qualified; passing app fit and the complete restored-session workload
+remain required.
 
 The profiler's optional map check has been exercised against the captured
 baseline ELF/map and a deliberately mismatched compact-ELF/baseline-map pair.
@@ -181,7 +211,8 @@ filesystem size or stripping debug symbols is not a flashed-image measurement.
 - [x] Add the physical-flash regression gate and its four host tests.
 - [x] Verify compact SHA-256/SHA-512 against known vectors on the host.
 - [x] Finish the first compact production build and record the actual image delta.
-- [ ] Measure ESP-IDF C/C++ save/restore and select the final configuration.
+- [x] Measure ESP-IDF C/C++ save/restore.
+- [ ] Finish shared-generic/path-trim measurements and select the final configuration.
 - [ ] Choose a 4 MiB layout with explicit app margin and storage capacity.
 - [ ] Boot an actual 4 MiB QEMU image, pair, reboot with the store intact, and
   exchange messages, reactions, edits and quoted replies between two boards.
