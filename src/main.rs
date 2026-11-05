@@ -764,7 +764,11 @@ async fn run_whatsapp_inner(
         .skip_history_sync();
 
     #[cfg(feature = "mock-server")]
-    let builder = builder.with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
+    let builder = builder
+        // Match the SDK's E2E fixture. Mock sessions must not fetch a version
+        // from the real WhatsApp service before dialing the local server.
+        .with_version((2, 3000, 0))
+        .with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
 
     let builder = if !whatsapp_esp32::runtime::HAS_PSRAM {
         let mut config = whatsapp_rust::CacheConfig::default();
