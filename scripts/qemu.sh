@@ -99,7 +99,7 @@ cmd_build() {
     ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild/espressif" \
     CARGO_WORKSPACE_DIR="$PWD" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
+        cargo build --locked --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
     test -f "$ELF"
 }
 

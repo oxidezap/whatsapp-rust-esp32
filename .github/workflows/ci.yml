@@ -93,16 +93,16 @@ jobs:
             # The only row that runs bare cargo, so the only one that covers the
             # sdkconfig layering in .cargo/config.toml.
             board: esp32s3
-            build: cargo build --release --features mock-server
+            build: cargo build --locked --release --features mock-server
           - flavor: esp32c5
             # The RISC-V board: ESP-IDF v6.1, selected by the script.
             board: esp32c5
-            build: scripts/build.sh --board esp32c5 --release --features mock-server
+            build: scripts/build.sh --board esp32c5 --locked --release --features mock-server
           - flavor: esp32c3
             # The chip with no PSRAM: internal-DRAM task stacks and the plain
             # ESP-IDF allocator, both selected by CONFIG_SPIRAM being absent.
             board: esp32c3
-            build: scripts/build.sh --board esp32c3 --release --features mock-server
+            build: scripts/build.sh --board esp32c3 --locked --release --features mock-server
           - flavor: qemu-esp32s3
             board: esp32s3
             build: scripts/qemu.sh build
@@ -180,6 +180,9 @@ jobs:
           BOARD: ${{ matrix.board }}
         run: ${{ matrix.build }}
 
+      - name: Verify committed component locks
+        run: git diff --exit-code -- 'components_*.lock'
+
       # Four configurations the board builds never compile: the library alone
       # without any feature (how a product firmware consumes it), the demo without
       # the mock server (the production build), the unit tests (they cannot run on
@@ -189,10 +192,10 @@ jobs:
       - name: Check the library, the production demo, the unit tests and the example
         if: matrix.flavor == 'esp32s3'
         run: |
-          cargo check --release --lib --no-default-features
-          cargo check --release
-          cargo check --release --tests
-          cargo check --release --examples --no-default-features
+          cargo check --locked --release --lib --no-default-features
+          cargo check --locked --release
+          cargo check --locked --release --tests
+          cargo check --locked --release --examples --no-default-features
 
       - name: App image and partition size gate
         env:
