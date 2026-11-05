@@ -69,7 +69,12 @@ On unicore RV32IMC, Rust allocations prefer the byte-accessible RTC FAST heap
 before falling back to the default heap. FreeRTOS stacks and DMA keep their
 explicit memory capabilities. NVS reads validate the existing record envelope,
 then compact the payload inside that same allocation instead of allocating a
-second payload buffer; the stored format is unchanged.
+second payload buffer; the stored format is unchanged. The flash worker also
+remembers at most eight validated session slot names and their full logical
+keys. Rewriting an existing session can then check for a collision without
+loading its old payload alongside the replacement. Deletion and namespace
+erasure invalidate this metadata before changing flash; cache misses still
+validate the complete stored record and enforce the durable namespace budget.
 
 `wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
 disables the cache, so a stack in PSRAM would fault mid-write -- which makes it

@@ -36,6 +36,9 @@ use whatsapp_rust::wacore::store::error::{Result, StoreError};
 use whatsapp_rust::wacore::store::traits::*;
 use whatsapp_rust::wacore::store::Device;
 
+mod session_slots;
+use session_slots::SessionSlots;
+
 const RECORD_MAGIC: &[u8; 3] = b"WA1";
 const RECORD_HEADER_LEN: usize = 5;
 const MAX_LOGICAL_KEY_LEN: usize = 512;
@@ -73,6 +76,9 @@ struct FlashNamespaces {
     signed_prekeys: EspCustomNvs,
     sender_keys: EspCustomNvs,
     sync_keys: EspCustomNvs,
+    // Only validated names and keys, never Signal payloads. All flash access
+    // is serialized by the worker (or startup before the worker exists).
+    validated_sessions: SessionSlots,
 }
 
 type FlashJob = Box<dyn FnOnce(&FlashNamespaces) + Send>;
@@ -294,7 +300,15 @@ impl FlashNamespaces {
             signed_prekeys: EspNvs::new(partition.clone(), "signedpre", true)?,
             sender_keys: EspNvs::new(partition.clone(), "senderkey", true)?,
             sync_keys: EspNvs::new(partition, "synckey", true)?,
+            validated_sessions: SessionSlots::default(),
         })
+    }
+
+    fn remember_session_slot(&self, namespace: &EspCustomNvs, name: &str, key: &[u8]) {
+        if namespace.handle() != self.sessions.handle() {
+            return;
+        }
+        self.validated_sessions.remember(name, key);
     }
 
     fn load_device(&self) -> Result<Option<Device>> {
@@ -463,6 +477,7 @@ impl FlashNamespaces {
                 value.len()
             )));
         }
+        self.remember_session_slot(namespace, &name, logical_key);
         // Reuse the owned NVS buffer. A second payload allocation can fail
         // while the SDK is serializing another session during a reply/edit.
         let payload_len = value.len();
@@ -503,6 +518,19 @@ impl FlashNamespaces {
             )));
         }
         let name = record_name(logical_key);
+        if namespace.handle() == self.sessions.handle() {
+            if let Some(matches) = self.validated_sessions.matches(&name, logical_key) {
+                if !matches {
+                    return Err(StoreError::Validation(format!(
+                        "{label} NVS key collision at '{name}'"
+                    )));
+                }
+                // This existing slot was read and validated in this process.
+                // Avoid loading the entire old session alongside the SDK's
+                // serialized replacement merely to compare its logical key.
+                return Ok(name);
+            }
+        }
         let existing = read_blob(
             namespace,
             &name,
@@ -515,6 +543,7 @@ impl FlashNamespaces {
                     "{label} NVS key collision at '{name}'"
                 )));
             }
+            self.remember_session_slot(namespace, &name, logical_key);
         } else {
             // RAM mirrors can evict records. The durable namespace owns the
             // budget, otherwise a C3 can write a store it cannot reopen.
@@ -556,6 +585,10 @@ impl FlashNamespaces {
         logical_key: &[u8],
         label: &str,
     ) -> Result<()> {
+        // Invalidate before mutation, including failures with a persisted prefix.
+        if namespace.handle() == self.sessions.handle() {
+            self.validated_sessions.clear();
+        }
         let name = record_name(logical_key);
         // Deleting an absent record is a no-op (Signal and prekey teardown
         // call delete for keys that were never stored), and must not commit:
@@ -594,6 +627,7 @@ impl FlashNamespaces {
     }
 
     fn erase_signal(&self) -> Result<()> {
+        self.validated_sessions.clear();
         // Belongs with the keys it names, so it goes when they do.
         remove_blob(&self.control, "latestsync")?;
         erase_namespace(&self.identities, "identity")?;
@@ -1133,6 +1167,7 @@ impl NvsStore {
         let mut s = self.lock();
         let count = self.flash.run(|flash| {
             let count = record_count(&flash.sessions)?;
+            flash.validated_sessions.clear();
             erase_namespace(&flash.sessions, "session")?;
             Ok(count)
         })?;

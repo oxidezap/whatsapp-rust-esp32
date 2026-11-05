@@ -11,3 +11,7 @@ mod message_log;
 #[cfg(test)]
 #[path = "../../../src/transport/write_completion.rs"]
 mod write_completion;
+
+#[cfg(test)]
+#[path = "../../../src/storage/session_slots.rs"]
+mod session_slots;
