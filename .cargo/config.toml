@@ -13,6 +13,11 @@ linker = "ldproxy"
 # from the C5's rv32imac and needs its own entry here.
 [target.riscv32imc-esp-espidf]
 linker = "ldproxy"
+# Keep the complete protocol; reduce the instruction sequences emitted for C3.
+rustflags = [
+    "--cfg", 'sha2_backend_soft="compact"',
+    "-C", "target-feature=+relax,+save-restore",
+]
 
 [build]
 target = "xtensa-esp32s3-espidf"
@@ -28,7 +33,7 @@ build-std = ["std", "panic_abort"]
 #
 # `compiler-builtins-mem` is carried over from the default set; it is the one
 # entry there this build actually wants.
-build-std-features = ["compiler-builtins-mem"]
+build-std-features = ["compiler-builtins-mem", "optimize_for_size"]
 
 [env]
 # Shared ESP-IDF version for every supported board.

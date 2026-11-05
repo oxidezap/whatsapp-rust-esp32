@@ -33,6 +33,16 @@ env:
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
 
 jobs:
+  flash-layout:
+    name: Physical flash layout regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: python3 scripts/test-flash-layout.py
+
   dashboard-json:
     name: Dashboard JSON regression tests
     runs-on: ubuntu-latest
@@ -199,9 +209,12 @@ jobs:
           BOARD: ${{ matrix.board }}
         run: |
           python3 -m venv .venv && .venv/bin/pip install -q esptool
-          .venv/bin/esptool --chip "$BOARD" elf2image --flash_size 16MB \
+          source scripts/boards.sh
+          board_select "$BOARD"
+          .venv/bin/esptool --chip "$BOARD" elf2image --flash_size "$BOARD_FLASH_SIZE" \
             -o "$OUT/whatsapp-esp32.bin" "$OUT/whatsapp-esp32"
-          scripts/check-app-size.sh "$OUT/whatsapp-esp32.bin" partitions.csv
+          python3 scripts/check-flash-layout.py "$OUT/whatsapp-esp32.bin" \
+            "$BOARD_PARTITION_TABLE" "$BOARD_FLASH_SIZE"
 
       - name: Upload firmware
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

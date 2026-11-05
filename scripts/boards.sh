@@ -15,6 +15,8 @@
 board_select() {
     BOARD_NAME="$1"
     BOARD_QEMU_BIN=""
+    BOARD_FLASH_SIZE=16MB
+    BOARD_PARTITION_TABLE=partitions.csv
     BOARD_QEMU_MACHINE_ARGS=()
     case "$BOARD_NAME" in
         esp32s3)

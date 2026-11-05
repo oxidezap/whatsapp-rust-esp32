@@ -47,7 +47,7 @@ fi
 TARGET_DIR="$(board_qemu_target_dir)"
 OUT_DIR="$(board_out_dir "$TARGET_DIR" "$PROFILE")"
 ELF="$OUT_DIR/whatsapp-esp32"
-FLASH_SIZE="${FLASH_SIZE:-16MB}"
+FLASH_SIZE="${FLASH_SIZE:-$BOARD_FLASH_SIZE}"
 ADMIN_PORT="${ADMIN_PORT:-8081}"
 ESPTOOL="${ESPTOOL:-esptool}"
 # How long each boot may take to report a live WhatsApp connection. QEMU is
@@ -136,6 +136,7 @@ cmd_image() {
     image="$(flash_image "$name")"
     log "elf2image -> $app"
     "$ESPTOOL" --chip "$BOARD" elf2image --flash_size "$FLASH_SIZE" -o "$app" "$ELF"
+    python3 scripts/check-flash-layout.py "$app" "$BOARD_PARTITION_TABLE" "$FLASH_SIZE"
     nvs="$(nvs_image "$name")"
     log "merge_bin -> $image"
     "$ESPTOOL" --chip "$BOARD" merge_bin --fill-flash-size "$FLASH_SIZE" -o "$image" \
