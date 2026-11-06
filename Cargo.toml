@@ -1,3 +1,5 @@
+cargo-features = ["trim-paths"]
+
 [package]
 name = "whatsapp-esp32"
 version = "0.1.0"
@@ -73,7 +75,7 @@ bytes = "1.12"
 # one whatsapp-rust was built against.
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7d9021505dcc64603ae38335a0dec5098848540", default-features = false }
+whatsapp-rust = { workspace = true }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing
@@ -88,6 +90,8 @@ strip = false
 panic = "abort"
 
 [profile.release]
+# Keep package-relative panic locations while removing build-machine prefixes.
+trim-paths = "all"
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
@@ -108,10 +112,13 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(esp_idf_spiram)'] }
 [features]
 # The dashboard only. `mock-server` is deliberately not a default: a consumer
 # that forgets `default-features = false` must still get a verified connection.
-default = ["admin"]
+default = ["admin", "precomputed-crypto"]
 # The HTTP dashboard and API (`admin` module): status, send, pairing code,
 # maintenance. The demo firmware serves it; a library consumer can leave it out.
 admin = ["dep:embedded-svc"]
+# Keep the qualified fast backend by default. Omitting default features selects
+# the experimental compact curve backend; enable admin explicitly if needed.
+precomputed-crypto = ["whatsapp-rust/precomputed-tables"]
 # Everything the demo needs to talk to the local mock server, none of which may
 # reach the real gateway: the demo accepts any TLS certificate (the mock mints a
 # fresh self-signed one per start), auto-scans its own pairing QR, and
@@ -125,6 +132,14 @@ mock-server = []
 # `sdkconfig.qemu` on top of `sdkconfig.defaults`; the feature alone is not enough,
 # because `peripherals.mac` only exists once `CONFIG_ETH_USE_OPENETH=y` is set.
 qemu = ["mock-server"]
+
+# PSRAM boards always retain the fast backend; C3 can omit precomputed-crypto;
+# the shared workspace dependency keeps every target on the same protocol pin.
+[target.xtensa-esp32s3-espidf.dependencies]
+whatsapp-rust = { workspace = true, features = ["precomputed-tables"] }
+
+[target.riscv32imac-esp-espidf.dependencies]
+whatsapp-rust = { workspace = true, features = ["precomputed-tables"] }
 
 [build-dependencies]
 embuild = "0.33"
@@ -144,3 +159,6 @@ component_dirs = ["components/openeth_rx_backoff"]
 esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", rev = "c2dac82f5243b0b7036c392f8218e6a2b4f7e375" }
 
 [workspace]
+
+[workspace.dependencies]
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "975797ddc798ba9b8c2ce426e12b813c2fa0faa2", default-features = false }

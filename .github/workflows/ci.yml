@@ -33,6 +33,24 @@ env:
   QEMU_RELEASE: "esp-develop-9.2.2-20260417"
 
 jobs:
+  flash-layout:
+    name: Flash layout and compact crypto checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: python3 scripts/test-flash-layout.py
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-06-16
+      - name: Compact SHA-256 and SHA-512 known vectors
+        working-directory: ${{ runner.temp }}
+        env:
+          RUSTFLAGS: '--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"'
+        run: cargo test --locked --release --manifest-path "$GITHUB_WORKSPACE/tests/compact-sha/Cargo.toml"
+
   dashboard-json:
     name: Dashboard JSON regression tests
     runs-on: ubuntu-latest
@@ -54,7 +72,8 @@ jobs:
   dashboard:
     name: Dashboard QR browser tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # A cold Chromium dependency install consumed over nine minutes in run 42126703762.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,7 +121,14 @@ jobs:
             # The chip with no PSRAM: internal-DRAM task stacks and the plain
             # ESP-IDF allocator, both selected by CONFIG_SPIRAM being absent.
             board: esp32c3
-            build: scripts/build.sh --board esp32c3 --release --features mock-server
+            build: scripts/build.sh --board esp32c3 --release
+          - flavor: esp32c3-compact-crypto
+            board: esp32c3
+            build: scripts/build.sh --board esp32c3 --release --no-default-features --features admin
+          - flavor: qemu-esp32c3-compact-crypto
+            board: esp32c3
+            build: scripts/qemu.sh build --no-default-features --features admin
+            qemu: true
           - flavor: qemu-esp32s3
             board: esp32s3
             build: scripts/qemu.sh build
@@ -199,9 +225,12 @@ jobs:
           BOARD: ${{ matrix.board }}
         run: |
           python3 -m venv .venv && .venv/bin/pip install -q esptool
-          .venv/bin/esptool --chip "$BOARD" elf2image --flash_size 16MB \
+          source scripts/boards.sh
+          board_select "$BOARD"
+          .venv/bin/esptool --chip "$BOARD" elf2image --flash_size "$BOARD_FLASH_SIZE" \
             -o "$OUT/whatsapp-esp32.bin" "$OUT/whatsapp-esp32"
-          scripts/check-app-size.sh "$OUT/whatsapp-esp32.bin" partitions.csv
+          python3 scripts/check-flash-layout.py "$OUT/whatsapp-esp32.bin" \
+            "$BOARD_PARTITION_TABLE" "$BOARD_FLASH_SIZE"
 
       - name: Upload firmware
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -268,6 +297,11 @@ jobs:
             label: esp32c3, sample 3
             arch: riscv32
             sample: 3
+          - board: esp32c3
+            label: esp32c3, experimental compact crypto
+            arch: riscv32
+            sample: compact-crypto
+            artifact: qemu-esp32c3-compact-crypto
     services:
       mock-server:
         # Same image whatsapp-rust's E2E workflow pins (its .github/bartender-image.txt).
@@ -301,7 +335,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: firmware-qemu-${{ matrix.board }}
+          name: firmware-${{ matrix.artifact || format('qemu-{0}', matrix.board) }}
           path: ${{ env.OUT }}
 
       - name: Espressif QEMU, esptool and the NVS partition generator
@@ -335,6 +369,12 @@ jobs:
         env:
           BOARD: ${{ matrix.board }}
         run: scripts/qemu.sh test
+
+      - name: Accumulate four peers and restore the oldest session
+        if: matrix.board == 'esp32c3' && matrix.sample == 1
+        env:
+          BOARD: ${{ matrix.board }}
+        run: scripts/qemu.sh capacity 4
 
       - name: Upload serial logs
         if: always()

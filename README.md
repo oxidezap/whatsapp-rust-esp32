@@ -26,7 +26,7 @@ the same linked device.
 |-------|------|---------------|---------|-------|
 | ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release --features mock-server` |
 | [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release --features mock-server` |
-| ESP32-C3, 16 MB flash | RISC-V, single core | 16 MB / none | v5.5.5 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
+| ESP32-C3, 4 MiB flash profile | RISC-V, single core | 4 MiB / none | v5.5.5 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
 
 Same source and same ESP-IDF on all three. A board is one row in
 [`scripts/boards.sh`](scripts/boards.sh) plus one `sdkconfig.defaults.<chip>`
@@ -42,10 +42,15 @@ has no PSRAM, so its ~400 KB of on-chip SRAM is the whole memory system
 `CONFIG_SPIRAM`. Nothing in `src/` checks which chip it is. The full story is in
 [docs/esp32c3.md](docs/esp32c3.md).
 
-Flash is the hard floor. The app is ~4.2 MB and `partitions.csv` reserves 1 MB
-for the store, so a board needs at least 8 MB and the table assumes 16 MB. The
-common 4 MB C3 devkits do not fit. For what else could run this and on which
-emulator, see [docs/board-support-map.md](docs/board-support-map.md).
+The C3 uses a separate 4 MiB partition table with a 256 KiB WhatsApp store and
+64 KiB core dump. The current precomputed-curve production build measures
+3,798,336 bytes, down 9.3% from baseline, with only 2,752 bytes of app margin.
+The preceding 3,792,880-byte configuration passed the complete two-device QEMU
+suite and all three CI runtime samples. An experimental optional curve backend
+reaches 3,753,776 bytes but has unresolved QEMU watchdog failures. Physical
+4 MiB hardware and production gateway qualification remain pending. See the
+[flash investigation](docs/c3-4mb-flash.md) for profiles, storage limits,
+measurements and the upstream dependency work.
 
 ## How it works
 
@@ -353,14 +358,13 @@ On Arch the user must be in `uucp` (`dialout` on Debian/Ubuntu).
 The S3 and C5 show up as `/dev/ttyACM0` over built-in USB-Serial/JTAG (USB id
 `303a:1001`). Most C3 devkits use a USB-serial bridge instead and appear as
 `/dev/ttyUSB0`, which is why the C3 overlay leaves the console on UART0 (see
-[docs/esp32c3.md](docs/esp32c3.md)). Below is the S3 path. Other boards add
-`--chip` and use their target dir:
+[docs/esp32c3.md](docs/esp32c3.md)). Below is the S3 path. Other boards use their chip, target directory and partition table:
 
-| Board | `--chip` | Target directory |
-|-------|----------|------------------|
-| ESP32-S3 | `esp32s3` (default) | `target/xtensa-esp32s3-espidf/<profile>/` |
-| ESP32-C5 | `esp32c5` | `target/riscv32imac-esp-espidf/<profile>/` |
-| ESP32-C3 | `esp32c3` | `target/riscv32imc-esp-espidf/<profile>/` |
+| Board | Chip | Target directory | Partition table |
+| --- | --- | --- | --- |
+| ESP32-S3 | `esp32s3` | `target/xtensa-esp32s3-espidf/<profile>/` | `partitions.csv` |
+| ESP32-C5 | `esp32c5` | `target/riscv32imac-esp-espidf/<profile>/` | `partitions.csv` |
+| ESP32-C3 | `esp32c3` | `target/riscv32imc-esp-espidf/release/` | `partitions.esp32c3.csv` |
 
 ```bash
 espflash board-info --port /dev/ttyACM0   # chip type, flash size, MAC
@@ -368,7 +372,7 @@ espflash board-info --port /dev/ttyACM0   # chip type, flash size, MAC
 
 Flash with our bootloader and partition table spelled out. Without
 `--partition-table` espflash falls back to a 1.5 MB factory partition and the
-~4.2 MB app does not fit:
+app does not fit:
 
 ```bash
 espflash flash \
@@ -384,6 +388,28 @@ with `--release`). A good flash prints something like
 `App/part. size 4,237,872/4,980,736 (85.09%)`. The second number is our 4864K
 partition, which confirms it is in use. Add `--baud 921600` to go faster,
 `--monitor` to land in the console afterwards.
+
+The default build retains precomputed curve tables. To reproduce the smaller,
+experimental crypto profile, use `--no-default-features --features admin`.
+It passed the complete two-device suite and a four-peer persistence workload,
+but earlier watchdog failures remain
+unresolved. See [the upstream draft](https://github.com/oxidezap/whatsapp-rust/pull/1861).
+
+The 4 MiB C3 profile requires a release build. On a typical USB-serial devkit:
+
+```bash
+scripts/build.sh --board esp32c3 --release
+espflash flash \
+  --port /dev/ttyUSB0 \
+  --bootloader target/riscv32imc-esp-espidf/release/bootloader.bin \
+  --partition-table partitions.esp32c3.csv \
+  target/riscv32imc-esp-espidf/release/whatsapp-esp32
+```
+
+Changing layouts moves and resizes `wa_store`. Back up the credentials or plan
+an explicit erase and pairing cycle before upgrading an existing installation.
+Flashing a new partition table does not migrate the old store. See the
+[qualification report](docs/c3-4mb-flash.md) for the measured limits.
 
 ### Watching the serial log
 

@@ -143,15 +143,25 @@ pub struct BlockingWorker {
 
 impl BlockingWorker {
     /// The thread [`BlockingWorker::start`] creates: 32 KB of stack (14 KB
-    /// without PSRAM, see [`HAS_PSRAM`]), pinned to core 0 below the network
+    /// without PSRAM, 16 KB with the experimental compact crypto backend),
+    /// pinned to core 0 below the network
     /// and executor threads (priority 5) so a long key batch never delays a
     /// socket read, and above idle, which the task watchdog must therefore not
-    /// check on that core. 10 KB was tried and overflowed on a heavier sync
-    /// job (the 6.7 KB watermark only covers light jobs); 14 KB stands.
+    /// check on that core. The compact curve backend constructs a local
+    /// basepoint lookup table and needs another 2 KB. QEMU measured 736 B
+    /// free with the 14 KB fast backend and 2784 B with the 16 KB compact
+    /// backend. The 512 B guard remains unchanged.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-blocking"),
-            stack_size: by_ram(32 * 1024, 14 * 1024),
+            stack_size: by_ram(
+                32 * 1024,
+                if cfg!(feature = "precomputed-crypto") {
+                    14 * 1024
+                } else {
+                    16 * 1024
+                },
+            ),
             priority: 1,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),

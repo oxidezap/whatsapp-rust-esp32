@@ -5,7 +5,7 @@
 # chip, and nothing here may assume a capability every chip does not have --
 # which since the ESP32-C3 joined includes PSRAM itself.
 
-# Flash: 16 MB on every supported board (N16R8 modules).
+# Flash default for PSRAM boards. The C3 overlay selects common 4 MiB devkits.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
 # The main task opens the 1 MB `wa_store` NVS partition and replays every record
