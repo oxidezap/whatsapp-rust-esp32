@@ -594,9 +594,18 @@ pub fn start_admin_server(
                 let task_abandoned = abandoned.clone();
                 let task_active_client = active_client.clone();
                 let task = Box::pin(bounded_admin_future(async move {
-                    let _admission = match memory_gate {
-                        Some(gate) => Some(gate.acquire().await),
-                        None => None,
+                    let _admission = match Box::pin(wait_for_send_admission(
+                        memory_gate,
+                        &client,
+                        &task_abandoned,
+                    ))
+                    .await
+                    {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            let _ = result_tx.send(Err(error.to_string()));
+                            return;
+                        }
                     };
                     if task_abandoned.load(Ordering::Acquire) {
                         warn!("Admin: send abandoned after HTTP timeout");
@@ -924,6 +933,38 @@ pub fn start_admin_server(
 
     info!("Admin server ready on port {port}");
     Ok(server)
+}
+
+// A returning login becomes connected before its background IQ burst ends.
+// On internal RAM, wait outside HTTP admission so that burst can finish before
+// the dashboard adds an outbound Signal operation to its transient allocations.
+async fn wait_for_send_admission(
+    gate: Option<crate::http_client::MemoryGate>,
+    client: &whatsapp_rust::Client,
+    abandoned: &AtomicBool,
+) -> anyhow::Result<Option<crate::http_client::MemoryPermit>> {
+    let Some(gate) = gate else { return Ok(None) };
+    let mut timer = esp_idf_svc::timer::EspTaskTimerService::new()?.timer_async()?;
+    let mut quiet_since: Option<std::time::Instant> = None;
+    loop {
+        if abandoned.load(Ordering::Acquire) || !client.is_logged_in() {
+            anyhow::bail!("send cancelled while waiting for transient-memory admission");
+        }
+        let report = Box::pin(client.memory_report()).await;
+        let quiet = report.response_waiters == 0
+            && report.app_state_syncing == 0
+            && report.inbound_chat_charged_bytes == 0;
+        drop(report);
+        if quiet {
+            let since = quiet_since.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() >= Duration::from_secs(1) {
+                return Ok(Some(gate.acquire().await));
+            }
+        } else {
+            quiet_since = None;
+        }
+        timer.after(Duration::from_millis(100)).await?;
+    }
 }
 
 // Construct the protobuf only after transient-memory admission and outside the

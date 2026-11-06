@@ -61,6 +61,20 @@ windows are 2,880 bytes (two MSS-sized segments), limiting queued network data
 while Signal persistence is active. This trades throughput for internal RAM;
 full 16 KiB TLS records are still received over multiple TCP segments.
 
+The SDK revision includes [the receive-queue storage fix](https://github.com/oxidezap/whatsapp-rust/pull/1862).
+The 512-item per-chat and 256-item ACK limits stay intact for offline delivery;
+queue slots hold pointers and allocate each entry when it arrives. On the C3,
+this reduces the empty slot arrays from 12 KiB to 4 KiB per chat, and from 7 KiB
+to 2 KiB for ACKs. Payload byte budgets and saturation handling stay intact.
+
+On the C3, `/send` waits for one second with no pending SDK IQ responses,
+app-state sync or charged inbound chat work before taking HTTP/send admission.
+Returning logins publish Connected before their background initialization ends;
+starting encryption during that burst still exhausted internal RAM. The wait
+runs without holding HTTP admission so initialization can finish, observes the existing HTTP
+cancellation flag, and keeps the existing 30-second send deadline. PSRAM targets
+retain immediate admission.
+
 The no-PSRAM client also caps idle session locks and chat lanes at 16 entries,
 and group-distribution locks at eight. The SDK's guarded eviction retains locks
 and lanes held by live tasks, even above these soft caps, so serialization stays
