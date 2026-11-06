@@ -1,10 +1,16 @@
 # Fitting the complete C3 firmware into 4 MiB flash
 
-The qualified precomputed-curve production image is **3,792,880 bytes**, down
-**395,488 bytes / 9.4%** from the 4,188,368-byte baseline. It fits the C3's
-`0x3a0000` app slot with **8,208 bytes** left. The complete layout ends at
+The current default precomputed-curve production image is **3,798,336 bytes**,
+down **390,032 bytes / 9.3%** from the 4,188,368-byte baseline. It fits the C3's
+`0x3a0000` app slot with only **2,752 bytes** left. The complete layout ends at
 4 MiB and retains a **256 KiB WhatsApp store** and **64 KiB core dump**.
-The two-device QEMU pairing, messaging and restored-session suite passed.
+The preceding precomputed configuration measured 3,792,880 bytes and passed
+three independent C3 CI runtime samples. Rebuilding against the companion
+upstream pin increased the default image by 5,456 bytes; that cause has not been
+isolated. This margin is too small to absorb routine dependency growth. The
+size gate must stay enabled. See [the current image hashes and attribution](measurements/c3-flash-default-upstream.json).
+The integrated default backend also passed the full local two-device QEMU
+suite after the rebuild, with stack and crash guards unchanged.
 Physical C3 and production gateway qualification remain pending.
 
 A companion [upstream draft](https://github.com/oxidezap/whatsapp-rust/pull/1861)
@@ -148,6 +154,15 @@ build-machine prefixes while retaining package-relative file/line locations;
 the standalone host test verifies that those coordinates remain available.
 The host location test passes; the measured image delta above includes trimming.
 
+The integrated default's 5,456-byte increase is spread across the linked graph.
+Named `core` symbols grow by 3,876 bytes, including 1,996 bytes in protobuf
+mentioning drop glue. Named client symbols grow by 782 bytes. Dalek's named
+total stays at 58,220 bytes, although `EdwardsPoint::mul_base` now has a separate
+498-byte symbol. These LTO attribution deltas do not establish a single cause.
+The largest new per-name growth and exact hashes are retained in the current
+measurement JSON. This is why target measurement must accompany dependency
+changes even when the selected crypto algorithm remains the same.
+
 The C3 CI build now measures the production firmware without `mock-server`.
 The separate QEMU build exercises the mock path. Both run the physical-flash
 size gate against the C3-specific table.
@@ -161,7 +176,7 @@ builder now uses the pinned upstream `WA_WEB_VERSION` through the supported
 `with_version` override. This is compiled only with `mock-server`; production
 version discovery is unchanged.
 
-The precomputed-backend suite used actual 4,194,304-byte flash images. It paired
+The precomputed-backend suite at `0e26579` used actual 4,194,304-byte flash images. It paired
 two independent devices, exchanged messages, reactions, edits and quoted
 replies, rebooted both with their stores intact, then repeated the exchange
 without a new QR code. Stack minima were **4,864 bytes main**, **736 bytes
@@ -175,6 +190,13 @@ Raw NVS bitmaps contained 963 and 1,005 written entry slots, plus garbage and
 unused slots. Entry slots include blob chunks and do not equal contacts or
 messages. IDF's NVS parser found no corrupt/invalid entries. This proves the
 bounded two-device workload only, not arbitrary group or contact capacity.
+
+After integrating upstream revision `975797dd`, the rebuilt default backend
+again passed the complete two-device suite and the four-peer persistence
+workload. Minimum stack headroom was 4,864 B
+main, 736 B blocking, 1,436 B NVS and 2,576 B transport. Final internal heap
+minima were 28,852 B for A and 38,240 B for B; largest free blocks were 24,576 B
+and 32,768 B. The raw per-phase results are retained below.
 
 The compact backend also completed `scripts/qemu.sh capacity 4`. A paired main
 device sent encrypted messages to four fresh peer identities, then both the main

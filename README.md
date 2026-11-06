@@ -43,9 +43,10 @@ has no PSRAM, so its ~400 KB of on-chip SRAM is the whole memory system
 [docs/esp32c3.md](docs/esp32c3.md).
 
 The C3 uses a separate 4 MiB partition table with a 256 KiB WhatsApp store and
-64 KiB core dump. The precomputed-curve production build measures 3,792,880
-bytes, down 9.4% from baseline, and passed the complete two-device QEMU suite
-and all three CI runtime samples. An experimental optional curve backend
+64 KiB core dump. The current precomputed-curve production build measures
+3,798,336 bytes, down 9.3% from baseline, with only 2,752 bytes of app margin.
+The preceding 3,792,880-byte configuration passed the complete two-device QEMU
+suite and all three CI runtime samples. An experimental optional curve backend
 reaches 3,753,776 bytes but has unresolved QEMU watchdog failures. Physical
 4 MiB hardware and production gateway qualification remain pending. See the
 [flash investigation](docs/c3-4mb-flash.md) for profiles, storage limits,
