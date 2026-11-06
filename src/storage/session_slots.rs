@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 pub(super) struct SessionSlots(RefCell<VecDeque<(String, Vec<u8>)>>);
 
 impl SessionSlots {
+    /// Distinguish uncached slots from matching keys and physical-name collisions.
     pub(super) fn matches(&self, name: &str, key: &[u8]) -> Option<bool> {
         self.0
             .borrow()
@@ -15,6 +16,7 @@ impl SessionSlots {
             .map(|(_, stored_key)| stored_key == key)
     }
 
+    /// Retain up to eight validated slots, evicting the least recently remembered.
     pub(super) fn remember(&self, name: &str, key: &[u8]) {
         let mut slots = self.0.borrow_mut();
         if let Some(index) = slots.iter().position(|(stored, _)| stored == name) {
@@ -26,6 +28,7 @@ impl SessionSlots {
         slots.push_back((name.to_owned(), key.to_vec()));
     }
 
+    /// Require fresh flash validation after a session mutation or namespace erasure.
     pub(super) fn clear(&self) {
         self.0.borrow_mut().clear();
     }
@@ -35,6 +38,7 @@ impl SessionSlots {
 mod tests {
     use super::SessionSlots;
 
+    /// A cached physical name must never authorize another logical key.
     #[test]
     fn a_colliding_name_never_validates_a_different_logical_key() {
         let slots = SessionSlots::default();
@@ -44,6 +48,7 @@ mod tests {
         assert_eq!(slots.matches("collision", b"second"), Some(false));
     }
 
+    /// Eviction and invalidation remove the authority to bypass flash validation.
     #[test]
     fn eviction_and_invalidation_require_flash_validation_again() {
         let slots = SessionSlots::default();

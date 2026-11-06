@@ -67,12 +67,15 @@ queue slots hold pointers and allocate each entry when it arrives. On the C3,
 this reduces the empty slot arrays from 12 KiB to 4 KiB per chat, and from 7 KiB
 to 2 KiB for ACKs. Payload byte budgets and saturation handling stay intact.
 
-On the C3, `/send` waits for one second with no pending SDK IQ responses,
+On the C3, `/send` prefers one second with no pending SDK IQ responses,
 app-state sync or charged inbound chat work before taking HTTP/send admission.
 Returning logins publish Connected before their background initialization ends;
 starting encryption during that burst still exhausted internal RAM. The wait
-runs without holding HTTP admission so initialization can finish, observes the existing HTTP
-cancellation flag, and keeps the existing 30-second send deadline. PSRAM targets
+runs without holding HTTP admission so initialization can finish. After five
+seconds it proceeds to the shared gate even if inbound traffic stays active.
+Its async timer is allocated when the admin server starts, before login. The
+wait observes the existing HTTP cancellation flag and login state, and keeps
+the existing 30-second send deadline. PSRAM targets
 retain immediate admission.
 
 The no-PSRAM client also caps idle session locks and chat lanes at 16 entries,

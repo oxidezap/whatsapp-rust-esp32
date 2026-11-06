@@ -687,6 +687,8 @@ async fn run_whatsapp(
 /// that saw the ban to the supervisor that sleeps it off.
 static TEMPORARY_BAN_WAIT: AtomicU32 = AtomicU32::new(0);
 
+/// Build and run one client generation with board-sized caches and admission.
+/// Return its terminal outcome so the supervisor can preserve or clear state.
 async fn run_whatsapp_inner(
     runtime: Esp32Runtime,
     backend: Arc<NvsStore>,

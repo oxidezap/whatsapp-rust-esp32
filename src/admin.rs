@@ -11,6 +11,8 @@ use whatsapp_rust::prelude::wa;
 use whatsapp_rust::serde_json;
 use whatsapp_rust::Jid;
 
+mod send_admission;
+
 use crate::runtime::BoxedTask;
 use crate::storage::NvsStore;
 use crate::supervisor::{
@@ -432,6 +434,8 @@ fn queue_maintenance(
     json_response_status(req, 202, accepted)
 }
 
+/// Start the dashboard and register authenticated maintenance and send routes.
+/// Allocate the no-PSRAM admission timer before the client starts connecting.
 pub fn start_admin_server(
     store: Arc<NvsStore>,
     device_status: Arc<DeviceStatus>,
@@ -549,6 +553,15 @@ pub fn start_admin_server(
         let auth = auth.clone();
         let active_client = active_client.clone();
         let task_tx = task_tx.clone();
+        // Allocate the async timer while starting httpd, before the client and
+        // its startup IQ burst can consume the C3's transient heap.
+        let admission = active_client
+            .memory_gate()
+            .map(|gate| {
+                let timer = esp_idf_svc::timer::EspTaskTimerService::new()?.timer_async()?;
+                Ok::<_, esp_idf_svc::sys::EspError>((gate, Arc::new(async_lock::Mutex::new(timer))))
+            })
+            .transpose()?;
         server.fn_handler::<anyhow::Error, _>(
             "/send",
             esp_idf_svc::http::Method::Post,
@@ -588,14 +601,14 @@ pub fn start_admin_server(
                 }
 
                 let text = text.to_string();
-                let memory_gate = active_client.memory_gate();
+                let admission = admission.clone();
                 let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                 let abandoned = Arc::new(AtomicBool::new(false));
                 let task_abandoned = abandoned.clone();
                 let task_active_client = active_client.clone();
                 let task = Box::pin(bounded_admin_future(async move {
                     let _admission = match Box::pin(wait_for_send_admission(
-                        memory_gate,
+                        admission,
                         &client,
                         &task_abandoned,
                     ))
@@ -935,33 +948,38 @@ pub fn start_admin_server(
     Ok(server)
 }
 
-// A returning login becomes connected before its background IQ burst ends.
-// On internal RAM, wait outside HTTP admission so that burst can finish before
-// the dashboard adds an outbound Signal operation to its transient allocations.
+/// Prefer one quiet second after login, but bound the wait under continuous
+/// traffic. HTTP and demo sends still share the gate after this startup grace.
 async fn wait_for_send_admission(
-    gate: Option<crate::http_client::MemoryGate>,
+    admission: Option<(
+        crate::http_client::MemoryGate,
+        Arc<async_lock::Mutex<esp_idf_svc::timer::EspAsyncTimer>>,
+    )>,
     client: &whatsapp_rust::Client,
     abandoned: &AtomicBool,
 ) -> anyhow::Result<Option<crate::http_client::MemoryPermit>> {
-    let Some(gate) = gate else { return Ok(None) };
-    let mut timer = esp_idf_svc::timer::EspTaskTimerService::new()?.timer_async()?;
-    let mut quiet_since: Option<std::time::Instant> = None;
+    let Some((gate, timer)) = admission else {
+        return Ok(None);
+    };
+    let mut timer = timer.lock().await;
+    let mut quiet_period = send_admission::QuietPeriod::new(std::time::Instant::now());
     loop {
         if abandoned.load(Ordering::Acquire) || !client.is_logged_in() {
             anyhow::bail!("send cancelled while waiting for transient-memory admission");
         }
+        // The pinned SDK exposes these private counters only in this report.
         let report = Box::pin(client.memory_report()).await;
         let quiet = report.response_waiters == 0
             && report.app_state_syncing == 0
             && report.inbound_chat_charged_bytes == 0;
         drop(report);
-        if quiet {
-            let since = quiet_since.get_or_insert_with(std::time::Instant::now);
-            if since.elapsed() >= Duration::from_secs(1) {
-                return Ok(Some(gate.acquire().await));
+        if quiet_period.ready(std::time::Instant::now(), quiet) {
+            drop(timer);
+            let permit = gate.acquire().await;
+            if abandoned.load(Ordering::Acquire) || !client.is_logged_in() {
+                anyhow::bail!("send cancelled while waiting for transient-memory admission");
             }
-        } else {
-            quiet_since = None;
+            return Ok(Some(permit));
         }
         timer.after(Duration::from_millis(100)).await?;
     }

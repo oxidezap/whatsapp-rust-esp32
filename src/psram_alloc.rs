@@ -32,6 +32,7 @@ use esp_idf_svc::sys;
 /// See the module documentation.
 pub struct PsramAllocator;
 
+/// Choose byte-accessible PSRAM, unicore RV32IMC RTC RAM, or the default heap.
 fn preferred_caps() -> u32 {
     if cfg!(esp_idf_spiram) {
         return sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT;
@@ -44,6 +45,7 @@ fn preferred_caps() -> u32 {
 }
 
 unsafe impl GlobalAlloc for PsramAllocator {
+    /// Honor the requested alignment and fall back when the preferred heap is full.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // aligned_alloc honors any power-of-two alignment Layout yields (plain
         // heap_caps_malloc only guarantees word alignment, too weak for align>4 types).
@@ -68,6 +70,7 @@ unsafe impl GlobalAlloc for PsramAllocator {
         unsafe { sys::heap_caps_free(ptr as *mut core::ffi::c_void) };
     }
 
+    /// Resize in place when alignment permits, preserving the old block on failure.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // The default `realloc` is alloc + memcpy + free. TLSF can grow a block in
         // place (or absorb the free neighbour), and the receive path grows `Vec<u8>`

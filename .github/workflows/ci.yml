@@ -181,7 +181,13 @@ jobs:
         run: ${{ matrix.build }}
 
       - name: Verify committed component locks
-        run: git diff --exit-code -- 'components_*.lock'
+        run: |
+          git diff --exit-code -- 'components_*.lock'
+          untracked=$(git ls-files --others --exclude-standard -- 'components_*.lock')
+          if [ -n "$untracked" ]; then
+            printf 'Untracked component locks:\n%s\n' "$untracked"
+            exit 1
+          fi
 
       # Four configurations the board builds never compile: the library alone
       # without any feature (how a product firmware consumes it), the demo without

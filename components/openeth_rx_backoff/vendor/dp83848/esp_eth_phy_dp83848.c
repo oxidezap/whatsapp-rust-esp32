@@ -67,6 +67,7 @@ typedef struct {
     phy_802_3_t phy_802_3;
 } phy_dp83848_t;
 
+/** @brief Read PHY link and negotiation registers and notify the Ethernet mediator of changes. */
 static esp_err_t dp83848_update_link_duplex_speed(phy_dp83848_t *dp83848)
 {
     esp_err_t ret = ESP_OK;
@@ -114,6 +115,7 @@ err:
     return ret;
 }
 
+/** @brief Refresh link state through the DP83848-specific status registers. */
 static esp_err_t dp83848_get_link(esp_eth_phy_t *phy)
 {
     esp_err_t ret = ESP_OK;
@@ -125,6 +127,7 @@ err:
     return ret;
 }
 
+/** @brief Delegate autonegotiation, rejecting enable requests while loopback is active. */
 static esp_err_t dp83848_autonego_ctrl(esp_eth_phy_t *phy, eth_phy_autoneg_cmd_t cmd, bool *autonego_en_stat)
 {
     esp_err_t ret = ESP_OK;
@@ -140,6 +143,7 @@ err:
     return ret;
 }
 
+/** @brief Configure loopback, rejecting enable requests while autonegotiation is active. */
 static esp_err_t dp83848_loopback(esp_eth_phy_t *phy, bool enable)
 {
     esp_err_t ret = ESP_OK;
@@ -152,6 +156,7 @@ err:
     return ret;
 }
 
+/** @brief Initialize the generic PHY and verify the DP83848 vendor and model identifiers. */
 static esp_err_t dp83848_init(esp_eth_phy_t *phy)
 {
     esp_err_t ret = ESP_OK;
@@ -172,6 +177,7 @@ err:
     return ret;
 }
 
+/** @brief Create a DP83848 PHY instance, or return NULL for invalid configuration or allocation failure. */
 esp_eth_phy_t *esp_eth_phy_new_dp83848(const eth_phy_config_t *config)
 {
     esp_eth_phy_t *ret = NULL;

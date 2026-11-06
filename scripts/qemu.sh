@@ -77,6 +77,7 @@ nvs_python() {
 
 flash_image() { echo "$OUT_DIR/flash_image-$1.bin"; }
 
+# Build the selected QEMU board with isolated outputs and shared ESP-IDF tools.
 cmd_build() {
     # A separate target dir keeps this build's ESP-IDF configuration (the overlay
     # changes sdkconfig, which reconfigures esp-idf-sys) from clobbering the board
@@ -122,6 +123,7 @@ CSV
     echo "$out"
 }
 
+# Assemble firmware and provisioning partitions into a named flash image.
 cmd_image() {
     local name="${1:-a}"
     # esp-idf-sys drops the second-stage bootloader and the partition table next to
@@ -272,6 +274,7 @@ check_crashes() {
     done
 }
 
+# Print the serial lines around the first connection or allocation failure.
 connection_context() {
     local serial="$1" line from
     line=$(grep -n -m1 -E 'failed:|Failed to connect:|TLS connect failed:|WS send error:|Dynamic Impl:.*failed|memory allocation of' "$serial" | cut -d: -f1) || true

@@ -36,6 +36,8 @@ use whatsapp_rust::wacore::store::error::{Result, StoreError};
 use whatsapp_rust::wacore::store::traits::*;
 use whatsapp_rust::wacore::store::Device;
 
+#[cfg(test)]
+mod invalidation_tests;
 mod session_slots;
 use session_slots::SessionSlots;
 
@@ -290,6 +292,7 @@ struct StoreInner {
 }
 
 impl FlashNamespaces {
+    /// Open durable record namespaces and start with no validated session slots.
     fn open(partition: EspCustomNvsPartition) -> anyhow::Result<Self> {
         Ok(Self {
             control: EspNvs::new(partition.clone(), "control", true)?,
@@ -304,6 +307,7 @@ impl FlashNamespaces {
         })
     }
 
+    /// Cache only validated session names and logical keys, never payloads.
     fn remember_session_slot(&self, namespace: &EspCustomNvs, name: &str, key: &[u8]) {
         if namespace.handle() != self.sessions.handle() {
             return;
@@ -452,6 +456,7 @@ impl FlashNamespaces {
         Ok(())
     }
 
+    /// Validate the logical key and size, then reuse the NVS buffer for its payload.
     fn load_record(
         &self,
         namespace: &EspCustomNvs,
@@ -497,6 +502,8 @@ impl FlashNamespaces {
             .map_err(|error| StoreError::Serialization(Box::new(error)))
     }
 
+    /// Validate record bounds, collisions and durable capacity before a write.
+    /// Cached session slots may skip flash reads only until the next erasure.
     fn check_record_slot(
         &self,
         namespace: &EspCustomNvs,
@@ -579,6 +586,8 @@ impl FlashNamespaces {
         set_blob(namespace, &name, &record)
     }
 
+    /// Invalidate session metadata before deleting a matching durable record.
+    /// Missing keys are harmless; physical-name collisions remain errors.
     fn delete_record(
         &self,
         namespace: &EspCustomNvs,
@@ -626,6 +635,7 @@ impl FlashNamespaces {
         Ok(false)
     }
 
+    /// Invalidate cached session slots and erase all durable Signal namespaces.
     fn erase_signal(&self) -> Result<()> {
         self.validated_sessions.clear();
         // Belongs with the keys it names, so it goes when they do.
