@@ -11,6 +11,8 @@ use whatsapp_rust::prelude::wa;
 use whatsapp_rust::serde_json;
 use whatsapp_rust::Jid;
 
+mod send_admission;
+
 use crate::runtime::BoxedTask;
 use crate::storage::NvsStore;
 use crate::supervisor::{
@@ -432,6 +434,9 @@ fn queue_maintenance(
     json_response_status(req, 202, accepted)
 }
 
+/// Start the dashboard and register authenticated maintenance and send routes.
+/// Allocate the no-PSRAM admission timer before the client starts connecting.
+/// Keep read and maintenance routes available if that allocation fails.
 pub fn start_admin_server(
     store: Arc<NvsStore>,
     device_status: Arc<DeviceStatus>,
@@ -549,6 +554,17 @@ pub fn start_admin_server(
         let auth = auth.clone();
         let active_client = active_client.clone();
         let task_tx = task_tx.clone();
+        // Allocate the async timer while starting httpd, before the client and
+        // its startup IQ burst can consume the C3's transient heap.
+        let admission = active_client.memory_gate().map(|gate| {
+            let timer = esp_idf_svc::timer::EspTaskTimerService::new()
+                .and_then(|service| service.timer_async())
+                .map(|timer| Arc::new(async_lock::Mutex::new(timer)));
+            if let Err(error) = &timer {
+                warn!("Admin: send admission unavailable: {error}; other routes remain available");
+            }
+            (gate, timer.ok())
+        });
         server.fn_handler::<anyhow::Error, _>(
             "/send",
             esp_idf_svc::http::Method::Post,
@@ -556,6 +572,13 @@ pub fn start_admin_server(
                 info!("Admin: POST /send received");
                 if let Err((status, body)) = auth.check(&req) {
                     return json_response_status(req, status, body);
+                }
+                if admission.as_ref().is_some_and(|(_, timer)| timer.is_none()) {
+                    return json_response_status(
+                        req,
+                        503,
+                        r#"{"error":"Send admission unavailable; reboot to retry"}"#,
+                    );
                 }
                 let value = match read_json_body(&mut req, 2048) {
                     Ok(value) => value,
@@ -588,15 +611,24 @@ pub fn start_admin_server(
                 }
 
                 let text = text.to_string();
-                let memory_gate = active_client.memory_gate();
+                let admission = admission.clone();
                 let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                 let abandoned = Arc::new(AtomicBool::new(false));
                 let task_abandoned = abandoned.clone();
                 let task_active_client = active_client.clone();
                 let task = Box::pin(bounded_admin_future(async move {
-                    let _admission = match memory_gate {
-                        Some(gate) => Some(gate.acquire().await),
-                        None => None,
+                    let _admission = match Box::pin(wait_for_send_admission(
+                        admission,
+                        &client,
+                        &task_abandoned,
+                    ))
+                    .await
+                    {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            let _ = result_tx.send(Err(error.to_string()));
+                            return;
+                        }
                     };
                     if task_abandoned.load(Ordering::Acquire) {
                         warn!("Admin: send abandoned after HTTP timeout");
@@ -924,6 +956,52 @@ pub fn start_admin_server(
 
     info!("Admin server ready on port {port}");
     Ok(server)
+}
+
+/// Prefer one quiet second after login, but bound the wait under continuous
+/// traffic. HTTP and demo sends still share the gate after this startup grace.
+async fn wait_for_send_admission(
+    admission: Option<(
+        crate::http_client::MemoryGate,
+        Option<Arc<async_lock::Mutex<esp_idf_svc::timer::EspAsyncTimer>>>,
+    )>,
+    client: &whatsapp_rust::Client,
+    abandoned: &AtomicBool,
+) -> anyhow::Result<Option<crate::http_client::MemoryPermit>> {
+    let Some((gate, timer)) = admission else {
+        return Ok(None);
+    };
+    let timer = timer.ok_or_else(|| anyhow::anyhow!("send admission unavailable"))?;
+    let mut timer = timer.lock().await;
+    let mut quiet_period = send_admission::QuietPeriod::new(std::time::Instant::now());
+    loop {
+        if abandoned.load(Ordering::Acquire) || !client.is_logged_in() {
+            anyhow::bail!("send cancelled while waiting for transient-memory admission");
+        }
+        // The pinned SDK exposes these private counters only in this report.
+        let report = Box::pin(client.memory_report()).await;
+        let quiet = report.response_waiters == 0
+            && report.app_state_syncing == 0
+            && report.inbound_chat_charged_bytes == 0;
+        drop(report);
+        if quiet_period.ready(std::time::Instant::now(), quiet) {
+            break;
+        }
+        timer.after(Duration::from_millis(100)).await?;
+    }
+    let ticks = futures::stream::unfold(&mut *timer, |timer| async move {
+        let result = timer.after(Duration::from_millis(100)).await;
+        Some((result, timer))
+    });
+    let permit = send_admission::acquire_cancellable(
+        gate.acquire(),
+        || abandoned.load(Ordering::Acquire) || !client.is_logged_in(),
+        ticks,
+    )
+    .await?;
+    permit.map(Some).ok_or_else(|| {
+        anyhow::anyhow!("send cancelled while waiting for transient-memory admission")
+    })
 }
 
 // Construct the protobuf only after transient-memory admission and outside the

@@ -24,9 +24,9 @@ the same linked device.
 
 | Board | Chip | Flash / PSRAM | ESP-IDF | Build |
 |-------|------|---------------|---------|-------|
-| ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v5.5.5 | `cargo build --release --features mock-server` |
-| [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v5.5.5 | `scripts/build.sh --board esp32c5 --release --features mock-server` |
-| ESP32-C3, 16 MB flash | RISC-V, single core | 16 MB / none | v5.5.5 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
+| ESP32-S3 N16R8 devkit | Xtensa LX7, dual core | 16 MB / 8 MB octal | v6.1 | `cargo build --release --features mock-server` |
+| [Waveshare ESP32-C5-Touch-LCD-2.8](https://github.com/waveshareteam/ESP32-C5-Touch-LCD-2.8) N16R8 | RISC-V, single core | 16 MB / 8 MB quad | v6.1 | `scripts/build.sh --board esp32c5 --release --features mock-server` |
+| ESP32-C3, 16 MB flash | RISC-V, single core | 16 MB / none | v6.1 | `scripts/build.sh --board esp32c3 --release --features mock-server` |
 
 Same source and same ESP-IDF on all three. A board is one row in
 [`scripts/boards.sh`](scripts/boards.sh) plus one `sdkconfig.defaults.<chip>`
@@ -76,9 +76,9 @@ No wrapper around `Bot` and no ESP32 event type. You write the same
 # Both from git, at the same whatsapp-rust revision this crate's Cargo.toml
 # names. Two different whatsapp_rust copies in one build would hand the Bot
 # builder trait objects the platform types do not implement.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "e14300d18da6b0446e77b4777027b6ebbe995c03", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "7e5c198e1a25ea405faa7a69a47bc727ea15484c", default-features = false }
 whatsapp-esp32 = { git = "https://github.com/oxidezap/whatsapp-rust-esp32", default-features = false }
-esp-idf-svc = { version = "0.52", features = ["binstart", "critical-section"] }
+esp-idf-svc = { version = "0.53", features = ["binstart", "critical-section"] }
 anyhow = "1"
 log = "0.4"
 ```
@@ -179,13 +179,17 @@ One upstream dependency is enough since `whatsapp-rust` 0.7.0. It re-exports
 of sync. Pin the same git revision this crate names, with
 `default-features = false` to drop the desktop-only pieces (tokio, SQLite,
 ureq, SIMD). `anyhow` and `futures` stay direct because this crate needs feature
-flags on them that `whatsapp-rust` does not enable. Needs Rust 1.94 or newer.
+flags on them that `whatsapp-rust` does not enable. Needs Rust 1.95 or newer.
 
 ## Prerequisites
 
-- `cargo install espup && espup install` (`rust-toolchain.toml` pins the `esp` channel).
-- `cargo install ldproxy` and `cargo install espflash`.
-- ESP-IDF v5.5.5, fetched and built by `esp-idf-sys` on the first build into
+- `cargo install espup --version 0.19.0 --locked && espup install --toolchain-version 1.98.1.0` (`rust-toolchain.toml` selects the `esp` channel).
+  The Xtensa 1.98.1.0 release is a prerelease, as was the previous 1.98.0.0 pin.
+  The newer 1.99.0.0 release fails while building `std` for ESP-IDF because
+  `libc::AT_FDCWD` is missing, before compiling any firmware code.
+- `cargo install ldproxy --version 0.3.5 --locked` and
+  `cargo install espflash --version 4.7.0 --locked`.
+- ESP-IDF v6.1, fetched and built by `esp-idf-sys` on the first build into
   `.embuild/`. A few GB, reused afterwards.
 - Host tools: `git`, `python3`, `cmake`, `ninja`, `clang`.
 
@@ -312,7 +316,7 @@ curl -sSfL -o qemu-riscv32.tar.xz "$R/qemu-riscv32-softmmu-$V.tar.xz"
 mkdir -p ~/qemu-riscv32 && tar -xJf qemu-riscv32.tar.xz -C ~/qemu-riscv32
 export QEMU_RISCV32=~/qemu-riscv32/qemu/bin/qemu-system-riscv32
 # both need libsdl2, libslirp, glib and pixman at runtime
-pip install esptool esp-idf-nvs-partition-gen   # the ESP-IDF python env under .embuild already has both
+pip install esptool==5.6.0 esp-idf-nvs-partition-gen==0.3.0   # the ESP-IDF python env under .embuild already has both
 
 scripts/qemu.sh build      # release + `qemu` feature + sdkconfig.qemu, into target/qemu-esp32s3/
 BOARD=esp32c3 scripts/qemu.sh all   # same, end to end, on the emulated C3
@@ -333,7 +337,9 @@ server are remapped there too, and the dashboard forwards to
 `http://localhost:8081` (`b` gets 8082). `sdkconfig.qemu` enables the OpenCores
 driver, switches the PSRAM probe to quad mode, and moves AES and SHA to
 software because the emulated AES block never finishes a DMA transfer. Heap
-routing and stacks stay as on hardware.
+routing and stacks stay as on hardware. The C3 uses QEMU instruction counting
+for its guest clock so host scheduling delays do not trip the guest interrupt
+watchdog; the test script keeps its wall-clock deadlines.
 
 `QEMU_GDB=1 scripts/qemu.sh run` halts the CPUs with a gdb stub on port 1234.
 Attach `xtensa-esp32s3-elf-gdb` for a backtrace of every FreeRTOS task, which
@@ -503,8 +509,9 @@ xtensa-esp32s3-elf-addr2line -fCe target/xtensa-esp32s3-espidf/debug/whatsapp-es
   are set, then rebuild and reflash.
 - `AtomicU64` link errors from a dependency: Xtensa has no 64-bit atomics.
   Dependencies must use `portable_atomic`; this project pins it with `fallback`.
-- ESP-IDF build fails on new host toolchains: v5.5.5 wants cmake < 4 and
-  Python <= 3.12 (or 3.14 under the venv esp-idf-sys provisions).
+- ESP-IDF build fails on new host toolchains: use the tools selected by
+  ESP-IDF v6.1 in `.embuild/espressif` (including CMake 4.0.3). Local builds
+  were checked with Python 3.12 and the virtual environment from `esp-idf-sys`.
 - `Failed to open WhatsApp NVS ... rebooting to retry` in a loop: the
   `wa_store` partition is unreadable, usually a partition table from before it
   existed. The firmware never erases it on its own, since that would silently

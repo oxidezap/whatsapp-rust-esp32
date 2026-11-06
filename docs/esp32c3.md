@@ -16,11 +16,12 @@ This is what the port had to change, and what it did not.
 ## The one switch everything hangs off
 
 `CONFIG_SPIRAM` in the sdkconfig. esp-idf-sys turns it into the `esp_idf_spiram`
-cfg, and the firmware reads it in exactly three places:
+cfg, and the firmware uses it to select heap, stack and buffer budgets:
 
 | Where | With PSRAM | Without |
 | --- | --- | --- |
-| `src/main.rs`, `examples/minimal.rs` | install `PsramAllocator` | plain ESP-IDF allocator |
+| `src/main.rs` | install `PsramAllocator` | install the capability-aware allocator, preferring RTC heap on unicore RV32IMC |
+| `examples/minimal.rs` | opt into `PsramAllocator` | use the default ESP-IDF allocator |
 | `runtime::stack_caps` | `MallocCap::Spiram` | `MallocCap::Internal` |
 | `runtime::by_ram(a, b)` | `a` | `b` |
 
@@ -35,8 +36,8 @@ C3 differs from the others in the deepest possible way.
 
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
-| `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 36 KB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=36864`; measured peak 30.4 KB. `default_thread_config`'s 32 KB no-PSRAM arm is what library consumers get. |
-| `wa-blocking` worker stack | 32 KB | 14 KB | Prekey batches: CPU-bound, not deep. Measured peak 3,404 B. |
+| `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 40 KiB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960`; preserve the 2,048-byte E2E floor. Library consumers retain the conservative 48 KiB thread default. |
+| `wa-blocking` worker stack | 32 KB | 16 KiB | The current SDK left only 152 bytes unused on the old 14 KiB stack during sync/messaging. Preserve the 512-byte E2E floor. |
 | `ws-transport` stack | 16 KB | 6 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
 | `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
 | WebSocket frame / message cap | 16 MiB / 64 MiB | 32 KB / 32 KB | Above the largest legitimate message (28,204 B). Refused from the frame header, before any allocation. See below. |
@@ -51,11 +52,51 @@ message the server actually sends, and the session count is what the dashboard
 and the QEMU suite actually use.
 
 Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack grows from
-32 KB to 36 KB (it hosts the executor directly on the C3 instead of spawning a
-separate `wa-main` thread; measured peak 30.4 KB), the default pthread stack
+32 KB to 40 KiB (it hosts the executor directly on the C3 instead of spawning a
+separate `wa-main` thread), the default pthread stack
 drops from 32 KB to 8 KB, the Wi-Fi buffer counts from 10/32/32 to 4/8/8, and
-mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KB in, 4 KB
-out) since it can no longer allocate from external memory.
+mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KiB in, 512 B
+out) since it can no longer allocate from external memory. TCP send and receive
+windows are 2,880 bytes (two MSS-sized segments), limiting queued network data
+while Signal persistence is active. This trades throughput for internal RAM;
+full 16 KiB TLS records are still received over multiple TCP segments.
+
+The SDK revision includes [the receive-queue storage fix](https://github.com/oxidezap/whatsapp-rust/pull/1862).
+The 512-item per-chat and 256-item ACK limits stay intact for offline delivery;
+queue slots hold pointers and allocate each entry when it arrives. On the C3,
+this reduces the empty slot arrays from 12 KiB to 4 KiB per chat, and from 7 KiB
+to 2 KiB for ACKs. Payload byte budgets and saturation handling stay intact.
+
+On the C3, `/send` prefers one second with no pending SDK IQ responses,
+app-state sync or charged inbound chat work before taking HTTP/send admission.
+Returning logins publish Connected before their background initialization ends;
+starting encryption during that burst still exhausted internal RAM. The wait
+runs without holding HTTP admission so initialization can finish. After five
+seconds it proceeds to the shared gate even if inbound traffic stays active.
+Its async timer is allocated when the admin server starts, before login. The
+wait observes the existing HTTP cancellation flag and login state, including
+while queued at the gate, and keeps the existing 30-second send deadline. If
+timer initialization fails, only `/send` becomes unavailable with HTTP 503;
+read and maintenance routes remain available. PSRAM targets
+retain immediate admission.
+
+The no-PSRAM client also caps idle session locks and chat lanes at 16 entries,
+and group-distribution locks at eight. The SDK's guarded eviction retains locks
+and lanes held by live tasks, even above these soft caps, so serialization stays
+intact during a burst. This bounds coordination metadata without discarding
+persisted Signal sessions. TLS output uses the smaller local record size while
+WebSocket writes remain fragmented; the peer may still send a full 16 KiB record.
+
+On unicore RV32IMC, Rust allocations prefer the byte-accessible RTC FAST heap
+before falling back to the default heap. FreeRTOS stacks and DMA keep their
+explicit memory capabilities. NVS reads validate the existing record envelope,
+then compact the payload inside that same allocation instead of allocating a
+second payload buffer; the stored format is unchanged. The flash worker also
+remembers at most eight validated session slot names and their full logical
+keys. Rewriting an existing session can then check for a collision without
+loading its old payload alongside the replacement. Deletion and namespace
+erasure invalidate this metadata before changing flash; cache misses still
+validate the complete stored record and enforce the durable namespace budget.
 
 `wa-nvs` is the one stack that is internal DRAM on *every* board -- writing flash
 disables the cache, so a stack in PSRAM would fault mid-write -- which makes it
@@ -460,8 +501,8 @@ in exactly that block, that is the lever the measurement points at.
 That pass landed as the `now` column above, and a third pass followed: the
 executor moved onto the 36 KB IDF main task (no `wa-main` thread on the C3),
 `wa-blocking` to 14 KB, `ws-transport` to 6 KB, `wa-nvs` to 4 KB, admin
-sessions to 2. The `by_ram` table at the top of this document is that final
-state; the `now` columns in the round tables above are history.
+sessions to 2. Those figures describe that earlier pass. The current budgets
+are in the `by_ram` table above; the round tables are historical measurements.
 
 If it turns out not to be enough, the next move is upstream rather than another
 resize here: decoding the props response without materialising a second

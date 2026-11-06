@@ -52,8 +52,12 @@ CONFIG_ESP_WIFI_NVS_ENABLED=y
 # the ESP-IDF default and leaves the gateway's TLS socket, DNS and SNTP room
 # beside it.
 CONFIG_LWIP_MAX_SOCKETS=10
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
-CONFIG_LWIP_TCP_WND_DEFAULT=5760
+# Two MSS-sized segments per direction. Four retained segments per socket
+# compete with Signal flushes until OpenETH cannot allocate an RX frame and
+# a TLS write times out waiting for an ACK. TCP still streams full TLS records;
+# this bounds in-flight bytes rather than reducing the TLS receive record cap.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2880
+CONFIG_LWIP_TCP_WND_DEFAULT=2880
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
@@ -75,7 +79,9 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 # the extension and neither peer here does.
 CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
-CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+# Writes are fragmented locally; keep peer receive compatibility at 16 KiB.
+# The dynamic TLS allocator reserves this maximum even for tiny control writes.
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=512
 
 # Trim ciphersuites and features the WhatsApp gateway and the mock server never
 # negotiate. Each one is code in flash and, for the key exchanges, peak RAM
@@ -83,14 +89,10 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=n
 CONFIG_MBEDTLS_DES_C=n
 CONFIG_MBEDTLS_CAMELLIA_C=n
-CONFIG_MBEDTLS_BLOWFISH_C=n
-CONFIG_MBEDTLS_XTEA_C=n
 CONFIG_MBEDTLS_CCM_C=n
 CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK=n
 CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=n
-CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK=n
 CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_PSK=n
-CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_RSA=n
 
 # --- Crash reporting --------------------------------------------------------
 # With no PSRAM, no task stack can be in external memory, so ESP_COREDUMP_USE_STACK_SIZE

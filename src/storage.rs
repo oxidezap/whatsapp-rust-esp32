@@ -36,6 +36,11 @@ use whatsapp_rust::wacore::store::error::{Result, StoreError};
 use whatsapp_rust::wacore::store::traits::*;
 use whatsapp_rust::wacore::store::Device;
 
+#[cfg(test)]
+mod invalidation_tests;
+mod session_slots;
+use session_slots::SessionSlots;
+
 const RECORD_MAGIC: &[u8; 3] = b"WA1";
 const RECORD_HEADER_LEN: usize = 5;
 const MAX_LOGICAL_KEY_LEN: usize = 512;
@@ -73,6 +78,9 @@ struct FlashNamespaces {
     signed_prekeys: EspCustomNvs,
     sender_keys: EspCustomNvs,
     sync_keys: EspCustomNvs,
+    // Only validated names and keys, never Signal payloads. All flash access
+    // is serialized by the worker (or startup before the worker exists).
+    validated_sessions: SessionSlots,
 }
 
 type FlashJob = Box<dyn FnOnce(&FlashNamespaces) + Send>;
@@ -284,6 +292,7 @@ struct StoreInner {
 }
 
 impl FlashNamespaces {
+    /// Open durable record namespaces and start with no validated session slots.
     fn open(partition: EspCustomNvsPartition) -> anyhow::Result<Self> {
         Ok(Self {
             control: EspNvs::new(partition.clone(), "control", true)?,
@@ -294,7 +303,16 @@ impl FlashNamespaces {
             signed_prekeys: EspNvs::new(partition.clone(), "signedpre", true)?,
             sender_keys: EspNvs::new(partition.clone(), "senderkey", true)?,
             sync_keys: EspNvs::new(partition, "synckey", true)?,
+            validated_sessions: SessionSlots::default(),
         })
+    }
+
+    /// Cache only validated session names and logical keys, never payloads.
+    fn remember_session_slot(&self, namespace: &EspCustomNvs, name: &str, key: &[u8]) {
+        if namespace.handle() != self.sessions.handle() {
+            return;
+        }
+        self.validated_sessions.remember(name, key);
     }
 
     fn load_device(&self) -> Result<Option<Device>> {
@@ -438,6 +456,7 @@ impl FlashNamespaces {
         Ok(())
     }
 
+    /// Validate the logical key and size, then reuse the NVS buffer for its payload.
     fn load_record(
         &self,
         namespace: &EspCustomNvs,
@@ -445,7 +464,7 @@ impl FlashNamespaces {
         max_value_len: usize,
     ) -> Result<Option<Vec<u8>>> {
         let name = record_name(logical_key);
-        let Some(record) = read_blob(
+        let Some(mut record) = read_blob(
             namespace,
             &name,
             RECORD_HEADER_LEN + MAX_LOGICAL_KEY_LEN + max_value_len,
@@ -463,7 +482,15 @@ impl FlashNamespaces {
                 value.len()
             )));
         }
-        Ok(Some(value.to_vec()))
+        self.remember_session_slot(namespace, &name, logical_key);
+        // Reuse the owned NVS buffer. A second payload allocation can fail
+        // while the SDK is serializing another session during a reply/edit.
+        let payload_len = value.len();
+        let payload_start = record.len() - payload_len;
+        record.copy_within(payload_start.., 0);
+        record.truncate(payload_len);
+        record.shrink_to_fit();
+        Ok(Some(record))
     }
 
     fn load_sync_key(&self, key_id: &[u8]) -> Result<Option<AppStateSyncKey>> {
@@ -475,6 +502,8 @@ impl FlashNamespaces {
             .map_err(|error| StoreError::Serialization(Box::new(error)))
     }
 
+    /// Validate record bounds, collisions and durable capacity before a write.
+    /// Cached session slots may skip flash reads only until the next erasure.
     fn check_record_slot(
         &self,
         namespace: &EspCustomNvs,
@@ -496,6 +525,19 @@ impl FlashNamespaces {
             )));
         }
         let name = record_name(logical_key);
+        if namespace.handle() == self.sessions.handle() {
+            if let Some(matches) = self.validated_sessions.matches(&name, logical_key) {
+                if !matches {
+                    return Err(StoreError::Validation(format!(
+                        "{label} NVS key collision at '{name}'"
+                    )));
+                }
+                // This existing slot was read and validated in this process.
+                // Avoid loading the entire old session alongside the SDK's
+                // serialized replacement merely to compare its logical key.
+                return Ok(name);
+            }
+        }
         let existing = read_blob(
             namespace,
             &name,
@@ -508,6 +550,7 @@ impl FlashNamespaces {
                     "{label} NVS key collision at '{name}'"
                 )));
             }
+            self.remember_session_slot(namespace, &name, logical_key);
         } else {
             // RAM mirrors can evict records. The durable namespace owns the
             // budget, otherwise a C3 can write a store it cannot reopen.
@@ -543,12 +586,18 @@ impl FlashNamespaces {
         set_blob(namespace, &name, &record)
     }
 
+    /// Invalidate session metadata before deleting a matching durable record.
+    /// Missing keys are harmless; physical-name collisions remain errors.
     fn delete_record(
         &self,
         namespace: &EspCustomNvs,
         logical_key: &[u8],
         label: &str,
     ) -> Result<()> {
+        // Invalidate before mutation, including failures with a persisted prefix.
+        if namespace.handle() == self.sessions.handle() {
+            self.validated_sessions.clear();
+        }
         let name = record_name(logical_key);
         // Deleting an absent record is a no-op (Signal and prekey teardown
         // call delete for keys that were never stored), and must not commit:
@@ -586,7 +635,9 @@ impl FlashNamespaces {
         Ok(false)
     }
 
+    /// Invalidate cached session slots and erase all durable Signal namespaces.
     fn erase_signal(&self) -> Result<()> {
+        self.validated_sessions.clear();
         // Belongs with the keys it names, so it goes when they do.
         remove_blob(&self.control, "latestsync")?;
         erase_namespace(&self.identities, "identity")?;
@@ -1126,6 +1177,7 @@ impl NvsStore {
         let mut s = self.lock();
         let count = self.flash.run(|flash| {
             let count = record_count(&flash.sessions)?;
+            flash.validated_sessions.clear();
             erase_namespace(&flash.sessions, "session")?;
             Ok(count)
         })?;

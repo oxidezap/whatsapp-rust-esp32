@@ -201,7 +201,8 @@ pub async fn run_maintenance(
         match initial {
             MaintenanceAction::Reset => {
                 log::info!("Maintenance: logging out before factory reset");
-                client.logout().await;
+                let report = client.logout().await;
+                log::info!("Maintenance: logout outcome: {report:?}");
                 logout_attempted = true;
             }
             MaintenanceAction::ClearSessions | MaintenanceAction::Reboot => {
@@ -225,7 +226,8 @@ pub async fn run_maintenance(
                         // once offline, but local credential removal remains safe.
                         if let Some(client) = &client {
                             log::info!("Maintenance: reset upgrade, attempting logout");
-                            client.logout().await;
+                            let report = client.logout().await;
+                            log::info!("Maintenance: logout outcome: {report:?}");
                         }
                         logout_attempted = true;
                     }

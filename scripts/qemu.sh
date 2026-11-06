@@ -17,7 +17,7 @@
 # Requirements beyond the normal build (see README "Test without hardware"):
 #   - Espressif's QEMU fork: qemu-system-xtensa for the S3 (QEMU_XTENSA env var,
 #     or on PATH), qemu-system-riscv32 for the C3 (QEMU_RISCV32)
-#   - esptool (pip install esptool) for elf2image / merge_bin
+#   - esptool (pip install esptool) for elf2image / merge-bin
 #   - esp-idf-nvs-partition-gen (pip) for the provisioning NVS image; the ESP-IDF
 #     python env under .embuild already has it and is used when present
 #   - the mock server reachable from the host on port 8080 for `test`
@@ -77,6 +77,7 @@ nvs_python() {
 
 flash_image() { echo "$OUT_DIR/flash_image-$1.bin"; }
 
+# Build the selected QEMU board with isolated outputs and shared ESP-IDF tools.
 cmd_build() {
     # A separate target dir keeps this build's ESP-IDF configuration (the overlay
     # changes sdkconfig, which reconfigures esp-idf-sys) from clobbering the board
@@ -86,7 +87,7 @@ cmd_build() {
     # ESP-IDF install dir) would land under target/, silently building a default
     # sdkconfig with no PSRAM and no Ethernet, and cloning a second multi-GB
     # ESP-IDF under target/.embuild. So everything is passed absolute, and the
-    # repo's own .embuild is shared; only the qemu flavor's ESP-IDF *build* lands
+    # repo's own .embuild/espressif is shared; only the qemu flavor's ESP-IDF *build* lands
     # under $TARGET_DIR. (partitions.csv is the one path that has to stay
     # relative; sdkconfig.qemu carries the deeper one.) ESP-IDF pulls in each
     # `<file>.<mcu>` right after the file that brought it in, so the chip
@@ -96,10 +97,10 @@ cmd_build() {
     ESP_IDF_VERSION="$BOARD_ESP_IDF_VERSION" \
     MCU="$BOARD" \
     ESP_IDF_SDKCONFIG_DEFAULTS="$(board_sdkconfig_defaults sdkconfig.qemu)" \
-    ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild" \
+    ESP_IDF_TOOLS_INSTALL_DIR="custom:$PWD/.embuild/espressif" \
     CARGO_WORKSPACE_DIR="$PWD" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo build --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
+        cargo build --locked --profile "$PROFILE" --target "$BOARD_TARGET" --features qemu
     test -f "$ELF"
 }
 
@@ -122,23 +123,24 @@ CSV
     echo "$out"
 }
 
+# Assemble firmware and provisioning partitions into a named flash image.
 cmd_image() {
     local name="${1:-a}"
     # esp-idf-sys drops the second-stage bootloader and the partition table next to
     # the ELF; the app image is derived from the ELF here. Offsets are the ESP32-S3
     # defaults (bootloader 0x0, partition table 0x8000, nvs 0x9000 and factory app
     # 0x10000 as in partitions.csv). QEMU requires the image to be exactly one of
-    # the sizes the emulated flash supports, hence --fill-flash-size. The
+    # the sizes the emulated flash supports, hence --pad-to-size. The
     # `wa_store` partition starts erased and is written by the firmware itself:
     # QEMU writes the emulated flash back to this file, which is what lets the
     # persistence test reboot the same image.
     local app="$OUT_DIR/whatsapp-esp32.bin" image nvs
     image="$(flash_image "$name")"
     log "elf2image -> $app"
-    "$ESPTOOL" --chip "$BOARD" elf2image --flash_size "$FLASH_SIZE" -o "$app" "$ELF"
+    "$ESPTOOL" --chip "$BOARD" elf2image --flash-size "$FLASH_SIZE" -o "$app" "$ELF"
     nvs="$(nvs_image "$name")"
-    log "merge_bin -> $image"
-    "$ESPTOOL" --chip "$BOARD" merge_bin --fill-flash-size "$FLASH_SIZE" -o "$image" \
+    log "merge-bin -> $image"
+    "$ESPTOOL" --chip "$BOARD" merge-bin --pad-to-size "$FLASH_SIZE" -o "$image" \
         0x0 "$OUT_DIR/bootloader.bin" \
         0x8000 "$OUT_DIR/partition-table.bin" \
         0x9000 "$nvs" \
@@ -272,9 +274,10 @@ check_crashes() {
     done
 }
 
+# Print the serial lines around the first connection or allocation failure.
 connection_context() {
     local serial="$1" line from
-    line=$(grep -n -m1 -E 'failed:|Failed to connect:|TLS connect failed:' "$serial" | cut -d: -f1) || true
+    line=$(grep -n -m1 -E 'failed:|Failed to connect:|TLS connect failed:|WS send error:|Dynamic Impl:.*failed|memory allocation of' "$serial" | cut -d: -f1) || true
     [[ -n "$line" ]] || return 0
     from=$(( line > 10 ? line - 10 : 1 ))
     log "--- first connection failure, serial lines $from-$((line + 5)) ---"
@@ -394,8 +397,30 @@ metrics_gate() {
     metric_floor "$metrics" stack_wa_nvs_min "$WA_NVS_MIN" || return 1
 }
 
+# Preserve failures and publish serial context even when a synchronous admin
+# request times out before the next crash/connection check can run.
+cmd_test_exit() {
+    local status=$? pid serial
+    stop_all || true
+    for pid in "${QEMU_PIDS[@]:-}"; do
+        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+    done
+    if (( status != 0 )); then
+        for serial in "${QEMU_SERIAL_LOGS[@]:-}"; do
+            [[ -f "$serial" ]] || continue
+            log "--- failure context: $serial ---"
+            if grep -q -E "$CRASH_RE" "$serial"; then
+                crash_context "$serial" || true
+            fi
+            connection_context "$serial" || true
+            tail -n 80 "$serial" >&2 || true
+        done
+    fi
+    return "$status"
+}
+
 cmd_test() {
-    trap stop_all EXIT
+    trap cmd_test_exit EXIT
     local port_a port_b
     port_a="$(board_port a)"
     port_b="$(board_port b)"

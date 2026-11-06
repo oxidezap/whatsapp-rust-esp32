@@ -1,4 +1,4 @@
-//! Global allocator routing the entire Rust heap to PSRAM.
+//! Global allocator preferring PSRAM or the unicore RV32IMC RTC heap.
 //!
 //! Opt-in: the library only defines the type. A firmware installs it with
 //!
@@ -9,8 +9,12 @@
 //! ```
 //!
 //! which is what `src/main.rs` does, and which the memory figures in the README
-//! assume. Without it the client still runs, but the internal-DRAM drain
-//! described below returns.
+//! assume. Other targets fall back to the default ESP-IDF heap.
+//!
+//! On unicore RV32IMC without PSRAM, prefer byte-accessible RTC FAST heap.
+//! Packing Rust objects there leaves larger DRAM blocks for TLS and NVS
+//! serialization. Other builds without PSRAM use the default heap instead;
+//! RTC FAST access is restricted to CPU0 on some chips.
 //!
 //! Internal DRAM (~300 KB) is the scarce resource and is the only place FreeRTOS
 //! objects (mutexes/semaphores, created lazily by `std::sync` primitives) and DMA
@@ -28,20 +32,33 @@ use esp_idf_svc::sys;
 /// See the module documentation.
 pub struct PsramAllocator;
 
+/// Choose byte-accessible PSRAM, unicore RV32IMC RTC RAM, or the default heap.
+fn preferred_caps() -> u32 {
+    if cfg!(esp_idf_spiram) {
+        return sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT;
+    }
+    #[cfg(target_arch = "riscv32")]
+    if cfg!(all(esp_idf_freertos_unicore, not(target_feature = "a"))) {
+        return sys::MALLOC_CAP_RTCRAM | sys::MALLOC_CAP_8BIT;
+    }
+    sys::MALLOC_CAP_DEFAULT
+}
+
 unsafe impl GlobalAlloc for PsramAllocator {
+    /// Honor the requested alignment and fall back when the preferred heap is full.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // aligned_alloc honors any power-of-two alignment Layout yields (plain
         // heap_caps_malloc only guarantees word alignment, too weak for align>4 types).
         // Clamp up to 4: over-aligning a 1/2-byte request is harmless and stays on the
         // well-trodden alignment path. heap_caps_free handles any alignment on dealloc.
         let align = layout.align().max(4);
-        let caps = sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT;
+        let caps = preferred_caps();
         let p = unsafe { sys::heap_caps_aligned_alloc(align, layout.size(), caps) } as *mut u8;
-        if !p.is_null() {
+        if !p.is_null() || caps == sys::MALLOC_CAP_DEFAULT {
             return p;
         }
-        // PSRAM exhausted, or called before PSRAM is mapped very early in boot: fall
-        // back to the default heap so an allocation never spuriously fails.
+        // The preferred arena may be full or not registered yet during startup.
+        // Fall back to the default heap without weakening Layout's alignment.
         unsafe {
             sys::heap_caps_aligned_alloc(align, layout.size(), sys::MALLOC_CAP_DEFAULT) as *mut u8
         }
@@ -53,6 +70,7 @@ unsafe impl GlobalAlloc for PsramAllocator {
         unsafe { sys::heap_caps_free(ptr as *mut core::ffi::c_void) };
     }
 
+    /// Resize in place when alignment permits, preserving the old block on failure.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // The default `realloc` is alloc + memcpy + free. TLSF can grow a block in
         // place (or absorb the free neighbour), and the receive path grows `Vec<u8>`
@@ -63,13 +81,13 @@ unsafe impl GlobalAlloc for PsramAllocator {
         if layout.align() > 4 {
             return unsafe { self.realloc_copy(ptr, layout, new_size) };
         }
-        let caps = sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT;
+        let caps = preferred_caps();
         let p = unsafe { sys::heap_caps_realloc(ptr as *mut core::ffi::c_void, new_size, caps) }
             as *mut u8;
-        if !p.is_null() {
+        if !p.is_null() || caps == sys::MALLOC_CAP_DEFAULT {
             return p;
         }
-        // Same fallback as `alloc`: PSRAM is full, so accept the default heap. On
+        // Same fallback as `alloc`: accept the default heap if the arena is full. On
         // failure `heap_caps_realloc` leaves the original block untouched, which is
         // what the `GlobalAlloc` contract requires of a failed `realloc`.
         unsafe {

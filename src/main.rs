@@ -36,15 +36,9 @@ use whatsapp_esp32::{
     crash, metrics, Esp32Executor, Esp32Runtime, Esp32TransportFactory, EspHttpClient, NvsStore,
 };
 
-// The whole Rust heap goes to PSRAM; internal DRAM is left to FreeRTOS, DMA
-// and mbedTLS. The library only defines the allocator, the firmware installs it.
-//
-// Only where the build has PSRAM. On the ESP32-C3 there is one heap and it is
-// internal DRAM, so `PsramAllocator` would ask `heap_caps_aligned_alloc` for
-// SPIRAM, get a null, and retry against the default heap on every single
-// allocation. Leaving it out means the plain ESP-IDF allocator, which is what
-// that fallback path reaches anyway.
-#[cfg(esp_idf_spiram)]
+// Keep Rust allocations in the preferred byte-accessible arena: PSRAM where
+// present, RTC FAST heap on unicore RV32IMC, otherwise the default ESP-IDF heap.
+// FreeRTOS stacks and DMA allocations retain their explicit capability flags.
 #[global_allocator]
 static ALLOCATOR: whatsapp_esp32::psram_alloc::PsramAllocator =
     whatsapp_esp32::psram_alloc::PsramAllocator;
@@ -693,6 +687,8 @@ async fn run_whatsapp(
 /// that saw the ban to the supervisor that sleeps it off.
 static TEMPORARY_BAN_WAIT: AtomicU32 = AtomicU32::new(0);
 
+/// Build and run one client generation with board-sized caches and admission.
+/// Return its terminal outcome so the supervisor can preserve or clear state.
 async fn run_whatsapp_inner(
     runtime: Esp32Runtime,
     backend: Arc<NvsStore>,
@@ -764,10 +760,20 @@ async fn run_whatsapp_inner(
         .skip_history_sync();
 
     #[cfg(feature = "mock-server")]
-    let builder = builder.with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
+    let builder = builder
+        // Match the SDK's E2E fixture. Mock sessions must not fetch a version
+        // from the real WhatsApp service before dialing the local server.
+        .with_version((2, 3000, 0))
+        .with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
 
     let builder = if !whatsapp_esp32::runtime::HAS_PSRAM {
         let mut config = whatsapp_rust::CacheConfig::default();
+        // Bound idle coordination metadata on internal RAM. These are soft
+        // caps: the SDK retains locks/lanes held by live tasks, preserving
+        // serialization even when a concurrent burst exceeds the budget.
+        config.session_locks_capacity = 16;
+        config.chat_lanes_capacity = 16;
+        config.group_distribution_locks_capacity = 8;
         config.app_state_downloads = whatsapp_rust::AppStateDownloadConfig::new(
             8192,
             std::num::NonZeroUsize::new(1).expect("one is nonzero"),
