@@ -74,8 +74,10 @@ starting encryption during that burst still exhausted internal RAM. The wait
 runs without holding HTTP admission so initialization can finish. After five
 seconds it proceeds to the shared gate even if inbound traffic stays active.
 Its async timer is allocated when the admin server starts, before login. The
-wait observes the existing HTTP cancellation flag and login state, and keeps
-the existing 30-second send deadline. PSRAM targets
+wait observes the existing HTTP cancellation flag and login state, including
+while queued at the gate, and keeps the existing 30-second send deadline. If
+timer initialization fails, only `/send` becomes unavailable with HTTP 503;
+read and maintenance routes remain available. PSRAM targets
 retain immediate admission.
 
 The no-PSRAM client also caps idle session locks and chat lanes at 16 entries,
