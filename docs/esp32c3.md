@@ -56,7 +56,10 @@ Plus, from `sdkconfig.defaults.esp32c3`: the ESP-IDF main task stack grows from
 separate `wa-main` thread), the default pthread stack
 drops from 32 KB to 8 KB, the Wi-Fi buffer counts from 10/32/32 to 4/8/8, and
 mbedTLS gets `DYNAMIC_BUFFER` plus asymmetric record buffers (16 KiB in, 512 B
-out) since it can no longer allocate from external memory.
+out) since it can no longer allocate from external memory. TCP send and receive
+windows are 2,880 bytes (two MSS-sized segments), limiting queued network data
+while Signal persistence is active. This trades throughput for internal RAM;
+full 16 KiB TLS records are still received over multiple TCP segments.
 
 The no-PSRAM client also caps idle session locks and chat lanes at 16 entries,
 and group-distribution locks at eight. The SDK's guarded eviction retains locks

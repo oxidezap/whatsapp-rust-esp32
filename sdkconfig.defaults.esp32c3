@@ -52,8 +52,12 @@ CONFIG_ESP_WIFI_NVS_ENABLED=y
 # the ESP-IDF default and leaves the gateway's TLS socket, DNS and SNTP room
 # beside it.
 CONFIG_LWIP_MAX_SOCKETS=10
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
-CONFIG_LWIP_TCP_WND_DEFAULT=5760
+# Two MSS-sized segments per direction. Four retained segments per socket
+# compete with Signal flushes until OpenETH cannot allocate an RX frame and
+# a TLS write times out waiting for an ACK. TCP still streams full TLS records;
+# this bounds in-flight bytes rather than reducing the TLS receive record cap.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2880
+CONFIG_LWIP_TCP_WND_DEFAULT=2880
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
