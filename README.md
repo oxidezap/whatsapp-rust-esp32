@@ -193,6 +193,12 @@ flags on them that `whatsapp-rust` does not enable. Needs Rust 1.95 or newer.
   `.embuild/`. A few GB, reused afterwards.
 - Host tools: `git`, `python3`, `cmake`, `ninja`, `clang`.
 
+The host dashboard JSON regression harness uses stable Rust 1.100.0. Firmware
+keeps the specialized `esp` toolchain above: Xtensa requires the Espressif
+compiler, and all ESP-IDF targets (including RISC-V C3/C5) rebuild `std`
+with Cargo's unstable `build-std`. Installing stable Rust alone does not
+remove that requirement. No `RUSTC_BOOTSTRAP` override is used.
+
 ## Configure
 
 ```bash
