@@ -193,6 +193,12 @@ flags on them that `whatsapp-rust` does not enable. Needs Rust 1.95 or newer.
   `.embuild/`. A few GB, reused afterwards.
 - Host tools: `git`, `python3`, `cmake`, `ninja`, `clang`.
 
+The host dashboard JSON regression harness uses stable Rust 1.100.0. Firmware
+keeps the specialized `esp` toolchain above: Xtensa requires the Espressif
+compiler, and all ESP-IDF targets (including RISC-V C3/C5) rebuild `std`
+with Cargo's unstable `build-std`. Installing stable Rust alone does not
+remove that requirement. No `RUSTC_BOOTSTRAP` override is used.
+
 ## Configure
 
 ```bash
@@ -523,3 +529,22 @@ xtensa-esp32s3-elf-addr2line -fCe target/xtensa-esp32s3-espidf/debug/whatsapp-es
 
 MIT, same as [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust).
 See [LICENSE](LICENSE).
+
+### Rust 1.100 host tooling
+
+The host harness keeps `async-lock` and `futures` as development dependencies:
+its imported firmware modules use them only under `cfg(test)`. They are still
+required for tests; Cargo's unused-dependency warning is not grounds to delete
+them. The shared firmware code remains compatible with ESP Rust 1.98.1.
+
+The artifact scripts use final `<target>/<triple>/<profile>` outputs, not
+Cargo's internal `deps`, fingerprints or build-script directory layout. The
+host job runs `cargo test` directly and does not locate its executable by path.
+The firmware cache includes the ESP version and retains its existing layout.
+
+`DropGuard`, stable allocator APIs and never-type rewrites have no concrete
+host-only use here. Introducing them into shared firmware would require a
+newer ESP compiler, so this update leaves those APIs and PSRAM allocation alone.
+Dependency cooldowns are a separate policy decision: they must allow urgent
+security updates and do not replace dependency security checks such as
+`cargo-deny`. No cooldown is enabled by this toolchain update.

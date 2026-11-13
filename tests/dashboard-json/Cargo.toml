@@ -9,7 +9,10 @@ publish = false
 [dependencies]
 bytes = "1"
 async-channel = "2"
-async-lock = "3"
-futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Only the cfg(test) modules imported from firmware use these crates.
+[dev-dependencies]
+async-lock = "3"
+futures = "0.3"
