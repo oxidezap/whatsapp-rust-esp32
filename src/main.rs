@@ -870,7 +870,7 @@ async fn run_whatsapp_inner(
                                 chat: inbound.info.source.chat.to_string(),
                                 sender: inbound.info.source.sender.to_string(),
                                 text: text.map(str::to_owned),
-                                timestamp: inbound.info.timestamp.timestamp(),
+                                timestamp: inbound.info.timestamp.as_secs(),
                                 from_me: inbound.info.source.is_from_me,
                             });
                             if text == Some(PING_TRIGGER) {
