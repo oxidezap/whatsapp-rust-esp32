@@ -175,7 +175,7 @@ impl EventHandler for ClientExitObserver {
             Event::LoggedOut(logout) if logout.raw.is_some() => ClientExit::PreserveCredentials,
             Event::TemporaryBan(ban) => {
                 self.temporary_ban_seconds.store(
-                    u32::try_from(ban.expire.num_seconds().max(0)).unwrap_or(u32::MAX),
+                    u32::try_from(ban.expire.as_secs()).unwrap_or(u32::MAX),
                     Ordering::Release,
                 );
                 ClientExit::TemporaryBan
