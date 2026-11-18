@@ -931,7 +931,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1774,7 +1774,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1787,7 +1787,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2082,7 +2082,7 @@ dependencies = [
  "getrandom",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2248,7 +2248,7 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 [[package]]
 name = "wacore"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "aes",
  "anyhow",
@@ -2295,7 +2295,7 @@ dependencies = [
 [[package]]
 name = "wacore-appstate"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "anyhow",
  "buffa",
@@ -2317,7 +2317,7 @@ dependencies = [
 [[package]]
 name = "wacore-binary"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "bytes",
  "compact_str",
@@ -2336,7 +2336,7 @@ dependencies = [
 [[package]]
 name = "wacore-derive"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2346,7 +2346,7 @@ dependencies = [
 [[package]]
 name = "wacore-libsignal"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2376,7 +2376,7 @@ dependencies = [
 [[package]]
 name = "wacore-noise"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "anyhow",
  "buffa",
@@ -2410,7 +2410,7 @@ dependencies = [
 [[package]]
 name = "waproto"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "buffa",
  "buffa-build",
@@ -2492,7 +2492,7 @@ dependencies = [
 [[package]]
 name = "whatsapp-rust"
 version = "0.7.0"
-source = "git+https://github.com/oxidezap/whatsapp-rust?rev=b75051c1917b5747a8da33c4d7753bd2bcb5dc6c#b75051c1917b5747a8da33c4d7753bd2bcb5dc6c"
+source = "git+https://github.com/oxidezap/whatsapp-rust?rev=acdd6dc68532bea42d23c092614558bbecff9bb9#acdd6dc68532bea42d23c092614558bbecff9bb9"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2544,7 +2544,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
