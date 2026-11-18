@@ -772,6 +772,7 @@ async fn run_whatsapp_inner(
         // caps: the SDK retains locks/lanes held by live tasks, preserving
         // serialization even when a concurrent burst exceeds the budget.
         config.session_locks_capacity = 16;
+        config.signal_cache_max_entries = Some(8);
         config.chat_lanes_capacity = 16;
         config.group_distribution_locks_capacity = 8;
         config.app_state_downloads = whatsapp_rust::AppStateDownloadConfig::new(
