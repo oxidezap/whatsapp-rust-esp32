@@ -74,7 +74,7 @@ bytes = "1.12"
 #
 # default-features = false drops tokio/sqlite/ureq/simd so the crate builds for ESP32.
 # Pinned main revision includes the merged receive-queue memory fix (#1862).
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "7e5c198e1a25ea405faa7a69a47bc727ea15484c", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "acdd6dc68532bea42d23c092614558bbecff9bb9", default-features = false }
 
 # Optimize for size even in debug: cuts binary from 9MB to ~3MB,
 # massively speeds up linking and flashing

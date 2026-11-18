@@ -175,7 +175,7 @@ impl EventHandler for ClientExitObserver {
             Event::LoggedOut(logout) if logout.raw.is_some() => ClientExit::PreserveCredentials,
             Event::TemporaryBan(ban) => {
                 self.temporary_ban_seconds.store(
-                    u32::try_from(ban.expire.num_seconds().max(0)).unwrap_or(u32::MAX),
+                    u32::try_from(ban.expire.as_secs()).unwrap_or(u32::MAX),
                     Ordering::Release,
                 );
                 ClientExit::TemporaryBan
@@ -772,6 +772,7 @@ async fn run_whatsapp_inner(
         // caps: the SDK retains locks/lanes held by live tasks, preserving
         // serialization even when a concurrent burst exceeds the budget.
         config.session_locks_capacity = 16;
+        config.signal_cache_max_entries = Some(8);
         config.chat_lanes_capacity = 16;
         config.group_distribution_locks_capacity = 8;
         config.app_state_downloads = whatsapp_rust::AppStateDownloadConfig::new(
@@ -870,7 +871,7 @@ async fn run_whatsapp_inner(
                                 chat: inbound.info.source.chat.to_string(),
                                 sender: inbound.info.source.sender.to_string(),
                                 text: text.map(str::to_owned),
-                                timestamp: inbound.info.timestamp.timestamp(),
+                                timestamp: inbound.info.timestamp.as_secs(),
                                 from_me: inbound.info.source.is_from_me,
                             });
                             if text == Some(PING_TRIGGER) {
