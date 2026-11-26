@@ -13,7 +13,7 @@ use crate::transport::EspTlsStream;
 mod http_chunked;
 use http_chunked::ChunkedReader;
 
-mod error;
+pub(crate) mod error;
 mod memory_gate;
 pub use memory_gate::{MemoryGate, MemoryPermit};
 
@@ -196,7 +196,7 @@ impl HttpClient for EspHttpClient {
 
 fn into_http_error(error: anyhow::Error) -> HttpError {
     let timeout = error::is_timeout(error.as_ref());
-    let source = error.into_boxed_dyn_error();
+    let source = error::box_cause(error);
     if timeout {
         HttpError::timeout(source)
     } else {

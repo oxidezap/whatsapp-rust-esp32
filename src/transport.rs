@@ -73,8 +73,25 @@ impl EspTlsStream {
         };
 
         if ret != 1 {
+            let mut handle = std::ptr::null_mut();
+            let last_error = unsafe {
+                if esp_idf_svc::sys::esp_tls_get_error_handle(tls, &mut handle) == 0
+                    && !handle.is_null()
+                {
+                    esp_idf_svc::sys::esp_tls_get_and_clear_last_error(
+                        handle,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                } else {
+                    0
+                }
+            };
             unsafe { esp_idf_svc::sys::esp_tls_conn_destroy(tls) };
-            return Err(anyhow!("TLS connection failed (ret={})", ret));
+            return Err(crate::http_client::error::tls_connect_error(
+                ret,
+                last_error == esp_idf_svc::sys::ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT,
+            ));
         }
 
         Ok(Self { tls })
@@ -208,7 +225,7 @@ impl Transport for Esp32Transport {
                 .map_err(anyhow::Error::msg)
         }
         .await;
-        result.map_err(anyhow::Error::into_boxed_dyn_error)
+        result.map_err(crate::http_client::error::box_cause)
     }
 
     async fn disconnect(&self) {
@@ -301,7 +318,7 @@ impl TransportFactory for Esp32TransportFactory {
         crate::runtime::spawn_thread(&self.thread, move || {
             ws_thread(event_tx, data_rx, shutdown_clone, &ws_url, skip_tls);
         })
-        .map_err(anyhow::Error::into_boxed_dyn_error)?;
+        .map_err(crate::http_client::error::box_cause)?;
 
         let transport = Arc::new(Esp32Transport { data_tx, shutdown });
         Ok((transport, event_rx))
