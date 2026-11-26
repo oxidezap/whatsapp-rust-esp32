@@ -142,16 +142,17 @@ pub struct BlockingWorker {
 }
 
 impl BlockingWorker {
-    /// The thread [`BlockingWorker::start`] creates: 32 KiB of stack (16 KiB
+    /// The thread [`BlockingWorker::start`] creates: 32 KiB of stack (28 KiB
     /// without PSRAM), pinned to core 0 below the network and executor threads
     /// (priority 5) so a long key batch never delays a socket read, and above
     /// idle, which the task watchdog must therefore not check on that core.
-    /// The current SDK left only 152 bytes unused on the old 14 KiB stack
-    /// during the C3 messaging workload; retain the 512-byte test floor.
+    /// Streaming app-state media decryption allocates an authenticated frame
+    /// and cipher context peaking at ~22 KiB; 28 KiB preserves the 512-byte
+    /// E2E floor with comfortable margin.
     pub fn default_thread_config() -> ThreadSpawnConfiguration {
         ThreadSpawnConfiguration {
             name: Some(c"wa-blocking"),
-            stack_size: by_ram(32 * 1024, 16 * 1024),
+            stack_size: by_ram(32 * 1024, 28 * 1024),
             priority: 1,
             inherit: false,
             pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),

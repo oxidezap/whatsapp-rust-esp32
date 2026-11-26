@@ -37,7 +37,7 @@ C3 differs from the others in the deepest possible way.
 | Item | PSRAM | ESP32-C3 | Why |
 | --- | --- | --- | --- |
 | `wa-main` executor stack | 256 KB | no separate thread: the executor runs on the 40 KiB IDF main task | `CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960`; preserve the 2,048-byte E2E floor. Library consumers retain the conservative 48 KiB thread default. |
-| `wa-blocking` worker stack | 32 KB | 16 KiB | The current SDK left only 152 bytes unused on the old 14 KiB stack during sync/messaging. Preserve the 512-byte E2E floor. |
+| `wa-blocking` worker stack | 32 KB | 28 KiB | Streaming app-state media decryption allocates an authenticated frame and cipher context peaking at ~22 KiB. Preserve the 512-byte E2E floor with margin. |
 | `ws-transport` stack | 16 KB | 6 KB | mbedTLS records and the crate's own WebSocket framing (`ws`); neither recurses. Measured peak 5,640 B. |
 | `wa-nvs` worker stack | 32 KB | 4 KB | Internal DRAM on every board (see below). Measured peak 2,596 B. |
 | WebSocket frame / message cap | 16 MiB / 64 MiB | 32 KB / 32 KB | Above the largest legitimate message (28,204 B). Refused from the frame header, before any allocation. See below. |
