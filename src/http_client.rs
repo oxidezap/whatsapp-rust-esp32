@@ -13,6 +13,7 @@ use crate::transport::EspTlsStream;
 mod http_chunked;
 use http_chunked::ChunkedReader;
 
+mod error;
 mod memory_gate;
 pub use memory_gate::{MemoryGate, MemoryPermit};
 
@@ -153,7 +154,7 @@ impl HttpClient for EspHttpClient {
             response
         }
         .await;
-        result.map_err(|error| HttpError::from_boxed(error.into_boxed_dyn_error()))
+        result.map_err(into_http_error)
     }
 
     /// Advertised so upstream streams media straight into its decryptor instead
@@ -189,7 +190,17 @@ impl HttpClient for EspHttpClient {
             let stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
             do_streaming_request(stream, &raw_request)
         })();
-        result.map_err(|error| HttpError::from_boxed(error.into_boxed_dyn_error()))
+        result.map_err(into_http_error)
+    }
+}
+
+fn into_http_error(error: anyhow::Error) -> HttpError {
+    let timeout = error::is_timeout(error.as_ref());
+    let source = error.into_boxed_dyn_error();
+    if timeout {
+        HttpError::timeout(source)
+    } else {
+        HttpError::from_boxed(source)
     }
 }
 
@@ -396,7 +407,8 @@ fn do_request(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                anyhow::bail!("HTTP response timed out after {HTTP_IO_TIMEOUT:?}");
+                return Err(anyhow::Error::new(e)
+                    .context(format!("HTTP response timed out after {HTTP_IO_TIMEOUT:?}")));
             }
             Err(e) => return Err(e.into()),
         }
