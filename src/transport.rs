@@ -188,23 +188,27 @@ impl Drop for Esp32Transport {
 
 #[async_trait]
 impl Transport for Esp32Transport {
-    async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
-        // Enqueue without blocking the executor, then await the actual write.
-        // Queue acceptance must not release the core's next Noise batch while
-        // this one still retains its shared output allocation in another task.
-        let (job, completed) = WriteJob::new(data);
-        self.data_tx.try_send(job).map_err(|error| match error {
-            std::sync::mpsc::TrySendError::Full(_) => {
-                anyhow!("Transport send queue full (capacity {SEND_QUEUE_CAP})")
-            }
-            std::sync::mpsc::TrySendError::Disconnected(_) => {
-                anyhow!("Transport channel closed")
-            }
-        })?;
-        completed
-            .await
-            .map_err(|_| anyhow!("Transport stopped before write completion"))?
-            .map_err(anyhow::Error::msg)
+    async fn send(&self, data: Bytes) -> Result<(), whatsapp_rust::wacore::net::TransportError> {
+        let result: anyhow::Result<_> = async {
+            // Enqueue without blocking the executor, then await the actual write.
+            // Queue acceptance must not release the core's next Noise batch while
+            // this one still retains its shared output allocation in another task.
+            let (job, completed) = WriteJob::new(data);
+            self.data_tx.try_send(job).map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    anyhow!("Transport send queue full (capacity {SEND_QUEUE_CAP})")
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    anyhow!("Transport channel closed")
+                }
+            })?;
+            completed
+                .await
+                .map_err(|_| anyhow!("Transport stopped before write completion"))?
+                .map_err(anyhow::Error::msg)
+        }
+        .await;
+        result.map_err(anyhow::Error::into_boxed_dyn_error)
     }
 
     async fn disconnect(&self) {
@@ -267,7 +271,10 @@ impl Default for Esp32TransportFactory {
 impl TransportFactory for Esp32TransportFactory {
     async fn create_transport(
         &self,
-    ) -> Result<(Arc<dyn Transport>, async_channel::Receiver<TransportEvent>), anyhow::Error> {
+    ) -> Result<
+        (Arc<dyn Transport>, async_channel::Receiver<TransportEvent>),
+        whatsapp_rust::wacore::net::TransportError,
+    > {
         // Inbound events carry whole frames (up to the 32 KB read cap). An
         // unbounded channel lets the socket thread queue an entire burst
         // ahead of the executor -- tens of KB of peak heap the C3 does not
@@ -293,7 +300,8 @@ impl TransportFactory for Esp32TransportFactory {
         let skip_tls = self.skip_tls_verify;
         crate::runtime::spawn_thread(&self.thread, move || {
             ws_thread(event_tx, data_rx, shutdown_clone, &ws_url, skip_tls);
-        })?;
+        })
+        .map_err(anyhow::Error::into_boxed_dyn_error)?;
 
         let transport = Arc::new(Esp32Transport { data_tx, shutdown });
         Ok((transport, event_rx))
