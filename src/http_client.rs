@@ -4,7 +4,7 @@ use std::net::ToSocketAddrs;
 use anyhow::Result;
 use whatsapp_rust::async_trait;
 use whatsapp_rust::wacore::net::{
-    HttpClient, HttpRequest, HttpResponse, StreamingHttpResponse, StreamingRequestPermit,
+    HttpClient, HttpError, HttpRequest, HttpResponse, StreamingHttpResponse, StreamingRequestPermit,
 };
 
 use crate::transport::EspTlsStream;
@@ -13,6 +13,7 @@ use crate::transport::EspTlsStream;
 mod http_chunked;
 use http_chunked::ChunkedReader;
 
+pub(crate) mod error;
 mod memory_gate;
 pub use memory_gate::{MemoryGate, MemoryPermit};
 
@@ -112,44 +113,48 @@ impl Default for EspHttpClient {
 
 #[async_trait]
 impl HttpClient for EspHttpClient {
-    async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
-        let _admission = match &self.memory_gate {
-            Some(gate) => Some(gate.acquire().await),
-            None => None,
-        };
-        const MIN_HEAP_FOR_BUFFERED_FETCH: usize = 32 * 1024;
-        let (free, _) = crate::metrics::heap_now();
-        if free < MIN_HEAP_FOR_BUFFERED_FETCH {
-            anyhow::bail!(
-                "refusing buffered fetch of {} with only {free} heap free",
-                request.url
-            );
-        }
-        let (host, port, path, use_tls) = parse_url(&request.url)?;
-        // The Host header keeps the URL's own authority; only the address dialed
-        // is remapped under QEMU.
-        let raw_request = build_raw_request(
-            &request.method,
-            &path,
-            &host,
-            &request.headers,
-            request.body.as_deref(),
-        )?;
+    async fn execute(&self, request: HttpRequest) -> std::result::Result<HttpResponse, HttpError> {
+        let result: anyhow::Result<_> = async {
+            let _admission = match &self.memory_gate {
+                Some(gate) => Some(gate.acquire().await),
+                None => None,
+            };
+            const MIN_HEAP_FOR_BUFFERED_FETCH: usize = 32 * 1024;
+            let (free, _) = crate::metrics::heap_now();
+            if free < MIN_HEAP_FOR_BUFFERED_FETCH {
+                anyhow::bail!(
+                    "refusing buffered fetch of {} with only {free} heap free",
+                    request.url
+                );
+            }
+            let (host, port, path, use_tls) = parse_url(&request.url)?;
+            // The Host header keeps the URL's own authority; only the address dialed
+            // is remapped under QEMU.
+            let raw_request = build_raw_request(
+                &request.method,
+                &path,
+                &host,
+                &request.headers,
+                request.body.as_deref(),
+            )?;
 
-        let dial = qemu_host(host);
-        let response = (|| {
-            let mut stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
-            do_request(&mut stream, &raw_request, request.body.as_deref())
-        })();
-        if let Err(error) = &response {
-            log::error!(
-                "HTTP {} {}:{} failed: {error:#}",
-                request.method,
-                dial,
-                port
-            );
+            let dial = qemu_host(host);
+            let response = (|| {
+                let mut stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
+                do_request(&mut stream, &raw_request, request.body.as_deref())
+            })();
+            if let Err(error) = &response {
+                log::error!(
+                    "HTTP {} {}:{} failed: {error:#}",
+                    request.method,
+                    dial,
+                    port
+                );
+            }
+            response
         }
-        response
+        .await;
+        result.map_err(into_http_error)
     }
 
     /// Advertised so upstream streams media straight into its decryptor instead
@@ -160,20 +165,42 @@ impl HttpClient for EspHttpClient {
 
     fn streaming_admission(
         &self,
-    ) -> Option<whatsapp_rust::wacore::runtime::BoxFuture<'_, Result<StreamingRequestPermit>>> {
+    ) -> Option<
+        whatsapp_rust::wacore::runtime::BoxFuture<
+            '_,
+            std::result::Result<StreamingRequestPermit, HttpError>,
+        >,
+    > {
         let gate = self.memory_gate.as_ref()?.clone();
         Some(Box::pin(async move {
             Ok(Box::new(gate.acquire().await) as StreamingRequestPermit)
         }))
     }
 
-    fn execute_streaming(&self, request: HttpRequest) -> Result<StreamingHttpResponse> {
-        let (host, port, path, use_tls) = parse_url(&request.url)?;
-        let raw_request = build_raw_request(&request.method, &path, &host, &request.headers, None)?;
+    fn execute_streaming(
+        &self,
+        request: HttpRequest,
+    ) -> std::result::Result<StreamingHttpResponse, HttpError> {
+        let result: anyhow::Result<_> = (|| {
+            let (host, port, path, use_tls) = parse_url(&request.url)?;
+            let raw_request =
+                build_raw_request(&request.method, &path, &host, &request.headers, None)?;
 
-        let dial = qemu_host(host);
-        let stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
-        do_streaming_request(stream, &raw_request)
+            let dial = qemu_host(host);
+            let stream = connect_stream(&dial, port, use_tls, self.skip_tls_verify)?;
+            do_streaming_request(stream, &raw_request)
+        })();
+        result.map_err(into_http_error)
+    }
+}
+
+fn into_http_error(error: anyhow::Error) -> HttpError {
+    let timeout = error::is_timeout(error.as_ref());
+    let source = error::box_cause(error);
+    if timeout {
+        HttpError::timeout(source)
+    } else {
+        HttpError::from_boxed(source)
     }
 }
 
@@ -380,7 +407,8 @@ fn do_request(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                anyhow::bail!("HTTP response timed out after {HTTP_IO_TIMEOUT:?}");
+                return Err(anyhow::Error::new(e)
+                    .context(format!("HTTP response timed out after {HTTP_IO_TIMEOUT:?}")));
             }
             Err(e) => return Err(e.into()),
         }

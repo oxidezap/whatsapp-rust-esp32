@@ -73,8 +73,25 @@ impl EspTlsStream {
         };
 
         if ret != 1 {
+            let mut handle = std::ptr::null_mut();
+            let last_error = unsafe {
+                if esp_idf_svc::sys::esp_tls_get_error_handle(tls, &mut handle) == 0
+                    && !handle.is_null()
+                {
+                    esp_idf_svc::sys::esp_tls_get_and_clear_last_error(
+                        handle,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                } else {
+                    0
+                }
+            };
             unsafe { esp_idf_svc::sys::esp_tls_conn_destroy(tls) };
-            return Err(anyhow!("TLS connection failed (ret={})", ret));
+            return Err(crate::http_client::error::tls_connect_error(
+                ret,
+                last_error == esp_idf_svc::sys::ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT,
+            ));
         }
 
         Ok(Self { tls })
@@ -188,23 +205,27 @@ impl Drop for Esp32Transport {
 
 #[async_trait]
 impl Transport for Esp32Transport {
-    async fn send(&self, data: Bytes) -> Result<(), anyhow::Error> {
-        // Enqueue without blocking the executor, then await the actual write.
-        // Queue acceptance must not release the core's next Noise batch while
-        // this one still retains its shared output allocation in another task.
-        let (job, completed) = WriteJob::new(data);
-        self.data_tx.try_send(job).map_err(|error| match error {
-            std::sync::mpsc::TrySendError::Full(_) => {
-                anyhow!("Transport send queue full (capacity {SEND_QUEUE_CAP})")
-            }
-            std::sync::mpsc::TrySendError::Disconnected(_) => {
-                anyhow!("Transport channel closed")
-            }
-        })?;
-        completed
-            .await
-            .map_err(|_| anyhow!("Transport stopped before write completion"))?
-            .map_err(anyhow::Error::msg)
+    async fn send(&self, data: Bytes) -> Result<(), whatsapp_rust::wacore::net::TransportError> {
+        let result: anyhow::Result<_> = async {
+            // Enqueue without blocking the executor, then await the actual write.
+            // Queue acceptance must not release the core's next Noise batch while
+            // this one still retains its shared output allocation in another task.
+            let (job, completed) = WriteJob::new(data);
+            self.data_tx.try_send(job).map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    anyhow!("Transport send queue full (capacity {SEND_QUEUE_CAP})")
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    anyhow!("Transport channel closed")
+                }
+            })?;
+            completed
+                .await
+                .map_err(|_| anyhow!("Transport stopped before write completion"))?
+                .map_err(anyhow::Error::msg)
+        }
+        .await;
+        result.map_err(crate::http_client::error::box_cause)
     }
 
     async fn disconnect(&self) {
@@ -267,7 +288,10 @@ impl Default for Esp32TransportFactory {
 impl TransportFactory for Esp32TransportFactory {
     async fn create_transport(
         &self,
-    ) -> Result<(Arc<dyn Transport>, async_channel::Receiver<TransportEvent>), anyhow::Error> {
+    ) -> Result<
+        (Arc<dyn Transport>, async_channel::Receiver<TransportEvent>),
+        whatsapp_rust::wacore::net::TransportError,
+    > {
         // Inbound events carry whole frames (up to the 32 KB read cap). An
         // unbounded channel lets the socket thread queue an entire burst
         // ahead of the executor -- tens of KB of peak heap the C3 does not
@@ -293,7 +317,8 @@ impl TransportFactory for Esp32TransportFactory {
         let skip_tls = self.skip_tls_verify;
         crate::runtime::spawn_thread(&self.thread, move || {
             ws_thread(event_tx, data_rx, shutdown_clone, &ws_url, skip_tls);
-        })?;
+        })
+        .map_err(crate::http_client::error::box_cause)?;
 
         let transport = Arc::new(Esp32Transport { data_tx, shutdown });
         Ok((transport, event_rx))
