@@ -76,7 +76,7 @@ No wrapper around `Bot` and no ESP32 event type. You write the same
 # Both from git, at the same whatsapp-rust revision this crate's Cargo.toml
 # names. Two different whatsapp_rust copies in one build would hand the Bot
 # builder trait objects the platform types do not implement.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "ee64d35bcd3b996aa6ea366b213170875d6bbeca", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "a106d2a7ab64d6ddd9a87097dc8a67fb89a416b8", default-features = false }
 whatsapp-esp32 = { git = "https://github.com/oxidezap/whatsapp-rust-esp32", default-features = false }
 esp-idf-svc = { version = "0.53", features = ["binstart", "critical-section"] }
 anyhow = "1"
