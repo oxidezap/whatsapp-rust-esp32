@@ -76,7 +76,7 @@ No wrapper around `Bot` and no ESP32 event type. You write the same
 # Both from git, at the same whatsapp-rust revision this crate's Cargo.toml
 # names. Two different whatsapp_rust copies in one build would hand the Bot
 # builder trait objects the platform types do not implement.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "7e5c198e1a25ea405faa7a69a47bc727ea15484c", default-features = false }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "287e5344b90f30025dcecfd83325459cf88c7b8c", default-features = false }
 whatsapp-esp32 = { git = "https://github.com/oxidezap/whatsapp-rust-esp32", default-features = false }
 esp-idf-svc = { version = "0.53", features = ["binstart", "critical-section"] }
 anyhow = "1"
@@ -175,7 +175,7 @@ below idle priority. And time, because the Noise handshake needs a roughly
 correct clock, so SNTP starts before the first connect.
 
 One upstream dependency is enough since `whatsapp-rust` 0.7.0. It re-exports
-`wacore`, `waproto`, `buffa` and the shared crates, so they can never drift out
+`wacore`, `waproto` and the shared crates, so they can never drift out
 of sync. Pin the same git revision this crate names, with
 `default-features = false` to drop the desktop-only pieces (tokio, SQLite,
 ureq, SIMD). `anyhow` and `futures` stay direct because this crate needs feature
