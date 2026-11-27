@@ -11,7 +11,7 @@ use esp_idf_svc::{
 use log::{error, info, warn};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
-// Single upstream dependency: whatsapp-rust re-exports wacore/waproto/buffa and
+// Single upstream dependency: whatsapp-rust re-exports wacore/waproto and
 // the shared support crates, so there is no way for them to drift out of sync.
 use whatsapp_esp32::http_client::MemoryGate;
 use whatsapp_rust::bytes;
